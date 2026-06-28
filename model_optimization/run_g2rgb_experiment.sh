@@ -23,6 +23,13 @@ HIDDEN="${HIDDEN:-16}"
 BLOCKS="${BLOCKS:-2}"
 ALPHA="${ALPHA:-0.1}"
 LR="${LR:-0.001}"
+EXTRA_TRAIN_ARGS=()
+if [[ "${STRONG_MONOSIM:-0}" == "1" ]]; then
+  EXTRA_TRAIN_ARGS+=(--strong-monosim)
+fi
+if [[ "${USE_5X5_BRANCH:-0}" == "1" ]]; then
+  EXTRA_TRAIN_ARGS+=(--use-5x5-branch)
+fi
 
 python scripts/train_g2rgb_adapter.py \
   --source "$TRAIN_IMAGES" \
@@ -38,7 +45,8 @@ python scripts/train_g2rgb_adapter.py \
   --hidden "$HIDDEN" \
   --blocks "$BLOCKS" \
   --alpha "$ALPHA" \
-  --lr "$LR"
+  --lr "$LR" \
+  "${EXTRA_TRAIN_ARGS[@]}"
 
 python scripts/evaluate_gray_adapters_coco.py \
   --images "$VAL_IMAGES" \
