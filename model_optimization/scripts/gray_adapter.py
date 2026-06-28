@@ -171,6 +171,124 @@ class SpatialGrayAdapter(nn.Module):
         }
 
 
+class ResidualBlock(nn.Module):
+    """Small Conv-BN-ReLU residual block used by the G2RGB adapter."""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+        )
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(x + self.net(x))
+
+
+class G2RGBResidualAdapter(nn.Module):
+    """Residual gray-to-pseudo-RGB adapter for frozen RGB-pretrained YOLOv8n.
+
+    The module starts as the current GGG baseline because the final projection
+    is zero-initialized. Training only learns a bounded residual correction:
+    output = repeat(gray) + alpha * residual(gray).
+    """
+
+    adapter_type = "g2rgb_residual"
+
+    def __init__(
+        self,
+        hidden: int = 16,
+        blocks: int = 2,
+        alpha: float = 0.1,
+        use_5x5_branch: bool = False,
+    ) -> None:
+        super().__init__()
+        if hidden <= 0:
+            raise ValueError("hidden must be positive")
+        if blocks < 0:
+            raise ValueError("blocks must be non-negative")
+        self.hidden = int(hidden)
+        self.blocks = int(blocks)
+        self.alpha = float(alpha)
+        self.use_5x5_branch = bool(use_5x5_branch)
+
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, hidden, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True),
+        )
+        self.blocks_net = nn.Sequential(*(ResidualBlock(hidden) for _ in range(blocks)))
+
+        branch_channels = max(4, hidden // 2)
+        self.branch_1x1 = nn.Conv2d(hidden, branch_channels, kernel_size=1, bias=False)
+        self.branch_3x3 = nn.Conv2d(hidden, branch_channels, kernel_size=3, padding=1, bias=False)
+        if self.use_5x5_branch:
+            self.branch_5x5 = nn.Conv2d(hidden, branch_channels, kernel_size=5, padding=2, bias=False)
+            fused_channels = branch_channels * 3
+        else:
+            self.branch_5x5 = None
+            fused_channels = branch_channels * 2
+
+        self.fuse = nn.Sequential(
+            nn.Conv2d(fused_channels, branch_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(branch_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.out_conv = nn.Conv2d(branch_channels, 3, kernel_size=1, bias=True)
+        nn.init.zeros_(self.out_conv.weight)
+        nn.init.zeros_(self.out_conv.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gray = x.clamp(0.0, 1.0)
+        base = gray.repeat(1, 3, 1, 1)
+        return (base + self.alpha * self.residual(gray)).clamp(0.0, 1.0)
+
+    def residual(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the unscaled 3-channel residual for regularization."""
+        gray = x.clamp(0.0, 1.0)
+        feat = self.blocks_net(self.stem(gray))
+        branches = [self.branch_1x1(feat), self.branch_3x3(feat)]
+        if self.branch_5x5 is not None:
+            branches.append(self.branch_5x5(feat))
+        return self.out_conv(self.fuse(torch.cat(branches, dim=1)))
+
+    def luminance_loss(self, gray: torch.Tensor) -> torch.Tensor:
+        """Constrain adapted pseudo-RGB luminance to preserve input geometry."""
+        adapted = self.forward(gray)
+        weights = torch.tensor([0.299, 0.587, 0.114], dtype=adapted.dtype, device=adapted.device).view(1, 3, 1, 1)
+        luminance = (adapted * weights).sum(dim=1, keepdim=True)
+        return F.l1_loss(luminance, gray.clamp(0.0, 1.0))
+
+    def regularization_loss(self, gray: torch.Tensor | None = None) -> torch.Tensor:
+        if gray is None:
+            return torch.zeros((), device=next(self.parameters()).device)
+        return self.residual(gray).abs().mean()
+
+    def metadata(self) -> Dict[str, Any]:
+        return {
+            "adapter_type": self.adapter_type,
+            "deploy_mode": "onnx_conv_residual",
+            "hidden": self.hidden,
+            "blocks": self.blocks,
+            "alpha": self.alpha,
+            "use_5x5_branch": self.use_5x5_branch,
+            "initial_state": "equivalent_to_gray_replicate",
+            "operators": ["Conv", "BatchNormalization", "Relu", "Add", "Mul", "Concat"],
+        }
+
+    def init_config(self) -> Dict[str, Any]:
+        return {
+            "hidden": self.hidden,
+            "blocks": self.blocks,
+            "alpha": self.alpha,
+            "use_5x5_branch": self.use_5x5_branch,
+        }
+
+
 class AdaptedYolo(nn.Module):
     def __init__(self, adapter: nn.Module, yolo_model: nn.Module) -> None:
         super().__init__()
@@ -181,7 +299,7 @@ class AdaptedYolo(nn.Module):
         return self.yolo_model(self.adapter(gray))
 
 
-def build_adapter(adapter_type: str) -> nn.Module:
+def build_adapter(adapter_type: str, **kwargs: Any) -> nn.Module:
     if adapter_type == "ggg":
         return FixedReplicateAdapter()
     if adapter_type == "lut":
@@ -190,6 +308,8 @@ def build_adapter(adapter_type: str) -> nn.Module:
         return ConvGrayChannelAdapter()
     if adapter_type == "spatial":
         return SpatialGrayAdapter()
+    if adapter_type == "g2rgb_residual":
+        return G2RGBResidualAdapter(**kwargs)
     raise ValueError(f"unknown adapter type: {adapter_type}")
 
 
@@ -231,7 +351,10 @@ def save_adapter_bundle(adapter: nn.Module, path: Path, extra_meta: Dict[str, An
     path.parent.mkdir(parents=True, exist_ok=True)
     state_path = path.with_suffix(".pt")
     meta_path = path.with_suffix(".json")
-    torch.save({"adapter_type": getattr(adapter, "adapter_type", "unknown"), "state_dict": adapter.state_dict()}, state_path)
+    ckpt: Dict[str, Any] = {"adapter_type": getattr(adapter, "adapter_type", "unknown"), "state_dict": adapter.state_dict()}
+    if hasattr(adapter, "init_config"):
+        ckpt["init_config"] = adapter.init_config()
+    torch.save(ckpt, state_path)
     meta = dict(extra_meta)
     if hasattr(adapter, "metadata"):
         meta.update(adapter.metadata())
@@ -240,6 +363,6 @@ def save_adapter_bundle(adapter: nn.Module, path: Path, extra_meta: Dict[str, An
 
 def load_adapter_bundle(path: Path, map_location: str | torch.device = "cpu") -> nn.Module:
     ckpt = torch.load(path, map_location=map_location)
-    adapter = build_adapter(str(ckpt["adapter_type"]))
+    adapter = build_adapter(str(ckpt["adapter_type"]), **dict(ckpt.get("init_config", {})))
     adapter.load_state_dict(ckpt["state_dict"])
     return adapter

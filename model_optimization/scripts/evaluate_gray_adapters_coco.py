@@ -56,6 +56,7 @@ VARIANT_COLORS = {
     "lut": (76, 160, 84),
     "conv": (224, 133, 52),
     "spatial": (156, 95, 181),
+    "g2rgb": (210, 88, 120),
 }
 GT_COLOR = (0, 210, 220)
 
@@ -71,13 +72,14 @@ class Detection:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate gray-copy, LUT adapter, and Conv adapter against COCO ground truth.")
+    p = argparse.ArgumentParser(description="Evaluate gray-copy and gray adapter variants against COCO ground truth.")
     p.add_argument("--images", required=True, type=Path, help="COCO val2017 image directory.")
     p.add_argument("--annotations", required=True, type=Path, help="instances_val2017.json.")
     p.add_argument("--weights", required=True, type=Path, help="YOLOv8n .pt weights.")
     p.add_argument("--lut-adapter", type=Path, help="gray_adapter_lut/gray_adapter.pt.")
     p.add_argument("--conv-adapter", type=Path, help="gray_adapter_conv/gray_adapter.pt.")
     p.add_argument("--spatial-adapter", type=Path, help="spatial gray_adapter.pt.")
+    p.add_argument("--g2rgb-adapter", type=Path, help="G2RGB residual adapter .pt.")
     p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--imgsz", type=int, default=384)
     p.add_argument("--conf", type=float, default=0.001, help="Low confidence for COCO mAP. Use 0.001 for standard eval.")
@@ -87,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="cpu")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--max-images", type=int, default=0, help="0 means all available images.")
-    p.add_argument("--variants", default="baseline,lut,conv", help="Comma-separated subset: baseline,lut,conv.")
+    p.add_argument("--variants", default="baseline,lut,conv", help="Comma-separated subset: baseline,lut,conv,spatial,g2rgb.")
     p.add_argument("--save-visuals", type=int, default=24, help="Number of top true-improvement side-by-side images to save.")
     p.add_argument("--save-input-samples", type=int, default=12, help="Save actual YOLO input images per variant for audit.")
     return p.parse_args()
@@ -101,6 +103,8 @@ def require_files(args: argparse.Namespace) -> None:
         missing.append(args.conv_adapter or Path("<missing conv adapter>"))
     if "spatial" in args.variants.split(",") and (not args.spatial_adapter or not args.spatial_adapter.exists()):
         missing.append(args.spatial_adapter or Path("<missing spatial adapter>"))
+    if "g2rgb" in args.variants.split(",") and (not args.g2rgb_adapter or not args.g2rgb_adapter.exists()):
+        missing.append(args.g2rgb_adapter or Path("<missing g2rgb adapter>"))
     if missing:
         joined = "\n".join(f"  - {p}" for p in missing)
         raise FileNotFoundError(f"missing required input:\n{joined}")
@@ -430,6 +434,8 @@ def main() -> None:
         adapters["conv"] = load_adapter_bundle(args.conv_adapter, map_location="cpu").eval()
     if "spatial" in variants:
         adapters["spatial"] = load_adapter_bundle(args.spatial_adapter, map_location="cpu").eval()
+    if "g2rgb" in variants:
+        adapters["g2rgb"] = load_adapter_bundle(args.g2rgb_adapter, map_location="cpu").eval()
 
     model = YOLO(str(args.weights))
 
@@ -448,7 +454,7 @@ def main() -> None:
             "max_images": args.max_images,
             "evaluated_images": len(images),
             "variants": variants,
-            "input_mode": "All variants convert the original RGB dataset image to single-channel grayscale first. Baseline then replicates gray to 3 channels; LUT/Conv consume only that gray image and output pseudo-RGB for YOLO.",
+            "input_mode": "All variants convert the original RGB dataset image to single-channel grayscale first. Baseline then replicates gray to 3 channels; adapters consume only that gray image and output pseudo-RGB for YOLO.",
             "visualization_note": "visual_true_improvements overlays GT/pred boxes on the original RGB image for human readability only; inference inputs are saved under input_samples/.",
         },
         "variants": {},
