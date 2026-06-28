@@ -1,0 +1,34 @@
+# Suggested batch/worker profiles for YOLOv8n 384 training.
+# Start with the recommended profile, then adjust batch up/down if CUDA memory
+# usage is too low/high.
+
+recommended:
+  gpu: RTX 5090
+  reason: Best practical choice for this project. YOLOv8n at 384 is small; the
+    RTX 5090 gives very high single-GPU throughput and avoids multi-GPU overhead.
+  batch: 128
+  workers: 12
+
+profiles:
+  rtx_5090:
+    batch: 128
+    workers: 12
+  rtx_pro_6000:
+    batch: 192
+    workers: 16
+  h800:
+    batch: 256
+    workers: 16
+  vgpu_48gb:
+    batch: 160
+    workers: 12
+  vgpu_32gb:
+    batch: 128
+    workers: 12
+  rtx_4090:
+    batch: 96
+    workers: 10
+  rtx_3090:
+    batch: 64
+    workers: 8
+

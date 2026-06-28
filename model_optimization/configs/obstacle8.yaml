@@ -1,0 +1,14 @@
+path: E:/datasets/obstacle8_gray
+train: images/train
+val: images/val
+
+names:
+  0: person
+  1: chair/seat
+  2: table/desk
+  3: sofa/bed
+  4: bag/suitcase
+  5: small_object
+  6: vehicle/bicycle
+  7: generic_obstacle
+

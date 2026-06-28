@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+
+class FixedReplicateAdapter(nn.Module):
+    """Baseline adapter: gray -> [gray, gray, gray]."""
+
+    adapter_type = "ggg"
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.repeat(1, 3, 1, 1)
+
+    def regularization_loss(self) -> torch.Tensor:
+        return torch.zeros((), device=next(self.parameters(), torch.zeros(1)).device)
+
+    def metadata(self) -> Dict[str, Any]:
+        return {"adapter_type": self.adapter_type, "deploy_mode": "replicate"}
+
+
+class LUTGrayChannelAdapter(nn.Module):
+    """Learnable 1->3 gray adapter that can be exported as 3x256 LUT tables."""
+
+    adapter_type = "lut"
+
+    def __init__(self) -> None:
+        super().__init__()
+        base = torch.linspace(0.0, 1.0, 256, dtype=torch.float32)
+        self.lut = nn.Parameter(torch.stack([base, base, base], dim=0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.clamp(0.0, 1.0)
+        scaled = x * 255.0
+        lo = torch.floor(scaled).long().clamp(0, 255)
+        hi = (lo + 1).clamp(0, 255)
+        alpha = scaled - lo.float()
+
+        table = self.lut.clamp(0.0, 1.0)
+        outs = []
+        for c in range(3):
+            t = table[c].view(1, 256, 1, 1).expand(x.shape[0], -1, x.shape[2], x.shape[3])
+            lo_v = torch.gather(t, 1, lo)
+            hi_v = torch.gather(t, 1, hi)
+            outs.append(lo_v * (1.0 - alpha) + hi_v * alpha)
+        return torch.cat(outs, dim=1).clamp(0.0, 1.0)
+
+    def regularization_loss(self) -> torch.Tensor:
+        table = self.lut.clamp(0.0, 1.0)
+        smooth = (table[:, 2:] - 2.0 * table[:, 1:-1] + table[:, :-2]).abs().mean()
+        monotonic = F.relu(table[:, :-1] - table[:, 1:]).mean()
+        base = torch.linspace(0.0, 1.0, 256, dtype=table.dtype, device=table.device)
+        identity = (table - base.view(1, 256)).abs().mean()
+        return smooth * 0.50 + monotonic * 0.25 + identity * 0.05
+
+    def metadata(self) -> Dict[str, Any]:
+        table = self.lut.detach().clamp(0.0, 1.0).cpu()
+        return {
+            "adapter_type": self.adapter_type,
+            "deploy_mode": "lut_3x256_uint8",
+            "lut": [[int(round(float(v) * 255.0)) for v in row] for row in table],
+        }
+
+
+class ConvGrayChannelAdapter(nn.Module):
+    """Small conv adapter for experiments when the conversion toolchain accepts it."""
+
+    adapter_type = "conv"
+
+    def __init__(self, hidden: int = 8) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, hidden, kernel_size=3, padding=1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, 3, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+        with torch.no_grad():
+            first = self.net[0]
+            second = self.net[2]
+            nn.init.zeros_(first.weight)
+            nn.init.zeros_(first.bias)
+            center = first.weight.shape[-1] // 2
+            for i in range(min(hidden, 3)):
+                first.weight[i, 0, center, center] = 1.0
+            nn.init.zeros_(second.weight)
+            nn.init.zeros_(second.bias)
+            for c in range(3):
+                second.weight[c, c % hidden, 0, 0] = 4.0
+                second.bias[c] = -2.0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x.clamp(0.0, 1.0))
+
+    def regularization_loss(self) -> torch.Tensor:
+        return torch.zeros((), device=next(self.parameters()).device)
+
+    def metadata(self) -> Dict[str, Any]:
+        return {"adapter_type": self.adapter_type, "deploy_mode": "onnx_conv_experimental"}
+
+
+class SpatialGrayAdapter(nn.Module):
+    """Parametric gray adapter with local contrast and edge channels.
+
+    This is stronger than a LUT because the output depends on local image
+    structure, not only on the current pixel value. It is intended as a CPU
+    preprocessing candidate first; deployment should use the exported scalar
+    parameters and simple blur/Sobel kernels rather than a new NPU graph.
+    """
+
+    adapter_type = "spatial"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(3))
+        self.contrast = nn.Parameter(torch.ones(3))
+        self.bias = nn.Parameter(torch.zeros(3))
+        self.local_gain = nn.Parameter(torch.tensor([0.00, 0.22, -0.18], dtype=torch.float32))
+        self.edge_gain = nn.Parameter(torch.tensor([0.00, 0.10, 0.18], dtype=torch.float32))
+        self.strength = nn.Parameter(torch.tensor(0.65, dtype=torch.float32))
+        sobel_x = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]) / 8.0
+        sobel_y = sobel_x.t()
+        self.register_buffer("sobel_x", sobel_x.view(1, 1, 3, 3))
+        self.register_buffer("sobel_y", sobel_y.view(1, 1, 3, 3))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.clamp(0.0, 1.0)
+        blur = F.avg_pool2d(x, kernel_size=7, stride=1, padding=3)
+        local = (x - blur).clamp(-0.5, 0.5)
+        gx = F.conv2d(x, self.sobel_x, padding=1)
+        gy = F.conv2d(x, self.sobel_y, padding=1)
+        edge = torch.sqrt(gx * gx + gy * gy + 1e-6).clamp(0.0, 0.5)
+        base = torch.pow(x + 1e-6, self.gamma.clamp(0.45, 1.85).view(1, 3, 1, 1))
+        base = (base - 0.5) * self.contrast.clamp(0.55, 1.65).view(1, 3, 1, 1) + 0.5
+        base = base + self.bias.clamp(-0.18, 0.18).view(1, 3, 1, 1)
+        adapted = base
+        adapted = adapted + self.local_gain.clamp(-0.65, 0.65).view(1, 3, 1, 1) * local
+        adapted = adapted + self.edge_gain.clamp(-0.35, 0.60).view(1, 3, 1, 1) * edge
+        strength = self.strength.clamp(0.0, 1.0)
+        replicated = x.repeat(1, 3, 1, 1)
+        return ((1.0 - strength) * replicated + strength * adapted).clamp(0.0, 1.0)
+
+    def regularization_loss(self) -> torch.Tensor:
+        identity = (self.gamma - 1.0).abs().mean() + (self.contrast - 1.0).abs().mean() + self.bias.abs().mean()
+        spatial = self.local_gain.abs().mean() * 0.25 + self.edge_gain.abs().mean() * 0.20
+        return identity * 0.05 + spatial
+
+    def metadata(self) -> Dict[str, Any]:
+        def vals(t: torch.Tensor) -> list[float]:
+            return [round(float(v), 6) for v in t.detach().cpu().flatten()]
+
+        return {
+            "adapter_type": self.adapter_type,
+            "deploy_mode": "cpu_spatial_parametric_gray_to_3ch",
+            "params": {
+                "gamma": vals(self.gamma.clamp(0.45, 1.85)),
+                "contrast": vals(self.contrast.clamp(0.55, 1.65)),
+                "bias": vals(self.bias.clamp(-0.18, 0.18)),
+                "local_gain": vals(self.local_gain.clamp(-0.65, 0.65)),
+                "edge_gain": vals(self.edge_gain.clamp(-0.35, 0.60)),
+                "strength": round(float(self.strength.detach().cpu().clamp(0.0, 1.0)), 6),
+                "blur_kernel": 7,
+                "edge_kernel": "sobel_3x3",
+            },
+        }
+
+
+class AdaptedYolo(nn.Module):
+    def __init__(self, adapter: nn.Module, yolo_model: nn.Module) -> None:
+        super().__init__()
+        self.adapter = adapter
+        self.yolo_model = yolo_model
+
+    def forward(self, gray: torch.Tensor):
+        return self.yolo_model(self.adapter(gray))
+
+
+def build_adapter(adapter_type: str) -> nn.Module:
+    if adapter_type == "ggg":
+        return FixedReplicateAdapter()
+    if adapter_type == "lut":
+        return LUTGrayChannelAdapter()
+    if adapter_type == "conv":
+        return ConvGrayChannelAdapter()
+    if adapter_type == "spatial":
+        return SpatialGrayAdapter()
+    raise ValueError(f"unknown adapter type: {adapter_type}")
+
+
+def lut_uint8_to_adapter(lut: list[list[int]] | torch.Tensor) -> LUTGrayChannelAdapter:
+    """Build a deployable LUT adapter from 3x256 uint8 tables."""
+    if torch.is_tensor(lut):
+        table = lut.detach().float()
+    else:
+        table = torch.tensor(lut, dtype=torch.float32)
+    if tuple(table.shape) != (3, 256):
+        raise ValueError(f"expected LUT shape 3x256, got {tuple(table.shape)}")
+    adapter = LUTGrayChannelAdapter()
+    with torch.no_grad():
+        adapter.lut.copy_(table.clamp(0, 255) / 255.0)
+    return adapter
+
+
+def spatial_params_to_adapter(params: Dict[str, Any]) -> SpatialGrayAdapter:
+    adapter = SpatialGrayAdapter()
+
+    def copy_param(name: str) -> None:
+        if name in params:
+            value = torch.tensor(params[name], dtype=torch.float32)
+            target = getattr(adapter, name)
+            if value.numel() != target.numel():
+                raise ValueError(f"parameter {name} expected {target.numel()} values, got {value.numel()}")
+            with torch.no_grad():
+                target.copy_(value.view_as(target))
+
+    for key in ["gamma", "contrast", "bias", "local_gain", "edge_gain"]:
+        copy_param(key)
+    if "strength" in params:
+        with torch.no_grad():
+            adapter.strength.copy_(torch.tensor(float(params["strength"]), dtype=torch.float32))
+    return adapter
+
+
+def save_adapter_bundle(adapter: nn.Module, path: Path, extra_meta: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state_path = path.with_suffix(".pt")
+    meta_path = path.with_suffix(".json")
+    torch.save({"adapter_type": getattr(adapter, "adapter_type", "unknown"), "state_dict": adapter.state_dict()}, state_path)
+    meta = dict(extra_meta)
+    if hasattr(adapter, "metadata"):
+        meta.update(adapter.metadata())
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_adapter_bundle(path: Path, map_location: str | torch.device = "cpu") -> nn.Module:
+    ckpt = torch.load(path, map_location=map_location)
+    adapter = build_adapter(str(ckpt["adapter_type"]))
+    adapter.load_state_dict(ckpt["state_dict"])
+    return adapter

@@ -1,0 +1,62 @@
+# Python cache and local virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Training and evaluation outputs
+model_optimization/artifacts/
+model_optimization/analysis/
+runs/
+wandb/
+tensorboard/
+logs/
+*.log
+*.bak
+
+# Datasets and generated packages
+datasets/
+data/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# Model development artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.a1model
+*.m1model
+
+# Keep the current board deployment model tracked explicitly.
+!board/obstacle_detect/app_assets/models/yolov8n_head6.m1model
+
+# SDK/build outputs
+output/
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.img
+rootfs.cpio
+rootfs.cpio.gz
+zImage*
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
