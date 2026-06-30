@@ -6,6 +6,7 @@ import csv
 import json
 import sys
 import time
+import zlib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +93,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--max-images", type=int, default=0, help="0 means all available images.")
     p.add_argument("--variants", default="baseline,lut,conv", help="Comma-separated subset: baseline,lut,conv,spatial,g2rgb,bc_gmfe_dca.")
+    p.add_argument(
+        "--gray-corruption",
+        default="normal",
+        choices=["normal", "low_light", "high_exposure", "low_contrast", "motion_blur", "noise"],
+        help="Deterministic grayscale input corruption applied before every variant.",
+    )
     p.add_argument("--save-visuals", type=int, default=24, help="Number of top true-improvement side-by-side images to save.")
     p.add_argument("--save-input-samples", type=int, default=12, help="Save actual YOLO input images per variant for audit.")
     return p.parse_args()
@@ -129,8 +136,41 @@ def select_images(coco: dict[str, Any], image_dir: Path, max_images: int) -> lis
     return selected
 
 
-def load_gray_array(path: Path) -> np.ndarray:
-    return np.array(Image.open(path).convert("L"), dtype=np.uint8)
+def apply_gray_corruption(gray: np.ndarray, mode: str, seed: int) -> np.ndarray:
+    """Apply deterministic grayscale robustness corruption for fair variant comparison."""
+    g = gray.astype(np.float32) / 255.0
+    if mode == "normal":
+        out = g
+    elif mode == "low_light":
+        out = np.power(np.clip(g * 0.55, 0.0, 1.0), 1.25)
+    elif mode == "high_exposure":
+        out = np.clip(g * 1.45 + 0.08, 0.0, 1.0)
+        out[out > 0.88] = 1.0
+    elif mode == "low_contrast":
+        mean = float(g.mean())
+        out = np.clip(mean + 0.45 * (g - mean), 0.0, 1.0)
+    elif mode == "motion_blur":
+        kernel = 7
+        pad = kernel // 2
+        padded = np.pad(g, ((0, 0), (pad, pad)), mode="edge")
+        out = np.zeros_like(g)
+        for offset in range(kernel):
+            out += padded[:, offset : offset + g.shape[1]]
+        out = out / float(kernel)
+    elif mode == "noise":
+        rng = np.random.default_rng(seed)
+        sigma = 0.035
+        shot = 0.025 * np.sqrt(np.clip(g, 0.0, 1.0)) * rng.normal(size=g.shape)
+        out = np.clip(g + rng.normal(0.0, sigma, size=g.shape) + shot, 0.0, 1.0)
+    else:
+        raise ValueError(f"unsupported gray corruption: {mode}")
+    return np.round(np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
+def load_gray_array(path: Path, corruption: str) -> np.ndarray:
+    gray = np.array(Image.open(path).convert("L"), dtype=np.uint8)
+    seed = zlib.crc32(str(path).encode("utf-8")) & 0xFFFFFFFF
+    return apply_gray_corruption(gray, corruption, seed)
 
 
 def adapter_to_rgb(adapter: torch.nn.Module, gray: np.ndarray) -> Image.Image:
@@ -146,8 +186,8 @@ def baseline_to_rgb(gray: np.ndarray) -> Image.Image:
     return Image.fromarray(np.stack([gray, gray, gray], axis=-1), "RGB")
 
 
-def build_variant_image(variant: str, image_path: Path, adapters: dict[str, torch.nn.Module]) -> Image.Image:
-    gray = load_gray_array(image_path)
+def build_variant_image(variant: str, image_path: Path, adapters: dict[str, torch.nn.Module], gray_corruption: str) -> Image.Image:
+    gray = load_gray_array(image_path, gray_corruption)
     if variant == "baseline":
         return baseline_to_rgb(gray)
     if variant in adapters:
@@ -180,7 +220,7 @@ def run_variant(
         batch_pil: list[Image.Image] = []
         for im in batch_meta:
             t0 = time.perf_counter()
-            prepared = build_variant_image(variant, image_dir / im["file_name"], adapters)
+            prepared = build_variant_image(variant, image_dir / im["file_name"], adapters, args.gray_corruption)
             if saved_input_samples < args.save_input_samples:
                 sample_dir = args.out_dir / "input_samples" / variant
                 sample_dir.mkdir(parents=True, exist_ok=True)
@@ -460,6 +500,7 @@ def main() -> None:
             "max_images": args.max_images,
             "evaluated_images": len(images),
             "variants": variants,
+            "gray_corruption": args.gray_corruption,
             "input_mode": "All variants convert the original RGB dataset image to single-channel grayscale first. Baseline then replicates gray to 3 channels; adapters consume only that gray image or gray-replicated board-compatible input and output pseudo-RGB for YOLO.",
             "visualization_note": "visual_true_improvements overlays GT/pred boxes on the original RGB image for human readability only; inference inputs are saved under input_samples/.",
         },
