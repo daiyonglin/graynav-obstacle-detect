@@ -289,6 +289,140 @@ class G2RGBResidualAdapter(nn.Module):
         }
 
 
+class FixedGrayProjection(nn.Module):
+    """Board-compatible fixed Conv1x1 projection from 3-channel input to gray."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = nn.Conv2d(3, 1, kernel_size=1, bias=False)
+        with torch.no_grad():
+            self.proj.weight.fill_(1.0 / 3.0)
+        for param in self.parameters():
+            param.requires_grad_(False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] == 1:
+            return x
+        if x.shape[1] != 3:
+            raise ValueError(f"expected 1 or 3 input channels, got {x.shape[1]}")
+        return self.proj(x)
+
+
+class GMFEFixedEncoder(nn.Module):
+    """Fixed gray multi-domain encoder: G, blurred B, edge energy S, texture T."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blur = nn.Conv2d(1, 1, kernel_size=5, padding=2, bias=False)
+        kernel = torch.tensor(
+            [
+                [1, 4, 6, 4, 1],
+                [4, 16, 24, 16, 4],
+                [6, 24, 36, 24, 6],
+                [4, 16, 24, 16, 4],
+                [1, 4, 6, 4, 1],
+            ],
+            dtype=torch.float32,
+        ) / 256.0
+        sobel_x = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], dtype=torch.float32) / 8.0
+        sobel_y = sobel_x.t()
+        self.sobel_x = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
+        self.sobel_y = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
+        with torch.no_grad():
+            self.blur.weight.copy_(kernel.view(1, 1, 5, 5))
+            self.sobel_x.weight.copy_(sobel_x.view(1, 1, 3, 3))
+            self.sobel_y.weight.copy_(sobel_y.view(1, 1, 3, 3))
+        for param in self.parameters():
+            param.requires_grad_(False)
+
+    def forward(self, gray: torch.Tensor) -> torch.Tensor:
+        b = self.blur(gray)
+        dx = self.sobel_x(b)
+        dy = self.sobel_y(b)
+        s = dx * dx + dy * dy
+        gray2 = gray * gray
+        m = F.avg_pool2d(gray, kernel_size=7, stride=1, padding=3)
+        q = F.avg_pool2d(gray2, kernel_size=7, stride=1, padding=3)
+        m2 = m * m
+        t = q + (-1.0 * m2)
+        return torch.cat([gray, b, s, t], dim=1)
+
+
+class BCGMFEDCAAdapter(nn.Module):
+    """Board-compatible GMFE-DCA adapter with 3-channel input and pseudo-RGB output.
+
+    The deployment graph accepts the current board-compatible 3-channel input,
+    projects it back to gray internally, extracts fixed multi-domain GMFE
+    features, then trains a tiny DCA head to produce a residual pseudo-RGB
+    correction for frozen YOLOv8n.
+    """
+
+    adapter_type = "bc_gmfe_dca"
+
+    def __init__(self, hidden: int = 16, alpha: float = 0.1) -> None:
+        super().__init__()
+        if hidden <= 0:
+            raise ValueError("hidden must be positive")
+        self.hidden = int(hidden)
+        self.alpha = float(alpha)
+        self.gray_projection = FixedGrayProjection()
+        self.gmfe = GMFEFixedEncoder()
+        self.dca = nn.Sequential(
+            nn.Conv2d(4, hidden, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, 3, kernel_size=1, bias=True),
+        )
+        final = self.dca[-1]
+        nn.init.zeros_(final.weight)
+        nn.init.zeros_(final.bias)
+
+    def gray(self, x: torch.Tensor) -> torch.Tensor:
+        return self.gray_projection(x)
+
+    def gmfe_features(self, x: torch.Tensor) -> torch.Tensor:
+        return self.gmfe(self.gray(x))
+
+    def residual(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dca(self.gmfe_features(x))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gray = self.gray(x)
+        base = gray.repeat(1, 3, 1, 1)
+        return base + self.alpha * self.residual(x)
+
+    def luminance_loss(self, x: torch.Tensor, gray_target: torch.Tensor | None = None) -> torch.Tensor:
+        """Constrain pseudo-RGB luminance to preserve the recovered gray image."""
+        gray = self.gray(x) if gray_target is None else gray_target
+        adapted = self.forward(x)
+        weights = torch.tensor([0.299, 0.587, 0.114], dtype=adapted.dtype, device=adapted.device).view(1, 3, 1, 1)
+        luminance = (adapted * weights).sum(dim=1, keepdim=True)
+        return F.l1_loss(luminance, gray)
+
+    def regularization_loss(self, x: torch.Tensor | None = None) -> torch.Tensor:
+        if x is None:
+            return torch.zeros((), device=next(self.parameters()).device)
+        return self.residual(x).abs().mean()
+
+    def init_config(self) -> Dict[str, Any]:
+        return {"hidden": self.hidden, "alpha": self.alpha}
+
+    def metadata(self) -> Dict[str, Any]:
+        return {
+            "adapter_type": self.adapter_type,
+            "deploy_mode": "board_compatible_3ch_onnx",
+            "input_channels": 3,
+            "output_channels": 3,
+            "hidden": self.hidden,
+            "alpha": self.alpha,
+            "gray_projection": "fixed_conv1x1_3_to_1_mean",
+            "gmfe_domains": ["G", "B_gaussian5x5", "S_sobel_energy", "T_avgpool7_variance_energy"],
+            "operators": ["Conv", "AveragePool", "BatchNormalization", "Relu", "Mul", "Add", "Concat"],
+            "forbidden_ops": ["Sqrt", "Sub", "Div", "Softmax", "Clip", "NMS"],
+            "initial_state": "equivalent_to_gray_replicate",
+        }
+
+
 class AdaptedYolo(nn.Module):
     def __init__(self, adapter: nn.Module, yolo_model: nn.Module) -> None:
         super().__init__()
@@ -310,6 +444,8 @@ def build_adapter(adapter_type: str, **kwargs: Any) -> nn.Module:
         return SpatialGrayAdapter()
     if adapter_type == "g2rgb_residual":
         return G2RGBResidualAdapter(**kwargs)
+    if adapter_type == "bc_gmfe_dca":
+        return BCGMFEDCAAdapter(**kwargs)
     raise ValueError(f"unknown adapter type: {adapter_type}")
 
 
