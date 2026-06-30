@@ -22,9 +22,15 @@ ACCUMULATE="${ACCUMULATE:-1}"
 HIDDEN="${HIDDEN:-16}"
 ALPHA="${ALPHA:-0.1}"
 LR="${LR:-0.0005}"
+ANCHOR_HEAD_WEIGHT="${ANCHOR_HEAD_WEIGHT:-0.5}"
+ANCHOR_FEATURE_WEIGHT="${ANCHOR_FEATURE_WEIGHT:-0.0}"
+TENSORBOARD_DIR="${TENSORBOARD_DIR:-runs/tensorboard/bc_gmfe_dca}"
 EXTRA_TRAIN_ARGS=()
 if [[ "${STRONG_MONOSIM:-0}" == "1" ]]; then
   EXTRA_TRAIN_ARGS+=(--strong-monosim)
+fi
+if [[ "${CHANNELS_LAST:-0}" == "1" ]]; then
+  EXTRA_TRAIN_ARGS+=(--channels-last)
 fi
 
 python scripts/train_bc_gmfe_dca.py \
@@ -41,6 +47,9 @@ python scripts/train_bc_gmfe_dca.py \
   --hidden "$HIDDEN" \
   --alpha "$ALPHA" \
   --lr "$LR" \
+  --anchor-head-weight "$ANCHOR_HEAD_WEIGHT" \
+  --anchor-feature-weight "$ANCHOR_FEATURE_WEIGHT" \
+  --tensorboard-dir "$TENSORBOARD_DIR" \
   "${EXTRA_TRAIN_ARGS[@]}"
 
 python scripts/evaluate_gray_adapters_coco.py \
@@ -60,6 +69,11 @@ python scripts/evaluate_gray_adapters_coco.py \
 python scripts/summarize_adapter_truth_eval.py \
   --eval-dir "$EVAL_DIR" \
   --out "$EVAL_DIR/report.md"
+
+python scripts/log_eval_summary_to_tensorboard.py \
+  --summary "$EVAL_DIR/truth_eval_summary.json" \
+  --logdir "$TENSORBOARD_DIR" \
+  --step "$EPOCHS"
 
 if [[ "${EXPORT_ONNX:-0}" == "1" ]]; then
   python scripts/export_bc_gmfe_dca_yolov8.py \

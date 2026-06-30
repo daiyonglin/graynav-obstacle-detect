@@ -90,6 +90,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--match-conf", type=float, default=0.25, help="Confidence threshold for per-image TP/FP/FN summary.")
     p.add_argument("--match-iou", type=float, default=0.50, help="IoU threshold for per-image TP matching.")
     p.add_argument("--device", default="cpu")
+    p.add_argument("--adapter-device", default="auto", help="auto, cpu, or cuda device used for adapter image generation.")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--max-images", type=int, default=0, help="0 means all available images.")
     p.add_argument("--variants", default="baseline,lut,conv", help="Comma-separated subset: baseline,lut,conv,spatial,g2rgb,bc_gmfe_dca.")
@@ -173,9 +174,17 @@ def load_gray_array(path: Path, corruption: str) -> np.ndarray:
     return apply_gray_corruption(gray, corruption, seed)
 
 
-def adapter_to_rgb(adapter: torch.nn.Module, gray: np.ndarray) -> Image.Image:
+def resolve_adapter_device(yolo_device: str) -> torch.device:
+    """Choose where adapter preprocessing should run during evaluation."""
+    if yolo_device == "cpu" or not torch.cuda.is_available():
+        return torch.device("cpu")
+    return torch.device(f"cuda:{yolo_device}" if yolo_device.isdigit() else yolo_device)
+
+
+def adapter_to_rgb(adapter: torch.nn.Module, gray: np.ndarray, device: torch.device) -> Image.Image:
     x = torch.from_numpy(gray.astype(np.float32) / 255.0).view(1, 1, gray.shape[0], gray.shape[1])
-    with torch.no_grad():
+    x = x.to(device, non_blocking=True)
+    with torch.inference_mode():
         y = adapter(x).squeeze(0).clamp(0.0, 1.0).cpu().numpy()
     rgb = np.transpose(y, (1, 2, 0))
     rgb = np.round(rgb * 255.0).astype(np.uint8)
@@ -186,12 +195,18 @@ def baseline_to_rgb(gray: np.ndarray) -> Image.Image:
     return Image.fromarray(np.stack([gray, gray, gray], axis=-1), "RGB")
 
 
-def build_variant_image(variant: str, image_path: Path, adapters: dict[str, torch.nn.Module], gray_corruption: str) -> Image.Image:
+def build_variant_image(
+    variant: str,
+    image_path: Path,
+    adapters: dict[str, torch.nn.Module],
+    adapter_device: torch.device,
+    gray_corruption: str,
+) -> Image.Image:
     gray = load_gray_array(image_path, gray_corruption)
     if variant == "baseline":
         return baseline_to_rgb(gray)
     if variant in adapters:
-        return adapter_to_rgb(adapters[variant], gray)
+        return adapter_to_rgb(adapters[variant], gray, adapter_device)
     raise ValueError(f"unsupported variant: {variant}")
 
 
@@ -206,6 +221,7 @@ def run_variant(
     images: list[dict[str, Any]],
     image_dir: Path,
     adapters: dict[str, torch.nn.Module],
+    adapter_device: torch.device,
     args: argparse.Namespace,
 ) -> tuple[list[dict[str, Any]], dict[int, list[Detection]], dict[str, float]]:
     coco_results: list[dict[str, Any]] = []
@@ -220,7 +236,7 @@ def run_variant(
         batch_pil: list[Image.Image] = []
         for im in batch_meta:
             t0 = time.perf_counter()
-            prepared = build_variant_image(variant, image_dir / im["file_name"], adapters, args.gray_corruption)
+            prepared = build_variant_image(variant, image_dir / im["file_name"], adapters, adapter_device, args.gray_corruption)
             if saved_input_samples < args.save_input_samples:
                 sample_dir = args.out_dir / "input_samples" / variant
                 sample_dir.mkdir(parents=True, exist_ok=True)
@@ -470,18 +486,22 @@ def main() -> None:
     images = select_images(coco, args.images, args.max_images)
     cat_name_to_id = {c["name"]: int(c["id"]) for c in coco["categories"]}
     nav_cat_ids = {cat_name_to_id[x] for x in NAV_LABELS if x in cat_name_to_id}
+    if args.adapter_device == "auto":
+        adapter_device = resolve_adapter_device(str(args.device))
+    else:
+        adapter_device = torch.device(args.adapter_device)
 
     adapters: dict[str, torch.nn.Module] = {}
     if "lut" in variants:
-        adapters["lut"] = load_adapter_bundle(args.lut_adapter, map_location="cpu").eval()
+        adapters["lut"] = load_adapter_bundle(args.lut_adapter, map_location=adapter_device).to(adapter_device).eval()
     if "conv" in variants:
-        adapters["conv"] = load_adapter_bundle(args.conv_adapter, map_location="cpu").eval()
+        adapters["conv"] = load_adapter_bundle(args.conv_adapter, map_location=adapter_device).to(adapter_device).eval()
     if "spatial" in variants:
-        adapters["spatial"] = load_adapter_bundle(args.spatial_adapter, map_location="cpu").eval()
+        adapters["spatial"] = load_adapter_bundle(args.spatial_adapter, map_location=adapter_device).to(adapter_device).eval()
     if "g2rgb" in variants:
-        adapters["g2rgb"] = load_adapter_bundle(args.g2rgb_adapter, map_location="cpu").eval()
+        adapters["g2rgb"] = load_adapter_bundle(args.g2rgb_adapter, map_location=adapter_device).to(adapter_device).eval()
     if "bc_gmfe_dca" in variants:
-        adapters["bc_gmfe_dca"] = load_adapter_bundle(args.bc_gmfe_dca_adapter, map_location="cpu").eval()
+        adapters["bc_gmfe_dca"] = load_adapter_bundle(args.bc_gmfe_dca_adapter, map_location=adapter_device).to(adapter_device).eval()
 
     model = YOLO(str(args.weights))
 
@@ -496,6 +516,7 @@ def main() -> None:
             "match_conf": args.match_conf,
             "match_iou": args.match_iou,
             "device": args.device,
+            "adapter_device": str(adapter_device),
             "batch": args.batch,
             "max_images": args.max_images,
             "evaluated_images": len(images),
@@ -510,7 +531,7 @@ def main() -> None:
 
     for variant in variants:
         print(f"evaluating variant={variant} images={len(images)}", flush=True)
-        coco_results, dets, perf = run_variant(variant, model, images, args.images, adapters, args)
+        coco_results, dets, perf = run_variant(variant, model, images, args.images, adapters, adapter_device, args)
         dets_by_variant[variant] = dets
         pred_path = args.out_dir / f"{variant}_coco_predictions.json"
         pred_path.write_text(json.dumps(coco_results, ensure_ascii=False), encoding="utf-8")

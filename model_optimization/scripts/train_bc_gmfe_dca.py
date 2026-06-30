@@ -44,7 +44,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-weight", type=float, default=2.0)
     parser.add_argument("--luma-weight", type=float, default=0.1)
     parser.add_argument("--residual-weight", type=float, default=0.01)
+    parser.add_argument("--anchor-head-weight", type=float, default=0.5)
+    parser.add_argument("--anchor-feature-weight", type=float, default=0.0)
     parser.add_argument("--strong-monosim", action="store_true")
+    parser.add_argument("--channels-last", action="store_true")
     parser.add_argument("--tensorboard-dir", type=Path, default=Path("runs/tensorboard/bc_gmfe_dca"))
     return parser.parse_args()
 
@@ -132,16 +135,29 @@ def main() -> None:
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    torch.backends.cudnn.benchmark = True
 
     device = torch.device(f"cuda:{args.device}" if args.device != "cpu" and torch.cuda.is_available() else "cpu")
     dataset = RGBImageDataset(args.source, args.imgsz, args.max_images, args.seed)
-    loader = DataLoader(dataset, batch_size=args.batch, shuffle=True, num_workers=args.workers, pin_memory=device.type == "cuda")
+    loader_kwargs = {
+        "batch_size": args.batch,
+        "shuffle": True,
+        "num_workers": args.workers,
+        "pin_memory": device.type == "cuda",
+    }
+    if args.workers > 0:
+        loader_kwargs.update({"persistent_workers": True, "prefetch_factor": 4})
+    loader = DataLoader(dataset, **loader_kwargs)
 
     yolo = YOLO(str(args.weights)).model.to(device).eval()
+    if args.channels_last:
+        yolo = yolo.to(memory_format=torch.channels_last)
     for param in yolo.parameters():
         param.requires_grad_(False)
 
     adapter = BCGMFEDCAAdapter(hidden=args.hidden, alpha=args.alpha).to(device)
+    if args.channels_last:
+        adapter = adapter.to(memory_format=torch.channels_last)
     monosim = MonoSim(strong=args.strong_monosim).to(device).train()
     hooks = FeatureHookSet(yolo, parse_feature_layers(args.feature_layers))
 
@@ -165,13 +181,25 @@ def main() -> None:
             pbar = tqdm(loader, desc=f"bc-gmfe-dca epoch {epoch + 1}/{args.epochs}")
             for batch_idx, (rgb, _paths) in enumerate(pbar):
                 rgb = rgb.to(device, non_blocking=True)
+                if args.channels_last:
+                    rgb = rgb.contiguous(memory_format=torch.channels_last)
                 gray = monosim(rgb)
                 board_input = gray.repeat(1, 3, 1, 1)
+                if args.channels_last:
+                    board_input = board_input.contiguous(memory_format=torch.channels_last)
 
                 hooks.clear()
                 with torch.no_grad():
                     teacher_out = yolo(rgb)
                     teacher_features = hooks.snapshot(detach=True)
+
+                anchor_out = None
+                anchor_features: list[torch.Tensor] = []
+                if args.anchor_head_weight > 0.0 or args.anchor_feature_weight > 0.0:
+                    hooks.clear()
+                    with torch.no_grad():
+                        anchor_out = yolo(board_input)
+                        anchor_features = hooks.snapshot(detach=True)
 
                 hooks.clear()
                 with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
@@ -182,11 +210,19 @@ def main() -> None:
                     feat_loss = feature_distill_loss(student_features, teacher_features)
                     luma_loss = adapter.luminance_loss(board_input, gray_target=gray)
                     residual_loss = adapter.regularization_loss(board_input)
+                    anchor_head_loss = torch.zeros((), device=device)
+                    anchor_feat_loss = torch.zeros((), device=device)
+                    if anchor_out is not None:
+                        anchor_head_loss = matched_tensor_distill(student_out, anchor_out, loss_type="smooth_l1")
+                    if anchor_features:
+                        anchor_feat_loss = feature_distill_loss(student_features, anchor_features)
                     loss = (
                         args.head_weight * head_loss
                         + args.feature_weight * feat_loss
                         + args.luma_weight * luma_loss
                         + args.residual_weight * residual_loss
+                        + args.anchor_head_weight * anchor_head_loss
+                        + args.anchor_feature_weight * anchor_feat_loss
                     )
                     backward_loss = loss / float(accumulate)
 
@@ -206,6 +242,8 @@ def main() -> None:
                 writer.add_scalar("train/loss_feature_step", float(feat_loss.detach().cpu()), global_step)
                 writer.add_scalar("train/loss_luminance_step", float(luma_loss.detach().cpu()), global_step)
                 writer.add_scalar("train/loss_residual_step", float(residual_loss.detach().cpu()), global_step)
+                writer.add_scalar("train/loss_anchor_head_step", float(anchor_head_loss.detach().cpu()), global_step)
+                writer.add_scalar("train/loss_anchor_feature_step", float(anchor_feat_loss.detach().cpu()), global_step)
                 writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
 
                 if global_step % 50 == 0:
@@ -221,7 +259,10 @@ def main() -> None:
                             writer.add_scalar(f"dist/{key}", value, global_step)
 
                 global_step += 1
-                pbar.set_postfix(loss=running / max(1, count))
+                postfix = {"loss": running / max(1, count)}
+                if device.type == "cuda":
+                    postfix["mem_gb"] = torch.cuda.max_memory_allocated(device) / (1024.0**3)
+                pbar.set_postfix(postfix)
 
             scheduler.step()
             epoch_loss = running / max(1, count)
