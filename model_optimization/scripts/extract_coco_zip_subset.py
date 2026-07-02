@@ -5,7 +5,6 @@ import argparse
 import json
 import random
 import zipfile
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -49,24 +48,47 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+def iter_json_items(path: Path, prefix: str):
+    """Stream large COCO JSON arrays without loading the whole file."""
+    try:
+        import ijson
+    except ImportError as exc:
+        raise SystemExit("missing dependency: pip install ijson") from exc
+
+    with path.open("rb") as f:
+        yield from ijson.items(f, prefix)
 
 
-def choose_images(coco: dict[str, Any], max_images: int, nav_ratio: float, seed: int) -> tuple[list[dict[str, Any]], set[int]]:
-    """Sample images with a controlled bias toward navigation-relevant categories."""
-    categories = {int(c["id"]): str(c["name"]) for c in coco["categories"]}
-    nav_cat_ids = {cid for cid, name in categories.items() if name in NAV_LABELS}
-    anns_by_image: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for ann in coco["annotations"]:
-        if ann.get("iscrowd", 0):
+def read_categories(path: Path) -> tuple[list[dict[str, Any]], set[int]]:
+    """Read COCO categories and derive the navigation-relevant category ids."""
+    categories = [dict(item) for item in iter_json_items(path, "categories.item")]
+    nav_cat_ids = {int(c["id"]) for c in categories if str(c["name"]) in NAV_LABELS}
+    if not nav_cat_ids:
+        raise RuntimeError("no navigation category ids matched COCO categories")
+    return categories, nav_cat_ids
+
+
+def read_nav_image_ids(path: Path, nav_cat_ids: set[int]) -> set[int]:
+    """Collect image ids containing at least one navigation-relevant annotation."""
+    nav_image_ids: set[int] = set()
+    for ann in tqdm(iter_json_items(path, "annotations.item"), desc="scan nav annotations"):
+        if int(ann.get("iscrowd", 0)):
             continue
-        anns_by_image[int(ann["image_id"])].append(ann)
+        if int(ann["category_id"]) in nav_cat_ids:
+            nav_image_ids.add(int(ann["image_id"]))
+    return nav_image_ids
 
-    images = list(coco["images"])
-    nav_images = [im for im in images if any(int(a["category_id"]) in nav_cat_ids for a in anns_by_image[int(im["id"])])]
-    context_images = [im for im in images if im not in nav_images]
+
+def choose_images(annotation_path: Path, nav_image_ids: set[int], max_images: int, nav_ratio: float, seed: int) -> list[dict[str, Any]]:
+    """Sample images with a controlled bias toward navigation-relevant categories."""
+    nav_images: list[dict[str, Any]] = []
+    context_images: list[dict[str, Any]] = []
+    for item in tqdm(iter_json_items(annotation_path, "images.item"), desc="scan images"):
+        im = dict(item)
+        if int(im["id"]) in nav_image_ids:
+            nav_images.append(im)
+        else:
+            context_images.append(im)
 
     rng = random.Random(seed)
     rng.shuffle(nav_images)
@@ -77,22 +99,26 @@ def choose_images(coco: dict[str, Any], max_images: int, nav_ratio: float, seed:
     selected = nav_images[:wanted_nav] + context_images[:wanted_context]
     if len(selected) < max_images:
         selected_ids = {int(im["id"]) for im in selected}
-        remaining = [im for im in images if int(im["id"]) not in selected_ids]
+        remaining = [im for im in nav_images + context_images if int(im["id"]) not in selected_ids]
         rng.shuffle(remaining)
         selected.extend(remaining[: max_images - len(selected)])
     rng.shuffle(selected)
-    return selected, nav_cat_ids
+    return selected
 
 
-def write_subset_annotations(coco: dict[str, Any], selected: list[dict[str, Any]], out_path: Path) -> None:
+def write_subset_annotations(annotation_path: Path, categories: list[dict[str, Any]], selected: list[dict[str, Any]], out_path: Path) -> None:
     """Write a compact COCO annotation file for future supervised experiments."""
     image_ids = {int(im["id"]) for im in selected}
+    subset_annotations = []
+    for ann in tqdm(iter_json_items(annotation_path, "annotations.item"), desc="write subset annotations"):
+        if int(ann["image_id"]) in image_ids:
+            subset_annotations.append(dict(ann))
     subset = {
-        "info": coco.get("info", {}),
-        "licenses": coco.get("licenses", []),
+        "info": {"description": "COCO train2017 sampled subset for GrayNav experiments"},
+        "licenses": [],
         "images": selected,
-        "annotations": [ann for ann in coco["annotations"] if int(ann["image_id"]) in image_ids],
-        "categories": coco["categories"],
+        "annotations": subset_annotations,
+        "categories": categories,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(subset, ensure_ascii=False), encoding="utf-8")
@@ -103,17 +129,17 @@ def extract_images(zip_path: Path, selected: list[dict[str, Any]], split: str, i
     image_dir.mkdir(parents=True, exist_ok=True)
     missing: list[str] = []
     with zipfile.ZipFile(zip_path) as zf:
-        names = set(zf.namelist())
         for im in tqdm(selected, desc="extract subset"):
             member = f"{split}/{im['file_name']}"
             target = image_dir / im["file_name"]
             if target.exists():
                 continue
-            if member not in names:
+            try:
+                with zf.open(member) as src, target.open("wb") as dst:
+                    dst.write(src.read())
+            except KeyError:
                 missing.append(member)
                 continue
-            with zf.open(member) as src, target.open("wb") as dst:
-                dst.write(src.read())
     return missing
 
 
@@ -124,11 +150,12 @@ def main() -> None:
     if not args.annotations.exists():
         raise FileNotFoundError(args.annotations)
 
-    coco = load_json(args.annotations)
-    selected, nav_cat_ids = choose_images(coco, args.max_images, args.nav_ratio, args.seed)
+    categories, nav_cat_ids = read_categories(args.annotations)
+    nav_image_ids = read_nav_image_ids(args.annotations, nav_cat_ids)
+    selected = choose_images(args.annotations, nav_image_ids, args.max_images, args.nav_ratio, args.seed)
     image_dir = args.out_dir / "images"
     missing = extract_images(args.zip, selected, args.split, image_dir)
-    write_subset_annotations(coco, selected, args.out_dir / "annotations" / f"instances_{args.split}_subset.json")
+    write_subset_annotations(args.annotations, categories, selected, args.out_dir / "annotations" / f"instances_{args.split}_subset.json")
 
     manifest = {
         "zip": str(args.zip),
@@ -138,6 +165,7 @@ def main() -> None:
         "max_images": args.max_images,
         "selected_images": len(selected),
         "extracted_images": len(list(image_dir.glob('*.jpg'))),
+        "nav_image_candidates": len(nav_image_ids),
         "nav_ratio_target": args.nav_ratio,
         "nav_category_ids": sorted(nav_cat_ids),
         "missing": missing[:50],
