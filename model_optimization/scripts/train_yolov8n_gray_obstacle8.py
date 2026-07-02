@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stages", nargs="+", choices=STAGE_ORDER, default=STAGE_ORDER)
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--single-stage", action="store_true", help="Train only the first requested stage from its input weights")
+    parser.add_argument("--final-weights-file", type=Path, help="Optional file that receives the final best.pt path.")
     return parser.parse_args()
 
 
@@ -38,6 +39,28 @@ def parse_batch(value: str) -> int | float:
     if "." in text:
         return float(text)
     return int(text)
+
+
+def stage_best_path(model: YOLO, project: str, run_name: str) -> Path:
+    """Return the actual best.pt path from Ultralytics, with fallback search."""
+    trainer = getattr(model, "trainer", None)
+    save_dir = getattr(trainer, "save_dir", None)
+    if save_dir:
+        best = Path(save_dir) / "weights" / "best.pt"
+        if best.exists():
+            return best
+
+    fallback_roots = [Path(project), Path.cwd()]
+    candidates: list[Path] = []
+    for root in fallback_roots:
+        if root.exists():
+            candidates.extend(root.rglob(f"{run_name}/weights/best.pt"))
+    candidates = [p for p in candidates if p.exists()]
+    if candidates:
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    expected = Path(project) / run_name / "weights" / "best.pt"
+    raise RuntimeError(f"stage completed but best.pt not found; expected={expected}, save_dir={save_dir}")
 
 
 def train_one_stage(
@@ -106,10 +129,7 @@ def train_one_stage(
 
     model = YOLO(str(weights))
     model.train(**train_kwargs)
-    best = Path(project) / run_name / "weights" / "best.pt"
-    if not best.exists():
-        raise RuntimeError(f"stage completed but best.pt not found: {best}")
-    return best
+    return stage_best_path(model, project, run_name)
 
 
 def main() -> None:
@@ -126,6 +146,10 @@ def main() -> None:
 
     print("=" * 90)
     print("final weights:", weights)
+    if args.final_weights_file:
+        args.final_weights_file.parent.mkdir(parents=True, exist_ok=True)
+        args.final_weights_file.write_text(str(weights), encoding="utf-8")
+        print("final weights file:", args.final_weights_file)
 
 
 if __name__ == "__main__":

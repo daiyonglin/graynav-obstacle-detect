@@ -25,9 +25,11 @@ CONFIG="${CONFIG:-configs/graynav_next_training.yaml}"
 EVAL_DIR="${EVAL_DIR:-artifacts/graynav_next_eval}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-artifacts/graynav_next_export}"
 TENSORBOARD_DIR="${TENSORBOARD_DIR:-runs/tensorboard/graynav_next}"
+STATE_DIR="${STATE_DIR:-artifacts/graynav_next_state}"
 
 M1_PREFIX="${M1_PREFIX:-M1_ggg_yolov8n_ft}"
 M2_PREFIX="${M2_PREFIX:-M2_gmfe_yolov8n_ft}"
+mkdir -p "$STATE_DIR"
 
 mkdir -p "$(dirname "$TRAIN_ANN")"
 if [[ ! -f "$TRAIN_ANN" ]]; then
@@ -63,6 +65,7 @@ if [[ "${TRAIN_M1:-1}" == "1" ]]; then
     --project "$PROJECT" \
     --name-prefix "$M1_PREFIX" \
     --base-weights "$WEIGHTS" \
+    --final-weights-file "${STATE_DIR}/M1_final_weights.txt" \
     ${CACHE_IMAGES:+--cache}
 fi
 
@@ -76,11 +79,29 @@ if [[ "${TRAIN_M2:-1}" == "1" ]]; then
     --project "$PROJECT" \
     --name-prefix "$M2_PREFIX" \
     --base-weights "$WEIGHTS" \
+    --final-weights-file "${STATE_DIR}/M2_final_weights.txt" \
     ${CACHE_IMAGES:+--cache}
 fi
 
-M1_WEIGHTS="${PROJECT}/${M1_PREFIX}_stabilize/weights/best.pt"
-M2_WEIGHTS="${PROJECT}/${M2_PREFIX}_stabilize/weights/best.pt"
+if [[ ! -f "${STATE_DIR}/M1_final_weights.txt" ]]; then
+  M1_WEIGHTS="$(find "$PROJECT" . -path "*${M1_PREFIX}_stabilize/weights/best.pt" -type f -printf "%T@ %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)"
+else
+  M1_WEIGHTS="$(cat "${STATE_DIR}/M1_final_weights.txt")"
+fi
+if [[ ! -f "${STATE_DIR}/M2_final_weights.txt" ]]; then
+  M2_WEIGHTS="$(find "$PROJECT" . -path "*${M2_PREFIX}_stabilize/weights/best.pt" -type f -printf "%T@ %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)"
+else
+  M2_WEIGHTS="$(cat "${STATE_DIR}/M2_final_weights.txt")"
+fi
+
+if [[ ! -f "$M1_WEIGHTS" || ! -f "$M2_WEIGHTS" ]]; then
+  echo "Missing final weights." >&2
+  echo "M1_WEIGHTS=${M1_WEIGHTS}" >&2
+  echo "M2_WEIGHTS=${M2_WEIGHTS}" >&2
+  exit 1
+fi
+M1_RUN_DIR="$(dirname "$(dirname "$M1_WEIGHTS")")"
+M2_RUN_DIR="$(dirname "$(dirname "$M2_WEIGHTS")")"
 
 python scripts/evaluate_graynav_next.py \
   --dataset-root "$DATASET_ROOT" \
@@ -126,8 +147,9 @@ fi
 cat > "${EVAL_DIR}/cloud_pack_command.txt" <<EOF
 cd ${ROOT_DIR}
 tar -czf /root/autodl-tmp/graynav_next_results.tar.gz \\
-  ${PROJECT}/${M1_PREFIX}_stabilize \\
-  ${PROJECT}/${M2_PREFIX}_stabilize \\
+  ${M1_RUN_DIR} \\
+  ${M2_RUN_DIR} \\
+  ${STATE_DIR} \\
   ${EVAL_DIR} \\
   ${ARTIFACT_ROOT} \\
   ${TENSORBOARD_DIR} \\
@@ -139,5 +161,7 @@ EOF
 echo "GrayNav next experiment done."
 echo "M1 weights: ${M1_WEIGHTS}"
 echo "M2 weights: ${M2_WEIGHTS}"
+echo "M1 run dir: ${M1_RUN_DIR}"
+echo "M2 run dir: ${M2_RUN_DIR}"
 echo "Eval summary: ${EVAL_DIR}/graynav_next_eval_summary.json"
 echo "Pack command: ${EVAL_DIR}/cloud_pack_command.txt"
