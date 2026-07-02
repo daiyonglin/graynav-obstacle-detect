@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=Path("configs/training_stages.yaml"))
     parser.add_argument("--device", default="0")
-    parser.add_argument("--batch", type=int, default=128)
+    parser.add_argument("--batch", default="128", help="Integer batch size or Ultralytics auto-batch fraction, e.g. 0.85")
     parser.add_argument("--workers", type=int)
     parser.add_argument("--project")
     parser.add_argument("--name-prefix")
@@ -30,6 +30,14 @@ def parse_args() -> argparse.Namespace:
 
 def load_config(path: Path) -> Dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def parse_batch(value: str) -> int | float:
+    """Preserve Ultralytics support for fixed batch sizes and auto-batch fractions."""
+    text = str(value).strip()
+    if "." in text:
+        return float(text)
+    return int(text)
 
 
 def train_one_stage(
@@ -50,7 +58,7 @@ def train_one_stage(
         data=str(data),
         imgsz=int(model_cfg.get("imgsz", 384)),
         epochs=int(stage_cfg["epochs"]),
-        batch=args.batch,
+        batch=parse_batch(args.batch),
         device=args.device,
         workers=workers,
         project=project,
@@ -93,7 +101,7 @@ def train_one_stage(
     print(f"stage={stage_name}")
     print(f"weights={weights}")
     print(f"run={Path(project) / run_name}")
-    print(f"epochs={train_kwargs['epochs']} batch={args.batch} freeze={freeze}")
+    print(f"epochs={train_kwargs['epochs']} batch={train_kwargs['batch']} freeze={freeze}")
     print("=" * 90)
 
     model = YOLO(str(weights))
@@ -122,4 +130,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
