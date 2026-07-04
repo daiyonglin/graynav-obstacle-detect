@@ -10,6 +10,7 @@ VAL_ZIP="${VAL_ZIP:-/root/autodl-tmp/val2017.zip}"
 DATA_ROOT="${DATA_ROOT:-/root/autodl-tmp/datasets/graynav_coco8_graystem}"
 COCO_ROOT="${COCO_ROOT:-/root/autodl-tmp/datasets/coco}"
 WEIGHTS="${WEIGHTS:-/root/autodl-tmp/yolov8n.pt}"
+M1_WEIGHTS_PATH="${M1_WEIGHTS_PATH:-}"
 CONFIG="${CONFIG:-configs/graystem_training.yaml}"
 IMG_SIZE="${IMG_SIZE:-384}"
 DEVICE="${DEVICE:-0}"
@@ -51,18 +52,23 @@ if [[ ! -f "$DATA_ROOT/graynav8.yaml" ]]; then
     --overwrite
 fi
 
-python scripts/train_yolov8n_gray_obstacle8.py \
-  --data "$DATA_ROOT/graynav8.yaml" \
-  --config "$CONFIG" \
-  --device "$DEVICE" \
-  --batch "$BATCH" \
-  --workers "$WORKERS" \
-  --project runs/detect \
-  --name-prefix M1_graynav_yolov8n_ft \
-  --base-weights "$WEIGHTS" \
-  --final-weights-file "$STATE_DIR/M1_final_weights.txt"
-
-M1_WEIGHTS="$(cat "$STATE_DIR/M1_final_weights.txt")"
+if [[ -n "$M1_WEIGHTS_PATH" ]]; then
+  M1_WEIGHTS="$M1_WEIGHTS_PATH"
+  echo "$M1_WEIGHTS" > "$STATE_DIR/M1_final_weights.txt"
+  echo "Using existing M1 weights: $M1_WEIGHTS"
+else
+  python scripts/train_yolov8n_gray_obstacle8.py \
+    --data "$DATA_ROOT/graynav8.yaml" \
+    --config "$CONFIG" \
+    --device "$DEVICE" \
+    --batch "$BATCH" \
+    --workers "$WORKERS" \
+    --project runs/detect \
+    --name-prefix M1_graynav_yolov8n_ft \
+    --base-weights "$WEIGHTS" \
+    --final-weights-file "$STATE_DIR/M1_final_weights.txt"
+  M1_WEIGHTS="$(cat "$STATE_DIR/M1_final_weights.txt")"
+fi
 python scripts/export_yolov8_head6.py \
   --weights "$M1_WEIGHTS" \
   --out-dir "$EXPORT_DIR/M1_graynav_yolov8n_ft" \
@@ -122,4 +128,3 @@ echo "GrayStem experiment done."
 echo "M1 weights: $M1_WEIGHTS"
 if [[ -n "$M2_WEIGHTS" ]]; then echo "M2 weights: $M2_WEIGHTS"; fi
 echo "Eval summary: $EVAL_DIR/graystem_eval_summary.json"
-
