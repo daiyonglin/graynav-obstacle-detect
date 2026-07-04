@@ -76,22 +76,25 @@ stability, action decisions, and OSD behavior.
 Current model direction:
 
 ```text
-single-channel gray -> learnable pseudo-RGB adapter -> YOLOv8n head6
+M1: gray image -> [G,G,G] -> YOLOv8n GrayNav fine-tuning -> head6
+M2: M1 first-conv folded/tied as GrayStem-BC -> fine-tuning -> head6
 ```
 
-The adapter is not intended to recover true color from grayscale. Its purpose is
-to create three useful feature channels, such as intensity, local contrast, and
-edge/texture response, so the RGB-pretrained YOLOv8n first layers receive a less
-redundant input than direct gray-copy.
+Earlier pseudo-RGB adapter routes are kept for reproducibility, but the active
+optimization line has moved to gray-domain detector fine-tuning. GrayStem-BC
+uses the identity that `[G,G,G]` makes the first RGB convolution equivalent to a
+single gray convolution, then keeps the exported model compatible with the
+existing three-channel A1 input pipeline.
 
 Main scripts:
 
 ```text
-model_optimization/scripts/gray_adapter.py
-model_optimization/scripts/optimize_spatial_adapter_metric.py
-model_optimization/scripts/evaluate_gray_adapters_coco.py
-model_optimization/scripts/diagnose_adapter_distribution.py
-model_optimization/scripts/export_gray_adapter_yolov8.py
+model_optimization/run_graystem_experiment.sh
+model_optimization/scripts/prepare_graystem_dataset.py
+model_optimization/scripts/train_yolov8n_gray_obstacle8.py
+model_optimization/scripts/graystem_yolov8.py
+model_optimization/scripts/evaluate_graystem_obstacle8.py
+model_optimization/scripts/export_yolov8_head6.py
 ```
 
 Cloud upload packages should be generated only when training is about to run on

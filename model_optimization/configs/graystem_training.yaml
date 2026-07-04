@@ -1,0 +1,36 @@
+model:
+  imgsz: 384
+  project: runs/detect
+  name_prefix: graynav_yolov8n
+  workers: 8
+  patience: 30
+
+stages:
+  warmup:
+    epochs: 15
+    freeze: 10
+    lr0: 0.001
+    lrf: 0.05
+    hsv_v: 0.30
+    mosaic: 0.25
+    mixup: 0.0
+    close_mosaic: 5
+  adapt:
+    epochs: 100
+    freeze: 0
+    lr0: 0.0005
+    lrf: 0.03
+    hsv_v: 0.35
+    mosaic: 0.45
+    mixup: 0.02
+    close_mosaic: 20
+  stabilize:
+    epochs: 20
+    freeze: 0
+    lr0: 0.00008
+    lrf: 0.1
+    hsv_v: 0.12
+    mosaic: 0.0
+    mixup: 0.0
+    close_mosaic: 0
+
