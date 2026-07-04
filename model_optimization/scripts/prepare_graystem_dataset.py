@@ -305,6 +305,7 @@ def main() -> None:
 
     manifest = {
         "dataset": "GrayNav-Obstacle8-GrayStem",
+        "category_policy": "Default navigation semantic compression. Edit scripts/graynav_obstacle8.py to use a different class set.",
         "train_zip": str(args.train_zip),
         "train_annotations": str(args.train_annotations),
         "val_images": str(args.val_images),
@@ -313,6 +314,7 @@ def main() -> None:
         "seed": args.seed,
         "target_images": args.target_images,
         "hard_negative": args.hard_negative,
+        "class_balance_quotas": {SEMANTIC_NAMES[idx]: quota for idx, quota in DEFAULT_QUOTAS.items()},
         "semantic_names": SEMANTIC_NAMES,
         "splits": {"train": train_stats, "val": val_stats},
     }

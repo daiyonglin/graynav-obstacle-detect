@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=0.001)
     parser.add_argument("--iou", type=float, default=0.7)
     parser.add_argument("--max-det", type=int, default=100)
+    parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--corruptions", default="normal,low_light,high_exposure,low_contrast,motion_blur,noise,shadow")
     parser.add_argument("--tensorboard-dir", type=Path, default=Path("runs/tensorboard/graystem"))
     return parser.parse_args()
@@ -118,6 +119,7 @@ def predict_to_coco_json(
         max_det=args.max_det,
         stream=True,
         verbose=False,
+        batch=args.batch,
     )
     count = 0
     for result in tqdm(results, desc=f"predict {weights.name}"):
@@ -206,4 +208,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

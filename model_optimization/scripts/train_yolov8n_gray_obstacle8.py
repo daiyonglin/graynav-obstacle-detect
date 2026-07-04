@@ -23,7 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name-prefix")
     parser.add_argument("--base-weights")
     parser.add_argument("--stages", nargs="+", choices=STAGE_ORDER, default=STAGE_ORDER)
-    parser.add_argument("--cache", action="store_true")
+    parser.add_argument("--cache", nargs="?", const="ram", default="none", choices=["none", "ram", "disk"])
+    parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--single-stage", action="store_true", help="Train only the first requested stage from its input weights")
     parser.add_argument("--final-weights-file", type=Path, help="Optional file that receives the final best.pt path.")
     return parser.parse_args()
@@ -39,6 +40,13 @@ def parse_batch(value: str) -> int | float:
     if "." in text:
         return float(text)
     return int(text)
+
+
+def parse_cache(value: str) -> bool | str:
+    """Map a CLI cache mode to the Ultralytics train() cache argument."""
+    if value in ("", "none", "False", "false", "0"):
+        return False
+    return value
 
 
 def stage_best_path(model: YOLO, project: str, run_name: str) -> Path:
@@ -70,6 +78,9 @@ def train_one_stage(
     cfg: Dict[str, Any],
     args: argparse.Namespace,
 ) -> Path:
+    weights_path = Path(str(weights))
+    if not weights_path.exists():
+        raise FileNotFoundError(f"training weights not found, refusing Ultralytics auto-download: {weights_path}")
     model_cfg = cfg["model"]
     stage_cfg = cfg["stages"][stage_name]
     project = args.project or model_cfg.get("project", "runs/detect")
@@ -93,7 +104,8 @@ def train_one_stage(
         cos_lr=True,
         optimizer="auto",
         amp=True,
-        cache=args.cache,
+        cache=parse_cache(str(args.cache)),
+        verbose=bool(args.verbose),
         hsv_h=0.0,
         hsv_s=0.0,
         hsv_v=float(stage_cfg.get("hsv_v", 0.25)),
@@ -127,7 +139,7 @@ def train_one_stage(
     print(f"epochs={train_kwargs['epochs']} batch={train_kwargs['batch']} freeze={freeze}")
     print("=" * 90)
 
-    model = YOLO(str(weights))
+    model = YOLO(str(weights_path))
     model.train(**train_kwargs)
     return stage_best_path(model, project, run_name)
 
