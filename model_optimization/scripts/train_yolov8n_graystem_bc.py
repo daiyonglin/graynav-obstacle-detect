@@ -88,9 +88,11 @@ def add_graystem_callbacks(model: YOLO) -> None:
     """Keep the first convolution in GrayStem-BC form throughout training."""
 
     def _tie(trainer: Any) -> None:
-        tie_first_conv_to_graystem_bc(trainer.model)
+        train_model = getattr(trainer, "model", None)
+        if train_model is not None:
+            tie_first_conv_to_graystem_bc(train_model)
 
-    model.add_callback("on_pretrain_routine_start", _tie)
+    model.add_callback("on_train_start", _tie)
     model.add_callback("on_train_epoch_start", _tie)
     model.add_callback("on_train_batch_end", _tie)
     model.add_callback("on_fit_epoch_end", _tie)
