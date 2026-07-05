@@ -4,6 +4,92 @@ from __future__ import annotations
 from typing import Iterable
 
 
+COCO80_NAMES = [
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
+]
+
+COCO_NAME_TO_YOLO80 = {name: idx for idx, name in enumerate(COCO80_NAMES)}
+
+
 SEMANTIC_NAMES = [
     "person",
     "chair/seat",
@@ -65,6 +151,16 @@ def category_id_to_semantic(categories: Iterable[dict]) -> dict[int, int]:
         sem = COCO_NAME_TO_SEMANTIC.get(normalize_name(cat.get("name", "")))
         if sem is not None:
             out[int(cat["id"])] = sem
+    return out
+
+
+def category_id_to_yolo80(categories: Iterable[dict]) -> dict[int, int]:
+    """Build a COCO category-id to Ultralytics COCO80 class-id mapping."""
+    out: dict[int, int] = {}
+    for cat in categories:
+        cls = COCO_NAME_TO_YOLO80.get(normalize_name(cat.get("name", "")))
+        if cls is not None:
+            out[int(cat["id"])] = cls
     return out
 
 
