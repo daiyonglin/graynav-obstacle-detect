@@ -23,7 +23,9 @@ CONTEXT_IMAGES="${CONTEXT_IMAGES:-8000}"
 NEGATIVE_IMAGES="${NEGATIVE_IMAGES:-0}"
 RUN_M1="${RUN_M1:-1}"
 RUN_M2="${RUN_M2:-1}"
-TERMINAL_QUIET="${TERMINAL_QUIET:-1}"
+REBUILD_DATASET="${REBUILD_DATASET:-0}"
+TRAIN_VERBOSE="${TRAIN_VERBOSE:-1}"
+TERMINAL_QUIET="${TERMINAL_QUIET:-0}"
 LOG_DIR="${LOG_DIR:-logs/graystem_bc_$(date +%Y%m%d_%H%M%S)}"
 
 ANN_DIR="$COCO_ROOT/annotations"
@@ -37,7 +39,7 @@ TB_DIR="runs/tensorboard/graystem_bc"
 
 mkdir -p "$ANN_DIR" "$STATE_DIR" "$EXPORT_DIR" "$EVAL_DIR" "$LOG_DIR"
 export PYTHONUNBUFFERED=1
-export TQDM_MININTERVAL="${TQDM_MININTERVAL:-5}"
+export TQDM_MININTERVAL="${TQDM_MININTERVAL:-2}"
 
 if [[ ! -f "$WEIGHTS" ]]; then
   echo "ERROR: base weights not found: $WEIGHTS" >&2
@@ -79,6 +81,11 @@ if [[ ! -d "$VAL_IMAGES" || -z "$(find "$VAL_IMAGES" -maxdepth 1 -name '*.jpg' -
   unzip -q "$VAL_ZIP" -d "$COCO_ROOT"
 fi
 
+if [[ "$REBUILD_DATASET" == "1" ]]; then
+  echo "REBUILD_DATASET=1, removing existing dataset root: $DATA_ROOT"
+  rm -rf "$DATA_ROOT"
+fi
+
 if [[ ! -f "$DATA_ROOT/gray_coco80.yaml" ]]; then
   run_step prepare_dataset python scripts/prepare_yolov8n80_gray_dataset.py \
     --train-zip "$TRAIN_ZIP" \
@@ -90,12 +97,34 @@ if [[ ! -f "$DATA_ROOT/gray_coco80.yaml" ]]; then
     --context-images "$CONTEXT_IMAGES" \
     --negative-images "$NEGATIVE_IMAGES" \
     --overwrite
+else
+  echo "Reusing existing dataset: $DATA_ROOT"
+  if [[ -f "$DATA_ROOT/dataset_manifest.json" ]]; then
+    python - <<PY
+from pathlib import Path
+import json
+p=Path("$DATA_ROOT/dataset_manifest.json")
+m=json.loads(p.read_text(encoding="utf-8"))
+print("dataset_manifest:", json.dumps({
+    "dataset": m.get("dataset"),
+    "target_images": m.get("target_images"),
+    "context_images": m.get("context_images"),
+    "negative_images": m.get("negative_images"),
+    "splits": m.get("splits"),
+}, ensure_ascii=False, indent=2))
+PY
+  fi
 fi
 
 run_step audit_gray_dataset python scripts/audit_gray_dataset.py \
   --roots "$DATA_ROOT/images/train" "$DATA_ROOT/images/val" \
   --out "$STATE_DIR/gray_dataset_audit.json" \
   --sample-images 1200
+
+VERBOSE_ARGS=()
+if [[ "$TRAIN_VERBOSE" == "1" ]]; then
+  VERBOSE_ARGS+=(--verbose)
+fi
 
 if [[ "$RUN_M1" == "1" || ! -f "$STATE_DIR/M1_final_weights.txt" ]]; then
   run_step train_m1_conservative python scripts/train_yolov8n_gray_obstacle8.py \
@@ -108,7 +137,8 @@ if [[ "$RUN_M1" == "1" || ! -f "$STATE_DIR/M1_final_weights.txt" ]]; then
     --name-prefix M1_yolov8n80_gray_conservative \
     --base-weights "$WEIGHTS" \
     --cache "$CACHE" \
-    --final-weights-file "$STATE_DIR/M1_final_weights.txt"
+    --final-weights-file "$STATE_DIR/M1_final_weights.txt" \
+    "${VERBOSE_ARGS[@]}"
 fi
 
 M1_WEIGHTS="$(cat "$STATE_DIR/M1_final_weights.txt")"
@@ -124,7 +154,8 @@ if [[ "$RUN_M2" == "1" ]]; then
     --project runs/detect \
     --name-prefix M2_graystem_bc_yolov8n80 \
     --cache "$CACHE" \
-    --final-weights-file "$STATE_DIR/M2_final_weights.txt"
+    --final-weights-file "$STATE_DIR/M2_final_weights.txt" \
+    "${VERBOSE_ARGS[@]}"
 fi
 
 M2_WEIGHTS=""
