@@ -1,0 +1,50 @@
+model:
+  imgsz: 384
+  project: runs/detect
+  name_prefix: yolov8n80_gray_conservative
+  workers: 12
+  patience: 18
+
+stages:
+  warmup:
+    epochs: 3
+    freeze: 10
+    lr0: 0.00012
+    lrf: 0.1
+    hsv_v: 0.10
+    degrees: 1.0
+    translate: 0.04
+    scale: 0.25
+    perspective: 0.0002
+    erasing: 0.05
+    mosaic: 0.0
+    close_mosaic: 0
+    warmup_epochs: 2.0
+  adapt:
+    epochs: 30
+    freeze: 0
+    lr0: 0.00008
+    lrf: 0.08
+    hsv_v: 0.14
+    degrees: 1.0
+    translate: 0.05
+    scale: 0.30
+    perspective: 0.0002
+    erasing: 0.08
+    mosaic: 0.08
+    close_mosaic: 8
+    warmup_epochs: 2.0
+  stabilize:
+    epochs: 8
+    freeze: 0
+    lr0: 0.00002
+    lrf: 0.2
+    hsv_v: 0.05
+    degrees: 0.0
+    translate: 0.02
+    scale: 0.12
+    perspective: 0.0
+    erasing: 0.02
+    mosaic: 0.0
+    close_mosaic: 0
+    warmup_epochs: 1.0

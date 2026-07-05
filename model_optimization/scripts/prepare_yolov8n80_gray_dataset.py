@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--target-images", type=int, default=30000)
     parser.add_argument("--context-images", type=int, default=3000)
+    parser.add_argument("--negative-images", type=int, default=0, help="Extra train images written with empty YOLO labels.")
     parser.add_argument("--val-max-images", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260705)
     parser.add_argument("--min-box", type=float, default=4.0)
@@ -112,9 +113,10 @@ def select_images(
     semantic_presence: dict[int, set[int]],
     target_images: int,
     context_images: int,
+    negative_images: int,
     seed: int,
 ) -> list[int]:
-    """Select a navigation-biased subset while preserving COCO80 labels."""
+    """Select a navigation-biased subset while preserving COCO80 labels and optional hard negatives."""
     rng = random.Random(seed)
     selected: list[int] = []
     selected_set: set[int] = set()
@@ -138,6 +140,12 @@ def select_images(
     context_pool = [image_id for image_id in images if image_id in labels and image_id not in semantic_presence and image_id not in selected_set]
     rng.shuffle(context_pool)
     for image_id in context_pool[:context_images]:
+        selected.append(image_id)
+        selected_set.add(image_id)
+
+    negative_pool = [image_id for image_id in images if image_id not in labels and image_id not in selected_set]
+    rng.shuffle(negative_pool)
+    for image_id in negative_pool[:negative_images]:
         selected.append(image_id)
         selected_set.add(image_id)
 
@@ -305,7 +313,15 @@ def main() -> None:
     val_images = read_images(args.val_annotations, args.val_max_images)
     train_labels, train_sem_presence = collect_boxes(args.train_annotations, train_cat_to_yolo80, train_cat_to_sem, args.min_box)
     val_labels, _ = collect_boxes(args.val_annotations, val_cat_to_yolo80, val_cat_to_sem, args.min_box)
-    train_ids = select_images(train_images, train_labels, train_sem_presence, args.target_images, args.context_images, args.seed)
+    train_ids = select_images(
+        train_images,
+        train_labels,
+        train_sem_presence,
+        args.target_images,
+        args.context_images,
+        args.negative_images,
+        args.seed,
+    )
     val_ids = list(val_images.keys())
     train_stats = write_split("train", train_ids, train_images, train_labels, args.out, args.jpg_quality, train_zip=args.train_zip)
     val_stats = write_split("val", val_ids, val_images, val_labels, args.out, args.jpg_quality, val_dir=args.val_images)
@@ -323,6 +339,7 @@ def main() -> None:
         "val_annotations": str(args.val_annotations),
         "target_images": args.target_images,
         "context_images": args.context_images,
+        "negative_images": args.negative_images,
         "semantic_sampling_quotas": {SEMANTIC_NAMES[idx]: quota for idx, quota in DEFAULT_NAV_QUOTAS.items()},
         "yaml": str(yaml_path),
         "splits": {"train": train_stats, "val": val_stats},
@@ -333,4 +350,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
