@@ -39,12 +39,19 @@ COCO_TO_GENERIC_ALIASES = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate M0 COCO YOLO and M1 DCE YOLO on a generic gray obstacle dataset.")
+    parser = argparse.ArgumentParser(description="Evaluate COCO YOLO, DCE YOLO, and optional ablation models on a generic gray obstacle dataset.")
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--data-yaml", type=Path, required=True)
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     parser.add_argument("--m0-weights", type=Path, required=True)
     parser.add_argument("--m1-weights", type=Path, required=True)
+    parser.add_argument(
+        "--extra-model",
+        action="append",
+        default=[],
+        metavar="NAME=WEIGHTS",
+        help="Optional additional model for ablation, for example M2_yolov8n_no_dce=/path/best.pt.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--imgsz", type=int, default=384)
     parser.add_argument("--device", default="0")
@@ -55,6 +62,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corruptions", default=",".join(CORRUPTIONS))
     parser.add_argument("--tensorboard-dir", type=Path, default=Path("runs/tensorboard/graynav_dce_generic"))
     return parser.parse_args()
+
+
+def parse_extra_models(items: list[str]) -> list[tuple[str, Path]]:
+    """Parse NAME=WEIGHTS model specs used for controlled ablation evaluation."""
+    models: list[tuple[str, Path]] = []
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"--extra-model must be NAME=WEIGHTS, got: {item}")
+        name, path = item.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError(f"empty extra model name: {item}")
+        models.append((name, Path(path).expanduser()))
+    return models
 
 
 def normalize_name(name: str) -> str:
@@ -183,7 +204,7 @@ def image_id_by_name(coco: COCO) -> dict[str, int]:
     return {Path(img["file_name"]).name: int(img_id) for img_id, img in coco.imgs.items()}
 
 
-def predict_json(weights: Path, images: Path, annotations: Path, dataset_names: list[str], out_json: Path, args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, float]]:
+def predict_json(model_name: str, weights: Path, images: Path, annotations: Path, dataset_names: list[str], out_json: Path, args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, float]]:
     """Run prediction and map class ids to dataset categories."""
     register_ultralytics_dce()
     coco = COCO(str(annotations))
@@ -193,7 +214,7 @@ def predict_json(weights: Path, images: Path, annotations: Path, dataset_names: 
     t0 = time.perf_counter()
     results = model.predict(source=str(images), imgsz=args.imgsz, device=args.device, conf=args.conf, iou=args.iou, max_det=args.max_det, stream=True, verbose=False, batch=args.batch)
     count = 0
-    for result in tqdm(results, desc=f"predict {weights.name}"):
+    for result in tqdm(results, desc=f"predict {model_name}"):
         count += 1
         image_id = ids.get(Path(result.path).name)
         if image_id is None or result.boxes is None:
@@ -249,6 +270,19 @@ def overlap_names(dataset_names: list[str]) -> list[str]:
     return out
 
 
+def model_specs(args: argparse.Namespace) -> list[tuple[str, Path]]:
+    """Return ordered models for evaluation and explicit claim decomposition."""
+    specs = [
+        ("M0_raw_yolov8n_graycopy", args.m0_weights),
+        ("M1_graynav_dce_yolov8n", args.m1_weights),
+    ]
+    specs.extend(parse_extra_models(args.extra_model))
+    for name, weights in specs:
+        if not weights.exists():
+            raise FileNotFoundError(f"{name} weights not found: {weights}")
+    return specs
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -259,12 +293,24 @@ def main() -> None:
     overlap = overlap_names(names)
     non_overlap = [name for name in names if name not in overlap]
     writer = SummaryWriter(log_dir=str(args.tensorboard_dir))
-    summary: dict[str, Any] = {"settings": vars(args) | {"names": names, "overlap_names": overlap, "non_overlap_names": non_overlap, "corruptions": corruptions}, "models": {}}
+    specs = model_specs(args)
+    summary: dict[str, Any] = {
+        "settings": vars(args)
+        | {
+            "names": names,
+            "overlap_names": overlap,
+            "non_overlap_names": non_overlap,
+            "corruptions": corruptions,
+            "model_specs": [{"name": name, "weights": str(weights)} for name, weights in specs],
+            "claim_note": "M0 has COCO classes only; task-trained models have dataset-native classes. Use no-DCE ablation to isolate architecture contribution.",
+        },
+        "models": {},
+    }
     for cidx, corruption in enumerate(corruptions):
         eval_images = prepare_eval_images(image_dir, args.out_dir, corruption)
-        for model_name, weights in [("M0_raw_yolov8n_graycopy", args.m0_weights), ("M1_graynav_dce_yolov8n", args.m1_weights)]:
+        for model_name, weights in specs:
             pred_path = args.out_dir / "predictions" / f"{model_name}_{corruption}.json"
-            preds, perf = predict_json(weights, eval_images, annotations, names, pred_path, args)
+            preds, perf = predict_json(model_name, weights, eval_images, annotations, names, pred_path, args)
             all_m = coco_eval(annotations, preds, names)
             overlap_m = coco_eval(annotations, preds, names, overlap) if overlap else {}
             non_overlap_m = coco_eval(annotations, preds, names, non_overlap) if non_overlap else {}
