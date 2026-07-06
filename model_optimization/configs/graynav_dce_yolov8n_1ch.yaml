@@ -1,0 +1,35 @@
+# True single-channel GrayNav-DCE-YOLOv8n.
+# The first Conv receives one grayscale channel directly. It is initialized
+# from yolov8n.pt by summing the original RGB first-conv weights, preserving
+# the response that the RGB model would see for [G,G,G] input.
+nc: 25
+ch: 1
+
+backbone:
+  - [-1, 1, Conv, [16, 3, 2]]
+  - [-1, 1, Conv, [32, 3, 2]]
+  - [-1, 1, C2f, [32, True]]
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [-1, 2, C2f, [64, True]]
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [-1, 2, C2f, [128, True]]
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [-1, 1, C2f, [256, True]]
+  - [-1, 1, SPPF, [256, 5]]
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 6], 1, Concat, [1]]
+  - [-1, 1, C2f, [128]]
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 4], 1, Concat, [1]]
+  - [-1, 1, C2f, [64]]
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 1, C2f, [128]]
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]]
+  - [-1, 1, C2f, [256]]
+  - [15, 1, DCE, [64]]
+  - [18, 1, DCE, [128]]
+  - [[22, 23, 21], 1, Detect, [nc]]

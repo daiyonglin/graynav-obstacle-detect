@@ -18,11 +18,12 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare a generic YOLO dataset as exact gray [G,G,G] detection data.")
+    parser = argparse.ArgumentParser(description="Prepare a generic YOLO dataset as gray detection data.")
     parser.add_argument("--source", type=Path, required=True, help="YOLO dataset zip or extracted directory.")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--jpg-quality", type=int, default=95)
+    parser.add_argument("--output-mode", choices=["gray3", "gray1"], default="gray3")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -73,12 +74,14 @@ def find_split(root: Path, split: str) -> Path | None:
     return None
 
 
-def gray3_from_image(path: Path) -> Any:
-    """Read one image and return exact gray replicated to BGR channels."""
+def gray_from_image(path: Path, output_mode: str) -> Any:
+    """Read one image and return either exact gray [G,G,G] or true one-channel gray."""
     bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if bgr is None:
         raise RuntimeError(f"failed to read image: {path}")
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    if output_mode == "gray1":
+        return gray
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
@@ -118,7 +121,7 @@ def normalize_yolo_label_line(line: str, num_classes: int) -> tuple[int, str] | 
     return cls, f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
 
 
-def write_split(split: str, split_dir: Path, out: Path, names: list[str], jpg_quality: int) -> dict[str, Any]:
+def write_split(split: str, split_dir: Path, out: Path, names: list[str], jpg_quality: int, output_mode: str) -> dict[str, Any]:
     """Write one split as gray images and detection-format labels."""
     image_dir = split_dir / "images"
     label_dir = split_dir / "labels"
@@ -130,7 +133,7 @@ def write_split(split: str, split_dir: Path, out: Path, names: list[str], jpg_qu
         dst_img = out / "images" / split / f"{img.stem}.jpg"
         dst_label = out / "labels" / split / f"{img.stem}.txt"
         dst_img.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(dst_img), gray3_from_image(img), [int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality])
+        cv2.imwrite(str(dst_img), gray_from_image(img, output_mode), [int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality])
 
         lines_out: list[str] = []
         src_label = label_dir / f"{img.stem}.txt"
@@ -158,11 +161,12 @@ def write_split(split: str, split_dir: Path, out: Path, names: list[str], jpg_qu
     }
 
 
-def write_yaml(out: Path, names: list[str]) -> Path:
+def write_yaml(out: Path, names: list[str], output_mode: str) -> Path:
     """Write a canonical Ultralytics data YAML."""
     body = "\n".join(f"  {idx}: {name}" for idx, name in enumerate(names))
     path = out / "gray_dataset.yaml"
-    path.write_text(f"path: {out.as_posix()}\ntrain: images/train\nval: images/val\ntest: images/test\nnames:\n{body}\n", encoding="utf-8")
+    channels = "channels: 1\n" if output_mode == "gray1" else ""
+    path.write_text(f"path: {out.as_posix()}\ntrain: images/train\nval: images/val\ntest: images/test\n{channels}names:\n{body}\n", encoding="utf-8")
     return path
 
 
@@ -183,15 +187,16 @@ def main() -> None:
         if "train" not in splits or "val" not in splits:
             raise FileNotFoundError(f"expected train and valid/val splits under {root}")
         splits.setdefault("test", splits["val"])
-        stats = {split: write_split(split, d, args.out, names, args.jpg_quality) for split, d in splits.items()}
-        out_yaml = write_yaml(args.out, names)
+        stats = {split: write_split(split, d, args.out, names, args.jpg_quality, args.output_mode) for split, d in splits.items()}
+        out_yaml = write_yaml(args.out, names, args.output_mode)
         manifest = {
             "dataset": "Generic-Obstacle-Gray-YOLO",
             "source": str(args.source),
             "source_yaml": str(yaml_path),
             "names": names,
             "nc": len(names),
-            "gray_conversion": "cv2 BGR2GRAY then GRAY2BGR",
+            "input_mode": args.output_mode,
+            "gray_conversion": "cv2 BGR2GRAY" if args.output_mode == "gray1" else "cv2 BGR2GRAY then GRAY2BGR",
             "label_conversion": "YOLO bbox preserved; YOLO polygon converted to bbox by min/max coordinates",
             "yaml": str(out_yaml),
             "splits": stats,

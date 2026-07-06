@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 from ultralytics import YOLO
 
@@ -83,6 +84,34 @@ def materialize_model_yaml(model_yaml: Path, nc: int, out_dir: Path) -> Path:
     return out
 
 
+def first_conv_from_yolo(model: YOLO) -> torch.nn.Conv2d:
+    """Return the first Conv2d layer inside an Ultralytics YOLO model."""
+    layer0 = model.model.model[0]
+    conv = getattr(layer0, "conv", None)
+    if not isinstance(conv, torch.nn.Conv2d):
+        raise TypeError(f"unexpected first layer: {type(layer0)} / {type(conv)}")
+    return conv
+
+
+def maybe_init_one_channel_first_conv(model: YOLO, weights: Path) -> bool:
+    """Initialize a 1-channel first conv from RGB weights for gray-copy equivalence."""
+    target_conv = first_conv_from_yolo(model)
+    if target_conv.weight.ndim != 4 or target_conv.weight.shape[1] != 1:
+        return False
+    source = YOLO(str(weights))
+    source_conv = first_conv_from_yolo(source)
+    if source_conv.weight.ndim != 4 or source_conv.weight.shape[1] != 3:
+        return False
+    if source_conv.weight.shape[0] != target_conv.weight.shape[0] or source_conv.weight.shape[2:] != target_conv.weight.shape[2:]:
+        return False
+    with torch.no_grad():
+        folded = source_conv.weight.data.sum(dim=1, keepdim=True)
+        target_conv.weight.data.copy_(folded.to(target_conv.weight.device, dtype=target_conv.weight.dtype))
+        if source_conv.bias is not None and target_conv.bias is not None:
+            target_conv.bias.data.copy_(source_conv.bias.data.to(target_conv.bias.device, dtype=target_conv.bias.dtype))
+    return True
+
+
 def main() -> None:
     args = parse_args()
     if not args.weights.exists():
@@ -93,6 +122,7 @@ def main() -> None:
     active_yaml = materialize_model_yaml(args.model_yaml, nc, args.out_dir)
     model = YOLO(str(active_yaml))
     model.load(str(args.weights))
+    one_channel_initialized = maybe_init_one_channel_first_conv(model, args.weights)
 
     train_kwargs: dict[str, Any] = dict(
         data=str(args.data),
@@ -142,6 +172,7 @@ def main() -> None:
     print(f"dataset_nc={nc}")
     print(f"data={args.data}")
     print(f"weights_init={args.weights}")
+    print(f"one_channel_first_conv_initialized={one_channel_initialized}")
     print(f"epochs={args.epochs} batch={args.batch} imgsz={args.imgsz}")
     print(f"optimizer={args.optimizer} lr0={args.lr0} lrf={args.lrf} freeze={args.freeze}")
     model.train(**train_kwargs)

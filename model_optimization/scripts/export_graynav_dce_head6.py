@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--imgsz", type=int, default=384)
     parser.add_argument("--opset", type=int, default=12)
-    parser.add_argument("--num-classes", type=int, default=22)
+    parser.add_argument("--num-classes", type=int, default=25)
     parser.add_argument("--input-name", default="images")
     parser.add_argument("--output-names", nargs="*", default=DEFAULT_HEAD6_OUTPUTS)
     return parser.parse_args()

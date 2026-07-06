@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calib-num", type=int, default=80)
     parser.add_argument("--eval-num", type=int, default=20)
     parser.add_argument("--seed", type=int, default=20260616)
-    parser.add_argument("--input-mode", choices=["gray3", "color3"], default="gray3")
+    parser.add_argument("--input-mode", choices=["gray1", "gray3", "color3"], default="gray3")
     return parser.parse_args()
 
 
@@ -38,6 +38,20 @@ def letterbox_gray_to_3ch(gray: np.ndarray, imgsz: int, color: int = 114) -> Tup
     canvas[dy : dy + new_h, dx : dx + new_w] = resized
     img3 = np.stack([canvas, canvas, canvas], axis=2)
     return img3, scale, dx, dy
+
+
+def letterbox_gray_to_1ch(gray: np.ndarray, imgsz: int, color: int = 114) -> Tuple[np.ndarray, float, int, int]:
+    """Letterbox a grayscale image as a true one-channel model input."""
+    h, w = gray.shape[:2]
+    scale = min(imgsz / float(h), imgsz / float(w))
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    resized = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((imgsz, imgsz), color, dtype=np.uint8)
+    dx = (imgsz - new_w) // 2
+    dy = (imgsz - new_h) // 2
+    canvas[dy : dy + new_h, dx : dx + new_w] = resized
+    return canvas[None, :, :], scale, dx, dy
 
 
 def letterbox_color_to_3ch(img: np.ndarray, imgsz: int, color: int = 114) -> np.ndarray:
@@ -61,13 +75,19 @@ def preprocess(path: Path, imgsz: int, input_mode: str) -> np.ndarray:
         if img is None:
             raise RuntimeError(f"failed to read {path}")
         img3 = letterbox_color_to_3ch(img, imgsz)
-    else:
+    elif input_mode == "gray3":
         gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if gray is None:
             raise RuntimeError(f"failed to read {path}")
         img3, _, _, _ = letterbox_gray_to_3ch(gray, imgsz)
-    x = img3.astype(np.float32) / 255.0
-    return x.transpose(2, 0, 1)[None, ...]
+        x = img3.astype(np.float32) / 255.0
+        return x.transpose(2, 0, 1)[None, ...]
+    else:
+        gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            raise RuntimeError(f"failed to read {path}")
+        img1, _, _, _ = letterbox_gray_to_1ch(gray, imgsz)
+        return (img1.astype(np.float32) / 255.0)[None, ...]
 
 
 def zip_dir(src_dir: Path, zip_path: Path) -> None:
