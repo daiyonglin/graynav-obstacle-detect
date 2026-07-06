@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+import yaml
 from ultralytics import YOLO
 
 from graynav_dce import register_ultralytics_dce
@@ -57,13 +58,34 @@ def best_path(model: YOLO, project: str, name: str) -> Path:
     raise RuntimeError(f"best.pt not found for {project}/{name}, save_dir={save_dir}")
 
 
+def dataset_nc(data_yaml: Path) -> int:
+    """Read class count from an Ultralytics data YAML."""
+    data = yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
+    names = data.get("names", [])
+    if isinstance(names, dict):
+        return len(names)
+    return len(list(names))
+
+
+def materialize_model_yaml(model_yaml: Path, nc: int, out_dir: Path) -> Path:
+    """Write a temporary model YAML with nc matched to the active dataset."""
+    data = yaml.safe_load(model_yaml.read_text(encoding="utf-8")) or {}
+    data["nc"] = int(nc)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{model_yaml.stem}_nc{nc}.yaml"
+    out.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return out
+
+
 def main() -> None:
     args = parse_args()
     if not args.weights.exists():
         raise FileNotFoundError(f"base weights not found: {args.weights}")
     register_ultralytics_dce()
 
-    model = YOLO(str(args.model_yaml))
+    nc = dataset_nc(args.data)
+    active_yaml = materialize_model_yaml(args.model_yaml, nc, args.out_dir)
+    model = YOLO(str(active_yaml))
     model.load(str(args.weights))
 
     train_kwargs: dict[str, Any] = dict(
@@ -108,6 +130,8 @@ def main() -> None:
     )
     print("train_graynav_dce_yolov8n")
     print(f"model_yaml={args.model_yaml}")
+    print(f"active_model_yaml={active_yaml}")
+    print(f"dataset_nc={nc}")
     print(f"data={args.data}")
     print(f"weights_init={args.weights}")
     print(f"epochs={args.epochs} batch={args.batch} imgsz={args.imgsz}")
