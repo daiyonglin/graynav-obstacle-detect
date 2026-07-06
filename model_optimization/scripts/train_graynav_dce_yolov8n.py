@@ -12,7 +12,7 @@ from graynav_dce import register_ultralytics_dce
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train GrayNav-DCE-YOLOv8n on OOD22 gray data.")
+    parser = argparse.ArgumentParser(description="Train a YOLOv8n-family model on a prepared gray-copy obstacle dataset.")
     parser.add_argument("--model-yaml", type=Path, default=Path("configs/graynav_dce_yolov8n.yaml"))
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--weights", type=Path, required=True)
@@ -26,6 +26,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--cache", nargs="?", const="ram", default="none", choices=["none", "ram", "disk"])
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--optimizer", default="AdamW", choices=["SGD", "Adam", "AdamW", "auto"])
+    parser.add_argument("--lr0", type=float, default=0.0003)
+    parser.add_argument("--lrf", type=float, default=0.01)
+    parser.add_argument("--freeze", type=int, default=0, help="Freeze first N model layers for controlled fine-tuning.")
+    parser.add_argument("--mosaic", type=float, default=0.25)
+    parser.add_argument("--close-mosaic", type=int, default=15)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--final-weights-file", type=Path)
     return parser.parse_args()
@@ -97,9 +103,9 @@ def main() -> None:
         workers=args.workers,
         project=args.project,
         name=args.name,
-        optimizer="AdamW",
-        lr0=0.0003,
-        lrf=0.01,
+        optimizer=args.optimizer,
+        lr0=args.lr0,
+        lrf=args.lrf,
         weight_decay=0.0005,
         warmup_epochs=3.0,
         cos_lr=True,
@@ -119,15 +125,17 @@ def main() -> None:
         perspective=0.0,
         flipud=0.0,
         fliplr=0.5,
-        mosaic=0.25,
+        mosaic=args.mosaic,
         mixup=0.0,
         copy_paste=0.0,
-        close_mosaic=15,
+        close_mosaic=args.close_mosaic,
         plots=True,
         val=True,
         exist_ok=True,
         verbose=args.verbose,
     )
+    if args.freeze > 0:
+        train_kwargs["freeze"] = args.freeze
     print("train_graynav_dce_yolov8n")
     print(f"model_yaml={args.model_yaml}")
     print(f"active_model_yaml={active_yaml}")
@@ -135,6 +143,7 @@ def main() -> None:
     print(f"data={args.data}")
     print(f"weights_init={args.weights}")
     print(f"epochs={args.epochs} batch={args.batch} imgsz={args.imgsz}")
+    print(f"optimizer={args.optimizer} lr0={args.lr0} lrf={args.lrf} freeze={args.freeze}")
     model.train(**train_kwargs)
     best = best_path(model, args.project, args.name)
     args.out_dir.mkdir(parents=True, exist_ok=True)

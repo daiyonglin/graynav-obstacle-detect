@@ -45,6 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     parser.add_argument("--m0-weights", type=Path, required=True)
     parser.add_argument("--m1-weights", type=Path, required=True)
+    parser.add_argument("--m0-name", default="M0_raw_yolov8n_graycopy")
+    parser.add_argument("--m1-name", default="M1_graynav_dce_yolov8n")
     parser.add_argument(
         "--extra-model",
         action="append",
@@ -273,8 +275,8 @@ def overlap_names(dataset_names: list[str]) -> list[str]:
 def model_specs(args: argparse.Namespace) -> list[tuple[str, Path]]:
     """Return ordered models for evaluation and explicit claim decomposition."""
     specs = [
-        ("M0_raw_yolov8n_graycopy", args.m0_weights),
-        ("M1_graynav_dce_yolov8n", args.m1_weights),
+        (args.m0_name, args.m0_weights),
+        (args.m1_name, args.m1_weights),
     ]
     specs.extend(parse_extra_models(args.extra_model))
     for name, weights in specs:
