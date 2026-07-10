@@ -150,7 +150,10 @@ VoiceNotifier::VoiceNotifier()
       byte_gap_us_(1000),
       post_tx_delay_ms_(30),
       passive_rx_ms_(80),
+      soft_reset_every_tx_(20),
       consecutive_no_rx_(0),
+      consecutive_tx_failures_(0),
+      tx_failure_count_(0),
       recovery_count_(0),
       tx_count_(0),
       last_rx_code_(0),
@@ -202,6 +205,7 @@ bool VoiceNotifier::InitializeFromEnv()
     byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 1000));
     post_tx_delay_ms_ = std::max(0, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
+    soft_reset_every_tx_ = std::max(0, getenv_int("A1_VOICE_SOFT_RESET_EVERY_TX", 20));
 
     const int baud = getenv_int("A1_VOICE_BAUD", 9600);
     baud_ = baud;
@@ -248,6 +252,7 @@ bool VoiceNotifier::InitializeFromEnv()
               << " passive_rx=" << (passive_rx_ ? 1 : 0)
               << " passive_rx_ms=" << passive_rx_ms_
               << " recover_wait_ms=" << recover_wait_ms_
+              << " soft_reset_every_tx=" << soft_reset_every_tx_
               << " retry=" << retry_count_
                   << std::endl;
     } else {
@@ -436,15 +441,21 @@ bool VoiceNotifier::SendBytes(const std::vector<uint8_t>& bytes)
 
 bool VoiceNotifier::ReopenBackend()
 {
-    if (!reopen_each_tx_) {
+    const bool backend_open = backend_ == Backend::A1UartApi ? uart_ != nullptr : fd_ >= 0;
+    if (!reopen_each_tx_ && backend_open) {
         return true;
     }
-    CloseBackend();
-    usleep(20000);
-    if (backend_ == Backend::A1UartApi) {
-        return OpenA1UartApi(baud_);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        CloseBackend();
+        usleep(static_cast<useconds_t>(20000 + attempt * 40000));
+        const bool opened = backend_ == Backend::A1UartApi
+            ? OpenA1UartApi(baud_)
+            : OpenTtyDevice(tty_device_, baud_);
+        if (opened) {
+            return true;
+        }
     }
-    return OpenTtyDevice(tty_device_, baud_);
+    return false;
 }
 
 void VoiceNotifier::DrainRx(int timeout_ms)
@@ -641,6 +652,14 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             return false;
         }
         bool recovery_sent = false;
+        const int sent_count = tx_count_.load();
+        if (soft_reset_every_tx_ > 0 && sent_count > 0 &&
+            sent_count % soft_reset_every_tx_ == 0) {
+            recovery_sent = SendBytes(kSyn6288Stop);
+            usleep(220000);
+            DrainRx(40);
+            ++recovery_count_;
+        }
         const int no_rx_recover_threshold = std::max(
             3, getenv_int("A1_VOICE_NO_RX_RECOVER", 5));
         if (passive_rx_ &&
@@ -648,7 +667,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             // The module previously returned IDLE and then went silent in long
             // runs. Clear a potentially wedged synthesis transaction, retain
             // only the latest action, and immediately send that action again.
-            recovery_sent = SendBytes(kSyn6288Stop);
+            recovery_sent = SendBytes(kSyn6288Stop) || recovery_sent;
             usleep(180000);
             DrainRx(40);
             consecutive_no_rx_ = 0;
@@ -943,14 +962,28 @@ void VoiceNotifier::WorkerLoop()
         }
         if (ok) {
             std::lock_guard<std::mutex> lock(worker_mutex_);
+            consecutive_tx_failures_ = 0;
             CommitSent(action, key);
             last_sent_frame_ = frame_id;
             tx_in_flight_ = false;
             in_flight_key_.clear();
         } else {
+            ++consecutive_tx_failures_;
+            ++tx_failure_count_;
+            ++recovery_count_;
+            usleep(150000);
+            const bool recovered = ReopenBackend();
             std::lock_guard<std::mutex> lock(worker_mutex_);
             tx_in_flight_ = false;
             in_flight_key_.clear();
+            if (!worker_stop_ && !pending_ready_) {
+                pending_frame_id_ = frame_id;
+                pending_action_ = action;
+                pending_key_ = key;
+                pending_reason_ = recovered ? "uart_recovered_retry" : "uart_reopen_retry";
+                pending_ready_ = true;
+                worker_cv_.notify_one();
+            }
         }
     }
 }
@@ -962,12 +995,6 @@ void VoiceNotifier::Update(int frame_id,
     if (mode_ == Mode::Disabled) {
         return;
     }
-    if (backend_ == Backend::A1UartApi && uart_ == nullptr) {
-        return;
-    }
-    if (backend_ == Backend::TtyDevice && fd_ < 0) {
-        return;
-    }
     const std::string action = decision.action.empty() ? "clear" : decision.action;
     if (action != "stop" && frame_id % frame_interval_ != 0) {
         return;
@@ -975,12 +1002,14 @@ void VoiceNotifier::Update(int frame_id,
     const std::string key = BuildVoiceKey(result, decision);
     std::string reason;
     std::lock_guard<std::mutex> lock(worker_mutex_);
-    if (diagnostic_ && frame_id % 300 == 0) {
+    if (frame_id % 300 == 0) {
         const int since_ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - last_sent_time_).count());
         std::cout << "[VOICE][HEALTH] frame=" << frame_id
                   << " tx_count=" << tx_count_.load()
+                  << " tx_failures=" << tx_failure_count_.load()
+                  << " consecutive_failures=" << consecutive_tx_failures_.load()
                   << " no_rx=" << consecutive_no_rx_.load()
                   << " recoveries=" << recovery_count_.load()
                   << " last_tx_age_ms=" << since_ms
