@@ -169,6 +169,12 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
 
         const bool wide = item.sector == "wide";
         if (wide) {
+            // Coarse wide detections are retained as uncertainty evidence but
+            // cannot block all corridors or trigger STOP by themselves.
+            if (item.quality == "coarse" || item.distance_confidence < 0.25f) {
+                uncertain_hazard = true;
+                continue;
+            }
             AddToCorridor(&left, item);
             AddToCorridor(&center, item);
             AddToCorridor(&right, item);

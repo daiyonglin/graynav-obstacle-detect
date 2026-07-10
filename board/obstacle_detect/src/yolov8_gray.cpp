@@ -329,6 +329,16 @@ std::string quality_from_box(const std::array<float, 4>& box,
     const float height_ratio = box_height_ratio(box, img_h);
     const int touch = count_touch_borders(box, img_w, img_h);
 
+    // A box clipped to both horizontal image borders is not a reliable object
+    // extent. Quantized DFL outliers commonly saturate this way and otherwise
+    // become a high-confidence, full-width false obstacle.
+    const bool clips_both_horizontal_borders =
+        box[0] <= 3.0f && box[2] >= static_cast<float>(img_w - 4);
+    if (clips_both_horizontal_borders ||
+        (width_ratio > 0.90f && touch >= 2)) {
+        return "coarse";
+    }
+
     if (obstacle::semantic::IsObstacleClass(display_cls) &&
         score < 0.28f &&
         (width_ratio > 0.88f || area_ratio > 0.70f) &&
@@ -347,7 +357,6 @@ std::string quality_from_box(const std::array<float, 4>& box,
         area_ratio < 0.45f) {
         return "coarse";
     }
-
     if (obstacle::semantic::IsObstacleClass(display_cls) &&
         display_cls != obstacle::semantic::CHAIR_SEAT &&
         score < 0.48f &&
@@ -586,7 +595,366 @@ float probability_to_logit(float probability)
 
 bool infer_float_branch_shape(uint32_t raw_total,
                               uint32_t w,
-                 …3506 tokens truncated…                          static_cast<uint16_t>(roi_[view][1]),
+                              uint32_t h,
+                              uint8_t dtype,
+                              uint32_t* element_count,
+                              int* channels)
+{
+    if (dtype != SSNE_FLOAT32 || w == 0 || h == 0) {
+        return false;
+    }
+
+    const uint32_t hw = w * h;
+    if (hw == 0) {
+        return false;
+    }
+
+    if (raw_total % hw == 0) {
+        const uint32_t c = raw_total / hw;
+        if (c == NUM_CLASSES || c == REG_CHANNELS) {
+            *element_count = raw_total;
+            *channels = static_cast<int>(c);
+            return true;
+        }
+    }
+
+    const uint32_t bytes_per_float = 4;
+    const uint32_t hw_bytes = hw * bytes_per_float;
+    if (hw_bytes != 0 && raw_total % hw_bytes == 0) {
+        const uint32_t c = raw_total / hw_bytes;
+        if (c == NUM_CLASSES || c == REG_CHANNELS) {
+            *element_count = raw_total / bytes_per_float;
+            *channels = static_cast<int>(c);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool make_branch_view(ssne_tensor_t tensor,
+                      int out_idx,
+                      int det_width,
+                      BranchView* out)
+{
+    const uint32_t w = get_width(tensor);
+    const uint32_t h = get_height(tensor);
+    const uint32_t raw_total = get_total_size(tensor);
+    const uint8_t dtype = get_data_type(tensor);
+    const uint8_t fmt = get_data_format(tensor);
+
+    uint32_t element_count = 0;
+    int channels = 0;
+    if (!infer_float_branch_shape(raw_total, w, h, dtype, &element_count, &channels)) {
+        out->data = reinterpret_cast<float*>(get_data(tensor));
+        out->out_idx = out_idx;
+        out->w = static_cast<int>(w);
+        out->h = static_cast<int>(h);
+        out->c = 0;
+        out->stride = 0;
+        out->raw_total = raw_total;
+        out->element_count = 0;
+        out->dtype = dtype;
+        out->fmt = fmt;
+        out->is_cls = false;
+        return false;
+    }
+
+    out->data = reinterpret_cast<float*>(get_data(tensor));
+    out->out_idx = out_idx;
+    out->w = static_cast<int>(w);
+    out->h = static_cast<int>(h);
+    out->c = channels;
+    out->stride = (w > 0) ? (det_width / static_cast<int>(w)) : 0;
+    out->raw_total = raw_total;
+    out->element_count = element_count;
+    out->dtype = dtype;
+    out->fmt = fmt;
+    out->is_cls = channels == NUM_CLASSES;
+    return out->data != nullptr && out->stride > 0;
+}
+
+void build_anchor_points(const std::vector<BranchView>& cls_branches,
+                         std::vector<float>* anchor_x,
+                         std::vector<float>* anchor_y,
+                         std::vector<float>* stride_vec)
+{
+    anchor_x->clear();
+    anchor_y->clear();
+    stride_vec->clear();
+
+    for (size_t s = 0; s < cls_branches.size(); ++s) {
+        const BranchView& b = cls_branches[s];
+        for (int y = 0; y < b.h; ++y) {
+            for (int x = 0; x < b.w; ++x) {
+                anchor_x->push_back(static_cast<float>(x) + 0.5f);
+                anchor_y->push_back(static_cast<float>(y) + 0.5f);
+                stride_vec->push_back(static_cast<float>(b.stride));
+            }
+        }
+    }
+}
+
+bool pair_head_branches(std::vector<BranchView>* cls_branches,
+                        std::vector<BranchView>* reg_branches)
+{
+    std::sort(cls_branches->begin(), cls_branches->end(),
+              [](const BranchView& a, const BranchView& b) {
+                  return (a.w * a.h) > (b.w * b.h);
+              });
+
+    std::vector<BranchView> paired_reg;
+    paired_reg.reserve(cls_branches->size());
+
+    for (size_t i = 0; i < cls_branches->size(); ++i) {
+        const BranchView& cls = (*cls_branches)[i];
+        bool found = false;
+        for (size_t j = 0; j < reg_branches->size(); ++j) {
+            const BranchView& reg = (*reg_branches)[j];
+            if (reg.w == cls.w && reg.h == cls.h) {
+                paired_reg.push_back(reg);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+
+    reg_branches->swap(paired_reg);
+    return true;
+}
+
+bool validate_paired_heads(const std::vector<BranchView>& cls_branches,
+                           const std::vector<BranchView>& reg_branches,
+                           int det_width)
+{
+    if (cls_branches.size() != 3 || reg_branches.size() != 3) {
+        return false;
+    }
+
+    const int expected_stride[3] = {8, 16, 32};
+    for (int i = 0; i < 3; ++i) {
+        const BranchView& cls = cls_branches[i];
+        const BranchView& reg = reg_branches[i];
+        if (cls.c != NUM_CLASSES || reg.c != REG_CHANNELS) {
+            return false;
+        }
+        if (cls.w != reg.w || cls.h != reg.h) {
+            return false;
+        }
+        if (cls.stride != expected_stride[i] || reg.stride != expected_stride[i]) {
+            return false;
+        }
+        if (cls.w * cls.stride != det_width || cls.h * cls.stride != det_width) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool box_center_inside(const std::array<float, 4>& inner,
+                       const std::array<float, 4>& outer)
+{
+    const float cx = 0.5f * (inner[0] + inner[2]);
+    const float cy = 0.5f * (inner[1] + inner[3]);
+    return cx >= outer[0] && cx <= outer[2] && cy >= outer[1] && cy <= outer[3];
+}
+
+int suppress_coarse_obstacle_boxes(DetectionResult* result, int img_w, int img_h)
+{
+    if (result == nullptr || result->items.size() < 2) {
+        return 0;
+    }
+
+    std::vector<int> drop(result->items.size(), 0);
+    for (size_t i = 0; i < result->items.size(); ++i) {
+        const DetectionItem& big = result->items[i];
+        if (!obstacle::semantic::IsObstacleClass(big.class_id) ||
+            (big.quality != "low" && big.quality != "coarse")) {
+            continue;
+        }
+
+        const float big_area = box_area_ratio(big.box, img_w, img_h);
+        const float big_width = box_width_ratio(big.box, img_w);
+        if (big_width < 0.70f && big_area < 0.40f) {
+            continue;
+        }
+
+        for (size_t j = 0; j < result->items.size(); ++j) {
+            if (i == j) {
+                continue;
+            }
+            const DetectionItem& fine = result->items[j];
+
+            const float fine_area = box_area_ratio(fine.box, img_w, img_h);
+            const bool much_smaller = fine_area < big_area * 0.72f;
+            const bool usable_score = fine.score >= 0.25f || fine.quality == "good";
+            const bool person_inside = fine.class_id == DISPLAY_PERSON &&
+                                       fine.score >= 0.20f &&
+                                       box_center_inside(fine.box, big.box);
+            const bool fine_obstacle_inside = obstacle::semantic::IsObstacleClass(fine.class_id) &&
+                                              much_smaller &&
+                                              usable_score &&
+                                              fine.quality != "coarse" &&
+                                              box_center_inside(fine.box, big.box);
+            if (person_inside || fine_obstacle_inside) {
+                drop[i] = 1;
+                break;
+            }
+        }
+    }
+
+    if (std::find(drop.begin(), drop.end(), 1) == drop.end()) {
+        return 0;
+    }
+
+    std::vector<DetectionItem> kept;
+    kept.reserve(result->items.size());
+    int dropped = 0;
+    for (size_t i = 0; i < result->items.size(); ++i) {
+        if (!drop[i]) {
+            kept.push_back(result->items[i]);
+        } else {
+            dropped++;
+        }
+    }
+    result->items.swap(kept);
+    return dropped;
+}
+
+} // namespace
+
+void YOLOV8GRAY::BuildClassNames()
+{
+    if (NUM_CLASSES == obstacle::semantic::NUM_SEMANTIC_CLASSES) {
+        class_names_.clear();
+        for (int i = 0; i < obstacle::semantic::NUM_SEMANTIC_CLASSES; ++i) {
+            class_names_.push_back(obstacle::semantic::SemanticLabel(i));
+        }
+        return;
+    }
+
+    class_names_ = {
+        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+        "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+        "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+        "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+        "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+        "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
+        "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop",
+        "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+        "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+    };
+}
+
+std::string YOLOV8GRAY::ClassIdToLabel(int class_id) const
+{
+    return obstacle::semantic::RawLabel(class_id);
+}
+
+void YOLOV8GRAY::Initialize(std::string& model_path,
+                            std::array<int, 2>* in_img_shape,
+                            std::array<int, 2>* in_det_shape)
+{
+    img_shape = *in_img_shape;
+    det_shape = *in_det_shape;
+    output_shape = {
+        getenv_int("A1_FULL_FRAME_WIDTH", 720),
+        getenv_int("A1_FULL_FRAME_HEIGHT", 1280)
+    };
+
+    nms_threshold = 0.60f;
+    top_k = std::max(40, getenv_int("A1_NMS_TOP_K", 300));
+    keep_top_k = std::max(6, getenv_int("A1_NMS_KEEP_TOP_K", 40));
+    dual_roi_ = getenv_flag("A1_DUAL_ROI", true);
+    predict_count_ = 0;
+    active_view_ = 0;
+
+    BuildClassNames();
+
+    const int roi_size = std::min(img_shape[0], img_shape[1]);
+    const int upper_y = std::max(0, getenv_int("A1_ROI_UPPER_Y", 0));
+    const int lower_default = std::max(0, img_shape[1] - roi_size);
+    const int lower_y = std::max(0, std::min(img_shape[1] - roi_size,
+                                             getenv_int("A1_ROI_LOWER_Y", lower_default)));
+    roi_[0] = {0, upper_y, img_shape[0], std::min(img_shape[1], upper_y + roi_size)};
+    roi_[1] = dual_roi_ ? std::array<int, 4>{0, lower_y, img_shape[0], lower_y + roi_size}
+                        : std::array<int, 4>{0, 0, img_shape[0], img_shape[1]};
+    if (!dual_roi_) roi_[0] = roi_[1];
+
+    for (int view = 0; view < 2; ++view) {
+        const int roi_w = roi_[view][2] - roi_[view][0];
+        const int roi_h = roi_[view][3] - roi_[view][1];
+        lb_info_[view].src_w = roi_w;
+        lb_info_[view].src_h = roi_h;
+        lb_info_[view].dst_w = det_shape[0];
+        lb_info_[view].dst_h = det_shape[1];
+        lb_info_[view].scale = std::min(static_cast<float>(det_shape[0]) / roi_w,
+                                        static_cast<float>(det_shape[1]) / roi_h);
+        const int resize_w = static_cast<int>(std::round(roi_w * lb_info_[view].scale));
+        const int resize_h = static_cast<int>(std::round(roi_h * lb_info_[view].scale));
+        lb_info_[view].pad_x = (det_shape[0] - resize_w) / 2;
+        lb_info_[view].pad_y = (det_shape[1] - resize_h) / 2;
+    }
+
+    std::cout << "[YOLOV8GRAY][INFO] Initialize start" << std::endl;
+    std::cout << "[YOLOV8GRAY][INFO] model path: " << model_path << std::endl;
+    std::cout << "[YOLOV8GRAY][INFO] src shape: " << img_shape[0] << "x" << img_shape[1] << std::endl;
+    std::cout << "[YOLOV8GRAY][INFO] output shape: " << output_shape[0] << "x" << output_shape[1]
+              << ", dual_roi=" << (dual_roi_ ? 1 : 0) << std::endl;
+    std::cout << "[YOLOV8GRAY][INFO] det shape: " << det_shape[0] << "x" << det_shape[1] << std::endl;
+    std::cout << "[YOLOV8GRAY][INFO] model class count=" << NUM_CLASSES
+              << ", semantic classes=" << obstacle::semantic::NUM_SEMANTIC_CLASSES
+              << ", input channels=" << A1_YOLO_INPUT_CHANNELS
+              << std::endl;
+    for (int view = 0; view < 2; ++view) {
+        std::cout << "[YOLOV8GRAY][INFO] view=" << view
+                  << " roi=(" << roi_[view][0] << "," << roi_[view][1]
+                  << "," << roi_[view][2] << "," << roi_[view][3] << ")"
+                  << " scale=" << lb_info_[view].scale
+                  << " pad=(" << lb_info_[view].pad_x << "," << lb_info_[view].pad_y << ")"
+                  << std::endl;
+    }
+
+    char* model_path_char = const_cast<char*>(model_path.c_str());
+    model_id = ssne_loadmodel(model_path_char, SSNE_STATIC_ALLOC);
+
+    int mean[3] = {0, 0, 0};
+    int stdv[3] = {0, 0, 0};
+    int is_uint8 = 0;
+    int dtype = -1;
+
+    ssne_get_model_normalize_params(model_id, mean, stdv, &is_uint8);
+    ssne_get_model_input_dtype(model_id, &dtype);
+
+    std::cout << "[YOLOV8GRAY][INFO] model normalize mean=("
+              << mean[0] << "," << mean[1] << "," << mean[2] << ") std=("
+              << stdv[0] << "," << stdv[1] << "," << stdv[2] << ")"
+              << ", is_uint8=" << is_uint8
+              << ", input_dtype=" << dtype
+              << std::endl;
+
+    const uint32_t det_w = static_cast<uint32_t>(det_shape[0]);
+    const uint32_t det_h = static_cast<uint32_t>(det_shape[1]);
+    const uint8_t input_format = (A1_YOLO_INPUT_CHANNELS == 1) ? SSNE_Y_8 : SSNE_BGR;
+    inputs[0] = create_tensor(det_w, det_h, input_format, SSNE_BUF_AI);
+    std::cout << "[YOLOV8GRAY][INFO] create input tensor format="
+              << ((A1_YOLO_INPUT_CHANNELS == 1) ? "SSNE_Y_8" : "SSNE_BGR")
+              << std::endl;
+
+    for (int view = 0; view < 2; ++view) {
+        pipe_offline_[view] = GetAIPreprocessPipe();
+        Clear(pipe_offline_[view]);
+        const int resize_w = static_cast<int>(std::round(lb_info_[view].src_w * lb_info_[view].scale));
+        const int resize_h = static_cast<int>(std::round(lb_info_[view].src_h * lb_info_[view].scale));
+        const int pad_right = det_shape[0] - resize_w - lb_info_[view].pad_x;
+        const int pad_bottom = det_shape[1] - resize_h - lb_info_[view].pad_y;
+        int ret = SetCrop(pipe_offline_[view],
+                          static_cast<uint16_t>(roi_[view][0]),
+                          static_cast<uint16_t>(roi_[view][1]),
                           static_cast<uint16_t>(roi_[view][2]),
                           static_cast<uint16_t>(roi_[view][3]));
         std::cout << "[YOLOV8GRAY][INFO] view=" << view << " SetCrop ret=" << ret << std::endl;
@@ -708,7 +1076,6 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         result->Clear();
         return false;
     }
-
     if (debug_post && (postprocess_frame_count == 1 || postprocess_frame_count % debug_interval == 0)) {
         std::cout << "[YOLOV8GRAY][DEBUG] paired heads:";
         for (size_t i = 0; i < cls_branches.size(); ++i) {
@@ -786,6 +1153,22 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         const int touch = count_touch_borders(item.box, frame_w, frame_h);
         if (area_ratio > 0.98f || (width_ratio > 0.98f && height_ratio > 0.98f)) return;
 
+        const bool clips_both_horizontal_borders =
+            item.box[0] <= 3.0f && item.box[2] >= static_cast<float>(frame_w - 4);
+        const bool saturated_wide_box =
+            clips_both_horizontal_borders && width_ratio > 0.985f;
+        if (saturated_wide_box) {
+            ++result->coarse_drop_count;
+            if (debug_post && result->coarse_drop_count <= 3) {
+                std::cout << "[YOLOV8GRAY][DROP] saturated_wide raw="
+                          << item.raw_label << " conf=" << item.score
+                          << " box=(" << item.box[0] << "," << item.box[1]
+                          << "," << item.box[2] << "," << item.box[3] << ")"
+                          << " view=" << active_view_ << std::endl;
+            }
+            return;
+        }
+
         const bool wide_flat_midframe =
             width_ratio > 0.42f && height_ratio < 0.55f &&
             bottom_ratio < 0.88f && width_ratio > height_ratio * 1.05f;
@@ -820,6 +1203,10 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         item.sector = sector_from_box(item.box, frame_w);
         item.quality = quality_from_box(item.box, frame_w, frame_h,
                                         item.class_id, item.score);
+        if (clips_both_horizontal_borders ||
+            (width_ratio > 0.90f && touch >= 2)) {
+            item.quality = "coarse";
+        }
         const bool unreliable_wide_coarse =
             obstacle::semantic::IsObstacleClass(item.class_id) &&
             wide_flat_midframe && width_ratio > 0.62f &&

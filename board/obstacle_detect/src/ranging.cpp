@@ -146,6 +146,15 @@ float RangingEstimator::NearFieldUpperBound(const DetectionItem& item) const
     const float bottom = item.box[3] / std::max(1.0f, static_cast<float>(image_shape_[1]));
     const float wr = box_width(item) / std::max(1.0f, static_cast<float>(image_shape_[0]));
     const float hr = box_height(item) / std::max(1.0f, static_cast<float>(image_shape_[1]));
+    const bool clips_both_horizontal_borders =
+        item.box[0] <= 3.0f &&
+        item.box[2] >= static_cast<float>(image_shape_[0] - 4);
+    // A broad box clipped by both image borders has no trustworthy physical
+    // width. Do not convert this regression artifact into a precise 0.45 m
+    // emergency measurement.
+    if (clips_both_horizontal_borders || wr > 0.90f || item.quality == "coarse") {
+        return -1.0f;
+    }
     if (bottom > 0.975f && (wr > 0.30f || hr > 0.32f)) return 0.45f;
     if (bottom > 0.945f && (wr > 0.18f || hr > 0.24f)) return 0.70f;
     if (bottom > 0.915f && wr > 0.12f) return 1.00f;
@@ -199,7 +208,7 @@ void RangingEstimator::Estimate(DetectionItem* item) const
     }
 
     if (item->quality == "coarse" || item->score < 0.16f) {
-        if (near_upper > 0.0f) {
+        if (near_upper > 0.0f && item->quality != "coarse") {
             item->safe_distance_m = near_upper;
             item->distance_sigma_m = 0.35f;
             item->distance_confidence = 0.30f;

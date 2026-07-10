@@ -127,9 +127,14 @@ struct SystemHealth {
 
     void UpdateData(const LightStats& light)
     {
-        const bool bad =
-            ((light.dark_ratio > 0.97f || light.bright_ratio > 0.97f) && light.stddev < 8.0f) ||
-            (light.stddev > 0.0f && light.stddev < 2.5f);
+        // A covered sensor can retain a small bright edge, so requiring both
+        // 97% dark pixels and very low variance misses real covers. Use strong
+        // saturation/mean evidence while keeping ordinary dim scenes degraded
+        // rather than failed.
+        const bool dark_cover = light.mean < 30.0f && light.dark_ratio > 0.88f;
+        const bool bright_cover = light.mean > 230.0f && light.bright_ratio > 0.88f;
+        const bool flat_frame = light.stddev > 0.0f && light.stddev < 4.0f;
+        const bool bad = dark_cover || bright_cover || flat_frame;
         data_fault_frames = bad ? data_fault_frames + 1 : 0;
         if (last_image_hash != 0 && light.sample_hash == last_image_hash) {
             ++frozen_frames;
@@ -166,7 +171,7 @@ struct SystemHealth {
     {
         return capture_failures >= 3 ||
                inference_failures >= 2 ||
-               data_fault_frames >= 12 ||
+               data_fault_frames >= 8 ||
                frozen_frames >= 15 ||
                resource_fault_frames >= 20 ||
                low_memory_frames >= 3 ||
@@ -192,7 +197,7 @@ struct SystemHealth {
         } else if (frozen_frames >= 15) {
             state = "sensor";
             reason = "frozen_frame";
-        } else if (data_fault_frames >= 12) {
+        } else if (data_fault_frames >= 8) {
             state = "sensor";
             reason = "bad_image";
         } else if (resource_fault_frames >= 20) {
@@ -718,6 +723,18 @@ int main()
 
         light_stats = analyze_light_stats(&img_sensor);
         system_health.UpdateData(light_stats);
+        if (frame_id == 1 || frame_id % perf_interval_frames == 0 ||
+            system_health.data_fault_frames > 0) {
+            std::cout << "[HEALTH][DATA] frame=" << frame_id
+                      << " state=" << light_stats.state
+                      << " mean=" << light_stats.mean
+                      << " std=" << light_stats.stddev
+                      << " dark=" << light_stats.dark_ratio
+                      << " bright=" << light_stats.bright_ratio
+                      << " bad_frames=" << system_health.data_fault_frames
+                      << " frozen_frames=" << system_health.frozen_frames
+                      << std::endl;
+        }
         const bool inference_ok = detector.Predict(&img_sensor, det_result, 0.20f);
         system_health.inference_failures = inference_ok ? 0 : system_health.inference_failures + 1;
         system_health.UpdateResource(frame_stats, *det_result);
@@ -756,13 +773,17 @@ int main()
                                  health_decision.action != last_osd_action ||
                                  frame_id % osd_interval_frames == 0;
         if (voice_notifier.WantsOsd() && refresh_osd) {
-            visualizer.Draw(stable_result, health_decision);
+            visualizer.Draw(system_health.FaultActive() ? empty_result : stable_result,
+                            health_decision);
             last_osd_action = health_decision.action;
         }
-        voice_notifier.Update(frame_id, stable_result, health_decision);
+        voice_notifier.Update(frame_id,
+                              system_health.FaultActive() ? empty_result : stable_result,
+                              health_decision);
 #else
         if (health_decision.action != last_osd_action || frame_id % osd_interval_frames == 0) {
-            visualizer.Draw(stable_result, health_decision);
+            visualizer.Draw(system_health.FaultActive() ? empty_result : stable_result,
+                            health_decision);
             last_osd_action = health_decision.action;
         }
 #endif

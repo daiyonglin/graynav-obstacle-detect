@@ -128,9 +128,16 @@ float ObstacleTracker::MatchScore(const Track& track,
 {
     const float overlap = utils::IoU(track.item.box, detection.box);
     const float distance = center_distance(track.item.box, detection.box, image_shape_);
-    if (overlap < 0.02f && distance > 0.22f) return 0.0f;
-    const float center_score = clampf(1.0f - distance / 0.28f, 0.0f, 1.0f);
     const float shape_score = size_similarity(track.item.box, detection.box);
+    // Reject abrupt position/scale innovations before smoothing. Without this
+    // gate, a single false box can drag a stable track across the image.
+    if ((overlap < 0.02f && distance > 0.14f) ||
+        (distance > 0.10f && overlap < 0.20f) ||
+        (shape_score < 0.38f && overlap < 0.30f) ||
+        (track.item.quality != "coarse" && detection.quality == "coarse" && overlap < 0.55f)) {
+        return 0.0f;
+    }
+    const float center_score = clampf(1.0f - distance / 0.28f, 0.0f, 1.0f);
     float class_score = track.item.class_id == detection.class_id ? 1.0f : 0.45f;
     if ((track.item.class_id == semantic::PERSON) !=
         (detection.class_id == semantic::PERSON)) {
@@ -142,7 +149,7 @@ float ObstacleTracker::MatchScore(const Track& track,
 
 bool ObstacleTracker::CanStartTrack(const DetectionItem& detection) const
 {
-    if (detection.quality == "coarse" && detection.score < 0.45f) return false;
+    if (detection.quality == "coarse") return false;
     if (detection.score >= 0.45f) return true;
     if (detection.class_id == semantic::PERSON) return detection.score >= 0.16f;
     return detection.score >= 0.22f;
@@ -336,7 +343,10 @@ void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
         const bool inactive_view_hold = !track.visible_in_current_roi &&
                                         timestamp_ms - track.last_seen_ms <= 250;
         if (!track.matched_current_frame && !inactive_view_hold) continue;
-        if (track.hits < kMinConfirmedHits && track.item.score < 0.60f) continue;
+        // Never draw a one-frame proposal. Two observations from the same ROI
+        // cost only about 60 ms with alternating views and remove most phantom
+        // boxes produced by one quantized head fluctuation.
+        if (track.hits < kMinConfirmedHits) continue;
         DetectionItem item = track.item;
         if (!track.matched_current_frame) item.score *= 0.90f;
         stable_result_.items.push_back(item);

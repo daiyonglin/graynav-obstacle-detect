@@ -149,6 +149,9 @@ VoiceNotifier::VoiceNotifier()
       byte_gap_us_(1000),
       post_tx_delay_ms_(30),
       passive_rx_ms_(80),
+      consecutive_no_rx_(0),
+      recovery_count_(0),
+      tx_count_(0),
       last_rx_code_(0),
       module_state_(ModuleState::Unknown),
       last_sent_frame_(-100000),
@@ -628,6 +631,20 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             last_tx_detail_ = pre_detail + "reopen=fail,frame_hex=" + hex_bytes(frame);
             return false;
         }
+        bool recovery_sent = false;
+        const int no_rx_recover_threshold = std::max(
+            2, getenv_int("A1_VOICE_NO_RX_RECOVER", 3));
+        if (passive_rx_ &&
+            consecutive_no_rx_.load() >= no_rx_recover_threshold) {
+            // The module previously returned IDLE and then went silent in long
+            // runs. Clear a potentially wedged synthesis transaction, retain
+            // only the latest action, and immediately send that action again.
+            recovery_sent = SendBytes(kSyn6288Stop);
+            usleep(180000);
+            DrainRx(40);
+            consecutive_no_rx_ = 0;
+            ++recovery_count_;
+        }
         if (!SendBytes(frame)) {
             last_tx_detail_ = pre_detail + "reopen=ok,blind_tx:uart_send_failed,frame_hex=" + hex_bytes(frame);
             return false;
@@ -637,11 +654,16 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(passive_rx_ms_);
             uint8_t value = 0;
             int rx_count = 0;
+            bool recognized_status = false;
             while (std::chrono::steady_clock::now() < deadline) {
                 if (ReadResponseByte(&value, 5)) {
                     if (!rx_detail.empty()) rx_detail += "/";
                     rx_detail += hex_byte(value) + "(" + syn6288_status_name(value) + ")";
                     rx_count++;
+                    if (value == 0x41 || value == 0x4A || value == 0x4E || value == 0x4F) {
+                        recognized_status = true;
+                        last_rx_code_ = value;
+                    }
                     continue;
                 }
                 usleep(5000);
@@ -649,6 +671,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             if (rx_count == 0) {
                 rx_detail = "none";
             }
+            consecutive_no_rx_ = recognized_status ? 0 : consecutive_no_rx_ + 1;
         } else {
             rx_detail = "off";
         }
@@ -657,7 +680,10 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
                           std::string("reopen=") + (reopen_each_tx_ ? "ok" : "skip") +
                           "," + (fixed_frame_ ? "fixed_frame:blind_tx" : "dynamic_frame:blind_tx") +
                           ",frame_hex=" + hex_bytes(frame) +
-                          ",rx=" + rx_detail;
+                          ",rx=" + rx_detail +
+                          ",no_rx=" + std::to_string(consecutive_no_rx_.load()) +
+                          ",recover=" + (recovery_sent ? "stop_sent" : "none");
+        ++tx_count_;
         return true;
     }
 
@@ -907,6 +933,19 @@ void VoiceNotifier::Update(int frame_id,
     const std::string key = BuildVoiceKey(result, decision);
     std::string reason;
     std::lock_guard<std::mutex> lock(worker_mutex_);
+    if (frame_id % 300 == 0) {
+        const int since_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - last_sent_time_).count());
+        std::cout << "[VOICE][HEALTH] frame=" << frame_id
+                  << " tx_count=" << tx_count_.load()
+                  << " no_rx=" << consecutive_no_rx_.load()
+                  << " recoveries=" << recovery_count_.load()
+                  << " last_tx_age_ms=" << since_ms
+                  << " pending=" << (pending_ready_ ? 1 : 0)
+                  << " in_flight=" << (tx_in_flight_ ? 1 : 0)
+                  << std::endl;
+    }
     if ((pending_ready_ && pending_key_ == key) ||
         (tx_in_flight_ && in_flight_key_ == key)) {
         return;

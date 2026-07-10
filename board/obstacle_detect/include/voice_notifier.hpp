@@ -5,6 +5,7 @@
 #include "smartsoc/uart_api.h"
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -152,6 +153,9 @@ private:
     int byte_gap_us_;
     int post_tx_delay_ms_;
     int passive_rx_ms_;
+    std::atomic<int> consecutive_no_rx_;
+    std::atomic<int> recovery_count_;
+    std::atomic<int> tx_count_;
     uint8_t last_rx_code_;
     ModuleState module_state_;
     int last_sent_frame_;
