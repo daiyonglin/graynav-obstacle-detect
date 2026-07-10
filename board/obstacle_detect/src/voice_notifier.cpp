@@ -141,6 +141,7 @@ VoiceNotifier::VoiceNotifier()
       use_prompt_prefix_(false),
       reopen_each_tx_(true),
       passive_rx_(true),
+      diagnostic_(false),
       ack_timeout_ms_(500),
       idle_timeout_ms_(80),
       recover_wait_ms_(1000),
@@ -178,7 +179,7 @@ bool VoiceNotifier::InitializeFromEnv()
     }
 
     frame_interval_ = std::max(1, getenv_int("A1_VOICE_INTERVAL_FRAMES", 2));
-    stable_needed_ = std::max(1, getenv_int("A1_VOICE_STABLE_FRAMES", 1));
+    stable_needed_ = std::max(1, getenv_int("A1_VOICE_STABLE_FRAMES", 2));
     clear_stable_needed_ = std::max(stable_needed_, getenv_int("A1_VOICE_CLEAR_STABLE_FRAMES", 3));
     cooldown_ms_ = std::max(600, getenv_int("A1_VOICE_COOLDOWN_MS", 1200));
     clear_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 1200));
@@ -193,6 +194,7 @@ bool VoiceNotifier::InitializeFromEnv()
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
     reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", true);
     passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", true);
+    diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
     ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 500));
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));
@@ -224,7 +226,8 @@ bool VoiceNotifier::InitializeFromEnv()
         return false;
     }
 
-    std::cout << "[VOICE][INFO] enabled mode=" << mode
+    if (diagnostic_) {
+        std::cout << "[VOICE][INFO] enabled mode=" << mode
               << " baud=" << baud
               << " interval=" << frame_interval_
               << " stable=" << stable_needed_
@@ -246,7 +249,13 @@ bool VoiceNotifier::InitializeFromEnv()
               << " passive_rx_ms=" << passive_rx_ms_
               << " recover_wait_ms=" << recover_wait_ms_
               << " retry=" << retry_count_
-              << std::endl;
+                  << std::endl;
+    } else {
+        std::cout << "[VOICE][INFO] ready mode=" << mode
+                  << " baud=" << baud
+                  << " protocol=fixed_frame latest_action_mailbox=on"
+                  << std::endl;
+    }
 
     DrainRx(80);
     if (query_idle_) {
@@ -851,7 +860,11 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sent_time_).count());
     const bool changed_action = key != last_key_;
     const bool risk_upgrade = changed_action && action != "clear";
-    if (action != "stop" && since_ms < tx_gap_ms_ && !risk_upgrade) {
+    const bool urgent_override = action == "stop" || action == "system_fault";
+    // STOP and device faults may interrupt immediately. LEFT/RIGHT/SLOW must
+    // obey the UART gap even when they represent a risk increase; otherwise
+    // rapidly alternating planner states overload SYN6288 and cause 0x45.
+    if (!urgent_override && since_ms < tx_gap_ms_) {
         if (reason != nullptr) *reason = "tx_gap";
         return false;
     }
@@ -920,11 +933,14 @@ void VoiceNotifier::WorkerLoop()
 
         const bool interrupt = action == "stop" || action == "system_fault";
         const bool ok = SendPrompt(action, interrupt);
-        std::cout << "[VOICE][TX] frame=" << frame_id
-                  << " action=" << action
-                  << " reason=" << reason
-                  << " status=" << (ok ? "ok" : "fail")
-                  << " detail=" << last_tx_detail_ << std::endl;
+        if (diagnostic_ || !ok || last_tx_detail_.find("receive_failed") != std::string::npos) {
+            std::cout << (ok ? "[VOICE][TX]" : "[VOICE][WARN]")
+                      << " frame=" << frame_id
+                      << " action=" << action
+                      << " reason=" << reason
+                      << " status=" << (ok ? "ok" : "fail")
+                      << " detail=" << last_tx_detail_ << std::endl;
+        }
         if (ok) {
             std::lock_guard<std::mutex> lock(worker_mutex_);
             CommitSent(action, key);
@@ -959,7 +975,7 @@ void VoiceNotifier::Update(int frame_id,
     const std::string key = BuildVoiceKey(result, decision);
     std::string reason;
     std::lock_guard<std::mutex> lock(worker_mutex_);
-    if (frame_id % 300 == 0) {
+    if (diagnostic_ && frame_id % 300 == 0) {
         const int since_ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - last_sent_time_).count());

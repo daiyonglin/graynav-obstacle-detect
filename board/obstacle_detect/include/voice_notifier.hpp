@@ -145,6 +145,7 @@ private:
     bool use_prompt_prefix_;
     bool reopen_each_tx_;
     bool passive_rx_;
+    bool diagnostic_;
     int ack_timeout_ms_;
     int idle_timeout_ms_;
     int recover_wait_ms_;

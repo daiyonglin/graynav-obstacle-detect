@@ -578,10 +578,6 @@ void print_human_packet(int frame_id,
         oss << "unknown";
     }
     oss << " risk=" << to_upper_text(item.risk_level);
-    oss << " raw=" << item.raw_label
-        << " conf=" << std::fixed << std::setprecision(2) << item.score
-        << " src=" << item.distance_source
-        << " q=" << item.quality;
     if (result.items.size() > 1) {
         oss << " objects=" << result.items.size();
     }
@@ -723,7 +719,8 @@ int main()
 
         light_stats = analyze_light_stats(&img_sensor);
         system_health.UpdateData(light_stats);
-        if (frame_id == 1 || frame_id % perf_interval_frames == 0 ||
+        if ((output_serial_diagnostics &&
+             (frame_id == 1 || frame_id % perf_interval_frames == 0)) ||
             system_health.data_fault_frames > 0) {
             std::cout << "[HEALTH][DATA] frame=" << frame_id
                       << " state=" << light_stats.state
@@ -788,7 +785,7 @@ int main()
         }
 #endif
 
-        if (frame_id % perf_interval_frames == 0) {
+        if (output_serial_diagnostics && frame_id % perf_interval_frames == 0) {
             const DetectorTiming detector_timing = detector.GetLastTiming();
             const float loop_ms = std::chrono::duration_cast<std::chrono::duration<float, std::milli> >(
                 std::chrono::steady_clock::now() - loop_start).count();
