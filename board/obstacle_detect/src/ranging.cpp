@@ -88,6 +88,16 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
     EstimateValue out;
     const float foot_x = 0.5f * (item.box[0] + item.box[2]);
     const float foot_y = clampf(item.box[3], 0.0f, static_cast<float>(image_shape_[1] - 1));
+    const float bottom_ratio = foot_y /
+        std::max(1.0f, static_cast<float>(image_shape_[1]));
+    const float aspect = box_width(item) / box_height(item);
+    // A face/upper-body person detection has no observed foot point. Treating
+    // its lower box edge as a ground contact produces a confident but far
+    // distance, so defer to the partial-person size prior instead.
+    if (item.raw_class_id == 3 &&
+        bottom_ratio < 0.78f && aspect > 0.55f) {
+        return out;
+    }
     const float cx = 0.5f * image_shape_[0];
     const float cy = 0.5f * image_shape_[1];
     const float ray_down = std::atan((foot_y - cy) / std::max(1.0f, fy_)) +
@@ -98,7 +108,6 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
     if (z < min_distance_m_ || z > max_distance_m_) return out;
 
     out.mean = z;
-    const float bottom_ratio = foot_y / std::max(1.0f, static_cast<float>(image_shape_[1]));
     const float geometry_penalty = std::fabs(bottom_ratio - 0.72f);
     const float touch_penalty = 0.10f * border_touches(item, image_shape_[0], image_shape_[1]);
     out.sigma = clampf(0.10f + 0.16f * z + geometry_penalty + touch_penalty,
@@ -127,12 +136,29 @@ bool RangingEstimator::SizePrior(int raw_class_id, float* size_m, float* relativ
 RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionItem& item) const
 {
     EstimateValue out;
+    const float pixel_width = box_width(item);
+    const float pixel_height = box_height(item);
+    const float aspect = pixel_width / pixel_height;
+    const float bottom_ratio = item.box[3] /
+        std::max(1.0f, static_cast<float>(image_shape_[1]));
+    const bool partial_person = item.raw_class_id == 3 &&
+        bottom_ratio < 0.78f && aspect > 0.55f && aspect < 1.65f;
+    if (partial_person && pixel_width >= 24.0f) {
+        // Anthropometric head breadth prior. It is deliberately assigned a
+        // wider uncertainty than a full-body height prior.
+        const float z_head = fx_ * 0.18f / pixel_width;
+        if (z_head >= min_distance_m_ && z_head <= max_distance_m_) {
+            out.mean = z_head;
+            out.sigma = clampf(0.32f * z_head + 0.10f, 0.14f, 0.80f);
+            out.valid = true;
+            return out;
+        }
+    }
     float physical_size = 0.0f;
     float relative_sigma = 0.0f;
     if (!SizePrior(item.raw_class_id, &physical_size, &relative_sigma)) return out;
     if (border_touches(item, image_shape_[0], image_shape_[1]) >= 2) return out;
 
-    const float pixel_height = box_height(item);
     const float z = fy_ * physical_size / pixel_height;
     if (z < min_distance_m_ || z > max_distance_m_) return out;
     out.mean = z;
@@ -154,6 +180,12 @@ float RangingEstimator::NearFieldUpperBound(const DetectionItem& item) const
     // emergency measurement.
     if (clips_both_horizontal_borders || wr > 0.90f || item.quality == "coarse") {
         return -1.0f;
+    }
+    if (item.raw_class_id == 3) {
+        const float aspect = box_width(item) / box_height(item);
+        const bool head_like = bottom < 0.78f && aspect > 0.55f && aspect < 1.65f;
+        if (head_like && wr > 0.30f) return 0.70f;
+        if (head_like && wr > 0.18f) return 1.10f;
     }
     if (bottom > 0.975f && (wr > 0.30f || hr > 0.32f)) return 0.45f;
     if (bottom > 0.945f && (wr > 0.18f || hr > 0.24f)) return 0.70f;

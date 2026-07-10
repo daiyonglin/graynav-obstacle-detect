@@ -132,7 +132,7 @@ VoiceNotifier::VoiceNotifier()
       clear_repeat_ms_(1200),
       stop_repeat_ms_(900),
       switch_min_ms_(0),
-      tx_gap_ms_(250),
+      tx_gap_ms_(650),
       pre_stop_(false),
       ack_enabled_(false),
       require_ack_(false),
@@ -184,7 +184,7 @@ bool VoiceNotifier::InitializeFromEnv()
     clear_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 1200));
     stop_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_STOP_REPEAT_MS", 900));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
-    tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 250));
+    tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 650));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
     ack_enabled_ = getenv_bool("A1_VOICE_ACK", false);
     require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", false);
@@ -633,7 +633,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
         }
         bool recovery_sent = false;
         const int no_rx_recover_threshold = std::max(
-            2, getenv_int("A1_VOICE_NO_RX_RECOVER", 3));
+            3, getenv_int("A1_VOICE_NO_RX_RECOVER", 5));
         if (passive_rx_ &&
             consecutive_no_rx_.load() >= no_rx_recover_threshold) {
             // The module previously returned IDLE and then went silent in long
@@ -655,6 +655,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             uint8_t value = 0;
             int rx_count = 0;
             bool recognized_status = false;
+            bool receive_failed = false;
             while (std::chrono::steady_clock::now() < deadline) {
                 if (ReadResponseByte(&value, 5)) {
                     if (!rx_detail.empty()) rx_detail += "/";
@@ -664,12 +665,37 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
                         recognized_status = true;
                         last_rx_code_ = value;
                     }
+                    if (value == 0x45) {
+                        receive_failed = true;
+                        last_rx_code_ = value;
+                    }
                     continue;
                 }
                 usleep(5000);
             }
             if (rx_count == 0) {
                 rx_detail = "none";
+            }
+            if (receive_failed) {
+                // SYN6288 explicitly rejected the command. Clear the current
+                // transaction and retry the newest action once; reporting UART
+                // write success alone would otherwise hide a silent module.
+                const bool stop_ok = SendBytes(kSyn6288Stop);
+                usleep(260000);
+                DrainRx(60);
+                const bool reopen_retry_ok = ReopenBackend();
+                const bool retry_ok = reopen_retry_ok && SendBytes(frame);
+                rx_detail += std::string("/retry_stop=") + (stop_ok ? "ok" : "fail") +
+                             ",retry_tx=" + (retry_ok ? "ok" : "fail");
+                if (retry_ok) {
+                    uint8_t retry_status = 0;
+                    if (ReadResponseByte(&retry_status, 120)) {
+                        rx_detail += ",retry_rx=" + hex_byte(retry_status) +
+                                     "(" + syn6288_status_name(retry_status) + ")";
+                        recognized_status = retry_status == 0x41 || retry_status == 0x4A ||
+                                            retry_status == 0x4E || retry_status == 0x4F;
+                    }
+                }
             }
             consecutive_no_rx_ = recognized_status ? 0 : consecutive_no_rx_ + 1;
         } else {

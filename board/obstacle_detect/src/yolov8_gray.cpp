@@ -1153,13 +1153,45 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         const int touch = count_touch_borders(item.box, frame_w, frame_h);
         if (area_ratio > 0.98f || (width_ratio > 0.98f && height_ratio > 0.98f)) return;
 
+        const std::array<int, 4>& active_roi = roi_[active_view_];
+        const float roi_w = std::max(1, active_roi[2] - active_roi[0]);
+        const float roi_h = std::max(1, active_roi[3] - active_roi[1]);
+        const float roi_width_ratio = bw / roi_w;
+        const float roi_height_ratio = bh / roi_h;
+        const bool roi_left = item.box[0] <= active_roi[0] + 12.0f;
+        const bool roi_right = item.box[2] >= active_roi[2] - 12.0f;
+        const bool roi_top = item.box[1] <= active_roi[1] + 12.0f;
+        const bool roi_bottom = item.box[3] >= active_roi[3] - 12.0f;
+        const bool roi_saturated_box =
+            roi_width_ratio > 0.94f ||
+            (roi_width_ratio > 0.82f && roi_height_ratio > 0.72f) ||
+            (roi_height_ratio > 0.94f && roi_width_ratio > 0.65f) ||
+            (roi_left && roi_right && roi_width_ratio > 0.88f) ||
+            (roi_top && roi_bottom && roi_width_ratio > 0.72f);
+        if (roi_saturated_box) {
+            ++result->coarse_drop_count;
+            if (debug_post &&
+                postprocess_frame_count % debug_interval == 0 &&
+                result->coarse_drop_count <= 3) {
+                std::cout << "[YOLOV8GRAY][DROP] roi_saturated raw="
+                          << item.raw_label << " conf=" << item.score
+                          << " roi_ratio=" << roi_width_ratio << "x" << roi_height_ratio
+                          << " box=(" << item.box[0] << "," << item.box[1]
+                          << "," << item.box[2] << "," << item.box[3] << ")"
+                          << " view=" << active_view_ << std::endl;
+            }
+            return;
+        }
+
         const bool clips_both_horizontal_borders =
             item.box[0] <= 3.0f && item.box[2] >= static_cast<float>(frame_w - 4);
         const bool saturated_wide_box =
             clips_both_horizontal_borders && width_ratio > 0.985f;
         if (saturated_wide_box) {
             ++result->coarse_drop_count;
-            if (debug_post && result->coarse_drop_count <= 3) {
+            if (debug_post &&
+                postprocess_frame_count % debug_interval == 0 &&
+                result->coarse_drop_count <= 3) {
                 std::cout << "[YOLOV8GRAY][DROP] saturated_wide raw="
                           << item.raw_label << " conf=" << item.score
                           << " box=(" << item.box[0] << "," << item.box[1]

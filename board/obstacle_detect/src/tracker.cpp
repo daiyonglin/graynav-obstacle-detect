@@ -49,6 +49,16 @@ float size_similarity(const std::array<float, 4>& a,
     return std::sqrt(wr * hr);
 }
 
+bool implausibly_broad_box(const DetectionItem& item,
+                           const std::array<int, 2>& image_shape)
+{
+    const float wr = box_width(item.box) /
+        std::max(1.0f, static_cast<float>(image_shape[0]));
+    const float hr = box_height(item.box) /
+        std::max(1.0f, static_cast<float>(image_shape[1]));
+    return wr > 0.94f || (wr > 0.82f && hr > 0.45f);
+}
+
 std::string sector_from_box(const std::array<float, 4>& box, int width)
 {
     const float cx = 0.5f * (box[0] + box[2]);
@@ -149,6 +159,7 @@ float ObstacleTracker::MatchScore(const Track& track,
 
 bool ObstacleTracker::CanStartTrack(const DetectionItem& detection) const
 {
+    if (implausibly_broad_box(detection, image_shape_)) return false;
     if (detection.quality == "coarse") return false;
     if (detection.score >= 0.45f) return true;
     if (detection.class_id == semantic::PERSON) return detection.score >= 0.16f;
@@ -340,6 +351,7 @@ void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
 
     for (size_t i = 0; i < tracks_.size(); ++i) {
         const Track& track = tracks_[i];
+        if (implausibly_broad_box(track.item, image_shape_)) continue;
         const bool inactive_view_hold = !track.visible_in_current_roi &&
                                         timestamp_ms - track.last_seen_ms <= 250;
         if (!track.matched_current_frame && !inactive_view_hold) continue;
