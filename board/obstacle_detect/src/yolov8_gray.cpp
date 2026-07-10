@@ -56,7 +56,10 @@ bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
     if (!getenv_flag("A1_ADAPTIVE_GRAY", true) || tensor == nullptr) return false;
     uint8_t* data = reinterpret_cast<uint8_t*>(get_data(*tensor));
     const uint32_t size = get_total_size(*tensor);
-    if (data == nullptr || size == 0) return false;
+    const int width = static_cast<int>(get_width(*tensor));
+    const int height = static_cast<int>(get_height(*tensor));
+    if (data == nullptr || size < static_cast<uint32_t>(width * height) ||
+        width <= 0 || height <= 0) return false;
     uint64_t sum = 0;
     uint64_t sum_sq = 0;
     uint32_t count = 0;
@@ -71,26 +74,60 @@ bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
     const float variance = std::max(0.0f,
         static_cast<float>(sum_sq) / count - mean * mean);
     const float stddev = std::sqrt(variance);
-    const float dark_mean = getenv_float("A1_ADAPTIVE_GRAY_DARK_MEAN", 70.0f);
-    const float bright_mean = getenv_float("A1_ADAPTIVE_GRAY_BRIGHT_MEAN", 195.0f);
-    float gamma = 1.0f;
-    if (mean < dark_mean && stddev >= 3.0f) {
-        gamma = mean < 38.0f ? 0.62f : (mean < 55.0f ? 0.72f : 0.82f);
-    } else if (mean > bright_mean) {
-        gamma = 1.25f;
-    } else {
-        return false;
+    const float dark_mean = getenv_float("A1_ADAPTIVE_GRAY_DARK_MEAN", 75.0f);
+    if (mean >= dark_mean || stddev < 5.0f) return false;
+    const int tiles_x = 4;
+    const int tiles_y = 4;
+    const int blend = std::max(20, std::min(80,
+        getenv_int("A1_ADAPTIVE_GRAY_BLEND", 60)));
+    for (int ty = 0; ty < tiles_y; ++ty) {
+        const int y0 = ty * height / tiles_y;
+        const int y1 = (ty + 1) * height / tiles_y;
+        for (int tx = 0; tx < tiles_x; ++tx) {
+            const int x0 = tx * width / tiles_x;
+            const int x1 = (tx + 1) * width / tiles_x;
+            int hist[256] = {0};
+            const int pixels = std::max(1, (x1 - x0) * (y1 - y0));
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) ++hist[data[y * width + x]];
+            }
+            const int clip_limit = std::max(8, pixels / 64);
+            int excess = 0;
+            for (int i = 0; i < 256; ++i) {
+                if (hist[i] > clip_limit) {
+                    excess += hist[i] - clip_limit;
+                    hist[i] = clip_limit;
+                }
+            }
+            const int uniform = excess / 256;
+            const int remainder = excess % 256;
+            for (int i = 0; i < 256; ++i) hist[i] += uniform + (i < remainder ? 1 : 0);
+            int cdf[256];
+            int running = 0;
+            for (int i = 0; i < 256; ++i) {
+                running += hist[i];
+                cdf[i] = running;
+            }
+            int cdf_min = 0;
+            while (cdf_min < 255 && cdf[cdf_min] == 0) ++cdf_min;
+            const int base = cdf[cdf_min];
+            const int denom = std::max(1, pixels - base);
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const int index = y * width + x;
+                    const int original = data[index];
+                    const int equalized = std::max(0, std::min(255,
+                        (cdf[original] - base) * 255 / denom));
+                    data[index] = static_cast<uint8_t>(
+                        (original * (100 - blend) + equalized * blend + 50) / 100);
+                }
+            }
+        }
     }
-    uint8_t lut[256];
-    for (int i = 0; i < 256; ++i) {
-        const float mapped = 255.0f * std::pow(static_cast<float>(i) / 255.0f, gamma);
-        lut[i] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, mapped)) + 0.5f);
-    }
-    for (uint32_t i = 0; i < size; ++i) data[i] = lut[data[i]];
     if (getenv_flag("A1_ADAPTIVE_GRAY_DIAG", false) && frame_id % 300 == 0) {
         std::cout << "[YOLOV8GRAY][LIGHT] frame=" << frame_id
                   << " mean=" << mean << " std=" << stddev
-                  << " gamma=" << gamma << std::endl;
+                  << " mode=local_hist blend=" << blend << std::endl;
     }
     return true;
 }

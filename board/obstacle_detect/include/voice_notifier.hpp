@@ -8,6 +8,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -182,6 +183,7 @@ private:
     std::string pending_key_;
     std::string pending_reason_;
     std::string in_flight_key_;
+    std::deque<uint8_t> rx_queue_;
 };
 
 }  // namespace obstacle

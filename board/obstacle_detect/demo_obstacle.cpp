@@ -203,7 +203,7 @@ struct SystemHealth {
             healthy_recovery_frames = 0;
         } else if (fault_latched) {
             ++healthy_recovery_frames;
-            if (healthy_recovery_frames >= 20) {
+            if (healthy_recovery_frames >= 5) {
                 fault_latched = false;
                 healthy_recovery_frames = 0;
             }
