@@ -131,6 +131,8 @@ VoiceNotifier::VoiceNotifier()
       cooldown_ms_(1200),
       clear_repeat_ms_(1200),
       stop_repeat_ms_(900),
+      fault_repeat_ms_(3000),
+      fault_hold_ms_(1800),
       switch_min_ms_(0),
       tx_gap_ms_(650),
       pre_stop_(false),
@@ -164,6 +166,7 @@ VoiceNotifier::VoiceNotifier()
       last_tx_detail_("not_sent"),
       tty_device_("/dev/ttyS1"),
       last_sent_time_(std::chrono::steady_clock::now() - std::chrono::seconds(60)),
+      last_fault_seen_time_(std::chrono::steady_clock::now() - std::chrono::seconds(60)),
       worker_stop_(false),
       pending_ready_(false),
       tx_in_flight_(false),
@@ -187,6 +190,8 @@ bool VoiceNotifier::InitializeFromEnv()
     cooldown_ms_ = std::max(600, getenv_int("A1_VOICE_COOLDOWN_MS", 1200));
     clear_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 1200));
     stop_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_STOP_REPEAT_MS", 900));
+    fault_repeat_ms_ = std::max(1800, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 3000));
+    fault_hold_ms_ = std::max(800, getenv_int("A1_VOICE_FAULT_HOLD_MS", 1800));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 650));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
@@ -239,6 +244,8 @@ bool VoiceNotifier::InitializeFromEnv()
               << " cooldown_ms=" << cooldown_ms_
               << " clear_repeat_ms=" << clear_repeat_ms_
               << " stop_repeat_ms=" << stop_repeat_ms_
+              << " fault_repeat_ms=" << fault_repeat_ms_
+              << " fault_hold_ms=" << fault_hold_ms_
               << " switch_min_ms=" << switch_min_ms_
               << " tx_gap_ms=" << tx_gap_ms_
               << " pre_stop=" << (pre_stop_ ? 1 : 0)
@@ -618,7 +625,13 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
 {
     std::string pre_detail;
     last_tx_detail_ = "not_sent";
-    if (interrupt_current && pre_stop_) {
+    if (action == "system_fault" && interrupt_current) {
+        const bool stop_ok = SendBytes(kSyn6288Stop);
+        usleep(220000);
+        DrainRx(50);
+        pre_detail = std::string("fault_pre_stop=") + (stop_ok ? "ok" : "fail") + ",";
+        module_state_ = ModuleState::Idle;
+    } else if (interrupt_current && pre_stop_) {
         const bool stop_ok = SendBytes(kSyn6288Stop);
         usleep(static_cast<useconds_t>(recover_wait_ms_) * 1000);
         DrainRx(80);
@@ -653,7 +666,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
         }
         bool recovery_sent = false;
         const int sent_count = tx_count_.load();
-        if (soft_reset_every_tx_ > 0 && sent_count > 0 &&
+        if (action != "system_fault" && soft_reset_every_tx_ > 0 && sent_count > 0 &&
             sent_count % soft_reset_every_tx_ == 0) {
             recovery_sent = SendBytes(kSyn6288Stop);
             usleep(220000);
@@ -662,7 +675,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
         }
         const int no_rx_recover_threshold = std::max(
             3, getenv_int("A1_VOICE_NO_RX_RECOVER", 5));
-        if (passive_rx_ &&
+        if (!recovery_sent && passive_rx_ &&
             consecutive_no_rx_.load() >= no_rx_recover_threshold) {
             // The module previously returned IDLE and then went silent in long
             // runs. Clear a potentially wedged synthesis transaction, retain
@@ -715,6 +728,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
                 const bool retry_ok = reopen_retry_ok && SendBytes(frame);
                 rx_detail += std::string("/retry_stop=") + (stop_ok ? "ok" : "fail") +
                              ",retry_tx=" + (retry_ok ? "ok" : "fail");
+                bool retry_rejected = false;
                 if (retry_ok) {
                     uint8_t retry_status = 0;
                     if (ReadResponseByte(&retry_status, 120)) {
@@ -722,7 +736,12 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
                                      "(" + syn6288_status_name(retry_status) + ")";
                         recognized_status = retry_status == 0x41 || retry_status == 0x4A ||
                                             retry_status == 0x4E || retry_status == 0x4F;
+                        retry_rejected = retry_status == 0x45;
                     }
+                }
+                if (!retry_ok || retry_rejected) {
+                    last_tx_detail_ = pre_detail + "receive_failed," + rx_detail;
+                    return false;
                 }
             }
             consecutive_no_rx_ = recognized_status ? 0 : consecutive_no_rx_ + 1;
@@ -888,6 +907,17 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
         return false;
     }
 
+    if (action == "system_fault") {
+        if (key != last_key_ || since_ms >= fault_repeat_ms_) {
+            if (reason != nullptr) {
+                *reason = key != last_key_ ? "fault_changed" : "fault_repeat";
+            }
+            return true;
+        }
+        if (reason != nullptr) *reason = "fault_cooldown";
+        return false;
+    }
+
     if (action == "stop") {
         const bool changed = key != last_key_;
         if (key != last_key_ || since_ms >= stop_repeat_ms_) {
@@ -952,7 +982,8 @@ void VoiceNotifier::WorkerLoop()
 
         const bool interrupt = action == "stop" || action == "system_fault";
         const bool ok = SendPrompt(action, interrupt);
-        if (diagnostic_ || !ok || last_tx_detail_.find("receive_failed") != std::string::npos) {
+        if (diagnostic_ || action == "system_fault" || !ok ||
+            last_tx_detail_.find("receive_failed") != std::string::npos) {
             std::cout << (ok ? "[VOICE][TX]" : "[VOICE][WARN]")
                       << " frame=" << frame_id
                       << " action=" << action
@@ -995,11 +1026,22 @@ void VoiceNotifier::Update(int frame_id,
     if (mode_ == Mode::Disabled) {
         return;
     }
-    const std::string action = decision.action.empty() ? "clear" : decision.action;
+    std::string action = decision.action.empty() ? "clear" : decision.action;
+    const auto now = std::chrono::steady_clock::now();
+    if (action == "system_fault") {
+        last_fault_seen_time_ = now;
+    } else {
+        const int since_fault_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_fault_seen_time_).count());
+        if (since_fault_ms < fault_hold_ms_) {
+            action = "system_fault";
+        }
+    }
     if (action != "stop" && frame_id % frame_interval_ != 0) {
         return;
     }
-    const std::string key = BuildVoiceKey(result, decision);
+    const std::string key = action;
     std::string reason;
     std::lock_guard<std::mutex> lock(worker_mutex_);
     if (frame_id % 300 == 0) {

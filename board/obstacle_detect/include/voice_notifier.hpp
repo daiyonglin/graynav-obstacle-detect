@@ -135,6 +135,8 @@ private:
     int cooldown_ms_;
     int clear_repeat_ms_;
     int stop_repeat_ms_;
+    int fault_repeat_ms_;
+    int fault_hold_ms_;
     int switch_min_ms_;
     int tx_gap_ms_;
     bool pre_stop_;
@@ -168,6 +170,7 @@ private:
     std::string last_tx_detail_;
     std::string tty_device_;
     std::chrono::steady_clock::time_point last_sent_time_;
+    std::chrono::steady_clock::time_point last_fault_seen_time_;
     std::thread worker_;
     std::mutex worker_mutex_;
     std::condition_variable worker_cv_;

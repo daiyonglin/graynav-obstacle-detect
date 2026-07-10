@@ -49,6 +49,52 @@ float getenv_float(const char* name, float fallback)
     return static_cast<float>(std::atof(value));
 }
 
+// Applies a small CPU LUT only when the model input is clearly outside the
+// normal grayscale exposure range. Normal frames remain bit-identical.
+bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
+{
+    if (!getenv_flag("A1_ADAPTIVE_GRAY", true) || tensor == nullptr) return false;
+    uint8_t* data = reinterpret_cast<uint8_t*>(get_data(*tensor));
+    const uint32_t size = get_total_size(*tensor);
+    if (data == nullptr || size == 0) return false;
+    uint64_t sum = 0;
+    uint64_t sum_sq = 0;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < size; i += 16) {
+        const uint32_t v = data[i];
+        sum += v;
+        sum_sq += v * v;
+        ++count;
+    }
+    if (count == 0) return false;
+    const float mean = static_cast<float>(sum) / count;
+    const float variance = std::max(0.0f,
+        static_cast<float>(sum_sq) / count - mean * mean);
+    const float stddev = std::sqrt(variance);
+    const float dark_mean = getenv_float("A1_ADAPTIVE_GRAY_DARK_MEAN", 70.0f);
+    const float bright_mean = getenv_float("A1_ADAPTIVE_GRAY_BRIGHT_MEAN", 195.0f);
+    float gamma = 1.0f;
+    if (mean < dark_mean && stddev >= 3.0f) {
+        gamma = mean < 38.0f ? 0.62f : (mean < 55.0f ? 0.72f : 0.82f);
+    } else if (mean > bright_mean) {
+        gamma = 1.25f;
+    } else {
+        return false;
+    }
+    uint8_t lut[256];
+    for (int i = 0; i < 256; ++i) {
+        const float mapped = 255.0f * std::pow(static_cast<float>(i) / 255.0f, gamma);
+        lut[i] = static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, mapped)) + 0.5f);
+    }
+    for (uint32_t i = 0; i < size; ++i) data[i] = lut[data[i]];
+    if (getenv_flag("A1_ADAPTIVE_GRAY_DIAG", false) && frame_id % 300 == 0) {
+        std::cout << "[YOLOV8GRAY][LIGHT] frame=" << frame_id
+                  << " mean=" << mean << " std=" << stddev
+                  << " gamma=" << gamma << std::endl;
+    }
+    return true;
+}
+
 std::string getenv_string(const char* name, const std::string& fallback)
 {
     const char* value = std::getenv(name);
@@ -975,6 +1021,9 @@ bool YOLOV8GRAY::Preprocess(ssne_tensor_t* img_in, ssne_tensor_t* input_tensor)
     if (ret != 0) {
         std::cout << "[YOLOV8GRAY][ERROR] RunAiPreprocessPipe failed, ret=" << ret << std::endl;
         return false;
+    }
+    if (A1_YOLO_INPUT_CHANNELS == 1) {
+        apply_adaptive_gray_lut(input_tensor, predict_count_);
     }
 
     static bool dumped[2] = {false, false};

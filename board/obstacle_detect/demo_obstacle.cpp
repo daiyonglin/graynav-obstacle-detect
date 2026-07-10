@@ -106,6 +106,8 @@ struct SystemHealth {
     int frozen_frames;
     int low_memory_frames;
     int resource_checks;
+    int healthy_recovery_frames;
+    bool fault_latched;
     int memory_available_kb;
     uint32_t last_image_hash;
     std::string state;
@@ -120,6 +122,8 @@ struct SystemHealth {
           frozen_frames(0),
           low_memory_frames(0),
           resource_checks(0),
+          healthy_recovery_frames(0),
+          fault_latched(false),
           memory_available_kb(-1),
           last_image_hash(0),
           state("ok"),
@@ -131,9 +135,10 @@ struct SystemHealth {
         // 97% dark pixels and very low variance misses real covers. Use strong
         // saturation/mean evidence while keeping ordinary dim scenes degraded
         // rather than failed.
-        const bool dark_cover = light.mean < 30.0f && light.dark_ratio > 0.88f;
+        const bool dark_cover = light.mean < 38.0f && light.dark_ratio > 0.82f &&
+                                light.stddev < 10.0f;
         const bool bright_cover = light.mean > 230.0f && light.bright_ratio > 0.88f;
-        const bool flat_frame = light.stddev > 0.0f && light.stddev < 4.0f;
+        const bool flat_frame = light.stddev > 0.0f && light.stddev < 2.5f;
         const bool bad = dark_cover || bright_cover || flat_frame;
         data_fault_frames = bad ? data_fault_frames + 1 : 0;
         if (last_image_hash != 0 && light.sample_hash == last_image_hash) {
@@ -169,7 +174,8 @@ struct SystemHealth {
 
     bool FaultActive() const
     {
-        return capture_failures >= 3 ||
+        return fault_latched ||
+               capture_failures >= 3 ||
                inference_failures >= 2 ||
                data_fault_frames >= 8 ||
                frozen_frames >= 15 ||
@@ -188,6 +194,21 @@ struct SystemHealth {
 
     void RefreshState()
     {
+        const bool raw_fault = capture_failures >= 3 || inference_failures >= 2 ||
+                               data_fault_frames >= 8 || frozen_frames >= 15 ||
+                               resource_fault_frames >= 20 || low_memory_frames >= 3 ||
+                               candidate_burst_frames >= 5;
+        if (raw_fault) {
+            fault_latched = true;
+            healthy_recovery_frames = 0;
+        } else if (fault_latched) {
+            ++healthy_recovery_frames;
+            if (healthy_recovery_frames >= 20) {
+                fault_latched = false;
+                healthy_recovery_frames = 0;
+            }
+        }
+
         if (capture_failures >= 3) {
             state = "sensor";
             reason = "capture_failed";
@@ -209,7 +230,7 @@ struct SystemHealth {
         } else if (candidate_burst_frames >= 5) {
             state = "resource";
             reason = "candidate_burst";
-        } else {
+        } else if (!fault_latched) {
             state = "ok";
             reason = "ok";
         }
@@ -721,7 +742,10 @@ int main()
         system_health.UpdateData(light_stats);
         if ((output_serial_diagnostics &&
              (frame_id == 1 || frame_id % perf_interval_frames == 0)) ||
-            system_health.data_fault_frames > 0) {
+            system_health.data_fault_frames == 1 ||
+            system_health.data_fault_frames == 8 ||
+            (system_health.data_fault_frames > 8 &&
+             system_health.data_fault_frames % 30 == 0)) {
             std::cout << "[HEALTH][DATA] frame=" << frame_id
                       << " state=" << light_stats.state
                       << " mean=" << light_stats.mean
