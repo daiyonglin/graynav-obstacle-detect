@@ -105,8 +105,7 @@ void NMS(DetectionResult* result, float iou_threshold, int top_k)
 
             const DetectionItem& other = result->items[j];
 
-            // 现在 class_id 已经是最终显示类别：
-            // 0 -> person
+            // 閻滄澘婀?class_id 瀹歌尙绮￠弰顖涙付缂佸牊妯夌粈铏硅閸掝偓绱?            // 0 -> person
             // 1 -> obstacle
             if (cur.raw_class_id != other.raw_class_id) continue;
 
@@ -147,6 +146,37 @@ float box_area_for_multi_nms(const DetectionItem& item)
 {
     return std::max(0.0f, item.box[2] - item.box[0]) *
            std::max(0.0f, item.box[3] - item.box[1]);
+}
+
+float box_width_ratio_for_multi_nms(const DetectionItem& item)
+{
+    constexpr float kFrameW = 720.0f;
+    return std::max(0.0f, item.box[2] - item.box[0]) / kFrameW;
+}
+
+bool is_broad_coarse_obstacle_for_multi_nms(const DetectionItem& item)
+{
+    return obstacle::semantic::IsObstacleClass(item.class_id) &&
+           item.quality == "coarse" &&
+           box_width_ratio_for_multi_nms(item) > 0.58f;
+}
+
+bool is_broad_obstacle_for_multi_nms(const DetectionItem& item)
+{
+    return obstacle::semantic::IsObstacleClass(item.class_id) &&
+           (item.sector == "wide" || box_width_ratio_for_multi_nms(item) > 0.58f);
+}
+
+float nms_priority_for_multi_target(const DetectionItem& item)
+{
+    float priority = item.score;
+    if (item.quality == "good") priority += 0.10f;
+    if (item.quality == "coarse") priority -= 0.25f;
+    if (item.class_id == DISPLAY_CLASS_PERSON) priority += 0.08f;
+    if (obstacle::semantic::IsFurnitureLikeSemantic(item.class_id)) priority += 0.05f;
+    if (is_broad_obstacle_for_multi_nms(item)) priority -= 0.15f;
+    if (item.distance_source == "existence") priority -= 0.08f;
+    return priority;
 }
 
 float center_x_for_multi_nms(const DetectionItem& item)
@@ -205,6 +235,18 @@ bool should_suppress_for_multi_nms(const DetectionItem& cur,
     if (spatially_separated && protected_raw) {
         return false;
     }
+    if (is_broad_obstacle_for_multi_nms(cur) &&
+        other_much_smaller &&
+        overlap > 0.03f &&
+        other.score >= cur.score * 0.25f) {
+        return false;
+    }
+    if (is_broad_obstacle_for_multi_nms(other) &&
+        cur_much_smaller &&
+        overlap > 0.03f &&
+        cur.score >= other.score * 0.25f) {
+        return true;
+    }
     if (other_much_smaller && other.score >= cur.score * (protected_raw ? 0.45f : 0.60f)) {
         return false;
     }
@@ -213,17 +255,16 @@ bool should_suppress_for_multi_nms(const DetectionItem& cur,
     }
 
     const bool same_raw = cur.raw_class_id == other.raw_class_id;
-    const bool same_semantic = cur.class_id == other.class_id;
     const bool duplicate_same_anchor =
-        same_semantic &&
-        overlap > 0.92f &&
-        max_area / min_area < 1.15f &&
-        center_dx < 0.03f;
+        overlap > 0.88f &&
+        max_area / min_area < 1.30f &&
+        center_dx < 0.035f;
     if (!same_raw && !duplicate_same_anchor) {
         return false;
     }
 
-    const float threshold = protected_raw ? std::max(0.72f, iou_threshold) : iou_threshold;
+    const float threshold = (!same_raw || protected_raw)
+        ? std::max(0.72f, iou_threshold) : iou_threshold;
     return overlap > threshold;
 }
 
@@ -233,6 +274,11 @@ void MultiTargetNMS(DetectionResult* result, float iou_threshold, int top_k)
 {
     std::sort(result->items.begin(), result->items.end(),
               [](const DetectionItem& a, const DetectionItem& b) {
+                  const float ap = nms_priority_for_multi_target(a);
+                  const float bp = nms_priority_for_multi_target(b);
+                  if (std::fabs(ap - bp) > 0.02f) {
+                      return ap > bp;
+                  }
                   return a.score > b.score;
               });
 
@@ -411,6 +457,7 @@ void push_solid(std::vector<sst::device::osd::OsdQuadRangle>* quads,
 int action_level(const std::string& action)
 {
     if (action == "stop") return 3;
+    if (action == "system_fault") return 3;
     if (action == "slow" || action == "turn_left" || action == "turn_right") return 2;
     return 0;
 }
@@ -515,6 +562,7 @@ private:
 std::string action_text(const std::string& action)
 {
     if (action == "stop") return "STOP";
+    if (action == "system_fault") return "STOP";
     if (action == "slow") return "SLOW";
     if (action == "turn_left") return "LEFT";
     if (action == "turn_right") return "RIGHT";
@@ -589,15 +637,15 @@ void VISUALIZER::Draw(const DetectionResult& result)
 void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& decision)
 {
     std::vector<sst::device::osd::OsdQuadRangle> box_quads;
-    std::vector<sst::device::osd::OsdQuadRangle> info_quads;
     box_quads.reserve(result.items.size());
 
     // OSD layers:
     // layer 0 = disabled legacy risk bar, layer 1 = action .ssbmp,
-    // layer 2 = dir/risk .ssbmp, layer 3 = disabled legacy zone meters,
+    // layer 2 = dir/risk .ssbmp, layer 3 = kept empty,
     // layer 4 = detection boxes.
     if (!static_layers_cleaned_) {
         osd_device.CleanLayer(0);
+        osd_device.CleanLayer(3);
         static_layers_cleaned_ = true;
     }
 
@@ -623,11 +671,6 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
     if (primary_idx >= 0) {
         dir_name = dir_text(result.items[primary_idx].sector);
         risk_name = risk_text(result.items[primary_idx].distance_m);
-        HudGlyphRenderer::DrawWord(&info_quads,
-                                   235.0f,
-                                   142.0f,
-                                   0.62f,
-                                   obstacle::semantic::SemanticShortLabel(result.items[primary_idx].class_id));
     }
     const std::string action_asset = hud_asset_path(action_name);
     const std::string info_asset = hud_asset_path(dir_name + "_" + risk_name);
@@ -641,6 +684,5 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
             last_info_asset_ = info_asset;
         }
     }
-    osd_device.Draw(info_quads, 3);
     osd_device.Draw(box_quads, 4);
 }

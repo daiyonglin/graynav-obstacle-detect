@@ -1,11 +1,19 @@
 #pragma once
 
+#include "avoidance_planner.hpp"
 #include "common.hpp"
+#include "ranging.hpp"
 
 #include <vector>
 
 namespace obstacle {
 
+/**
+ * Associates dual-ROI detections in full-frame coordinates, applies
+ * motion-adaptive box smoothing and maintains a real-time range state for
+ * every obstacle.  The tracker deliberately separates visual confirmation
+ * from action planning.
+ */
 class ObstacleTracker {
 public:
     ObstacleTracker();
@@ -24,35 +32,46 @@ private:
         int hits;
         int missed;
         int last_frame;
-        float last_distance_m;
+        int64_t last_seen_ms;
+        int64_t last_update_ms;
+        bool matched_current_frame;
+        bool visible_in_current_roi;
         float depth_m;
         float depth_velocity_mps;
-        float depth_cov;
-        bool has_depth_state;
-        int non_person_hits;
-        std::vector<int> raw_class_votes;
+        float depth_variance;
+        int depth_measurements;
+        std::vector<float> class_evidence;
 
         Track();
     };
 
-private:
-    float MatchScore(const Track& track, const DetectionItem& det) const;
-    bool CanStartTrack(const DetectionItem& det) const;
-    void StartTrack(const DetectionItem& det, int frame_id);
-    void UpdateTrack(Track* track, const DetectionItem& det, int frame_id);
-    void AgeUnmatchedTracks(const std::vector<int>& matched_tracks, int frame_id);
-    void RebuildStableResult();
-    void MergeDisplayObstacles();
-    void RebuildDecision();
-    void UpdateTrackLabel(Track* track, const DetectionItem& det);
-    std::string BestTrackRawLabel(const Track& track, int* raw_class_id, bool allow_person) const;
+    struct MatchPair {
+        int track;
+        int detection;
+        float score;
+    };
 
-private:
+    float MatchScore(const Track& track, const DetectionItem& detection) const;
+    bool CanStartTrack(const DetectionItem& detection) const;
+    bool IsVisibleInRoi(const Track& track, const std::array<int, 4>& roi) const;
+    void StartTrack(const DetectionItem& detection, int frame_id, int64_t timestamp_ms);
+    void UpdateTrack(Track* track, const DetectionItem& detection,
+                     int frame_id, int64_t timestamp_ms);
+    void UpdateClassEvidence(Track* track, const DetectionItem& detection);
+    void UpdateRangeState(Track* track, const DetectionItem& detection, int64_t timestamp_ms);
+    void AgeUnmatchedTracks(const std::vector<int>& matched_tracks,
+                            const std::array<int, 4>& roi,
+                            int frame_id,
+                            int64_t timestamp_ms);
+    void RebuildStableResult(const DetectionResult& raw_result, int64_t timestamp_ms);
+
     std::array<int, 2> image_shape_;
     int next_track_id_;
     std::vector<Track> tracks_;
     DetectionResult stable_result_;
     AvoidanceDecision decision_;
+    RangingEstimator ranging_;
+    AvoidancePlanner planner_;
 };
 
 }  // namespace obstacle

@@ -23,6 +23,62 @@ const char* const kCocoNames[] = {
     "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
 };
 
+const char* const kRod25Names[] = {
+    "bike",
+    "building",
+    "car",
+    "person",
+    "stairs",
+    "traffic_sign",
+    "electrical_pole",
+    "road",
+    "motorcycle",
+    "dustbin",
+    "dog",
+    "manhole",
+    "tree",
+    "guard_rail",
+    "pedestrian_crosswalk",
+    "truck",
+    "bus",
+    "bench",
+    "traffic_cone",
+    "fire_hydrant",
+    "teraffic_barrel",
+    "plant_pot",
+    "electrical_box",
+    "chair",
+    "bicycle_rack"
+};
+
+const int kRod25SemanticMap[] = {
+    VEHICLE_BICYCLE,   // bike
+    GENERIC_OBSTACLE,  // building
+    VEHICLE_BICYCLE,   // car
+    PERSON,            // person
+    GENERIC_OBSTACLE,  // stairs
+    GENERIC_OBSTACLE,  // traffic_sign
+    GENERIC_OBSTACLE,  // electrical_pole
+    GENERIC_OBSTACLE,  // road, filtered by IsSupportedRawClass
+    VEHICLE_BICYCLE,   // motorcycle
+    GENERIC_OBSTACLE,  // dustbin
+    GENERIC_OBSTACLE,  // dog
+    GENERIC_OBSTACLE,  // manhole
+    GENERIC_OBSTACLE,  // tree
+    GENERIC_OBSTACLE,  // guard_rail
+    GENERIC_OBSTACLE,  // pedestrian_crosswalk
+    VEHICLE_BICYCLE,   // truck
+    VEHICLE_BICYCLE,   // bus
+    CHAIR_SEAT,        // bench
+    GENERIC_OBSTACLE,  // traffic_cone
+    GENERIC_OBSTACLE,  // fire_hydrant
+    GENERIC_OBSTACLE,  // teraffic_barrel
+    SMALL_OBJECT,      // plant_pot
+    GENERIC_OBSTACLE,  // electrical_box
+    CHAIR_SEAT,        // chair
+    GENERIC_OBSTACLE   // bicycle_rack
+};
+
 const char* const kSemanticNames[] = {
     "person",
     "chair/seat",
@@ -62,13 +118,27 @@ int ModelClassCount()
 
 bool IsSupportedRawClass(int raw_class_id)
 {
-    return raw_class_id >= 0 && raw_class_id < ModelClassCount();
+    if (raw_class_id < 0 || raw_class_id >= ModelClassCount()) {
+        return false;
+    }
+    if (ModelClassCount() == 25 && raw_class_id == 7) {
+        return false;
+    }
+    return true;
 }
 
 int SemanticClassFromRaw(int raw_class_id)
 {
     if (ModelClassCount() == NUM_SEMANTIC_CLASSES) {
         return IsSupportedRawClass(raw_class_id) ? raw_class_id : GENERIC_OBSTACLE;
+    }
+
+    if (ModelClassCount() == 25) {
+        const int n = static_cast<int>(sizeof(kRod25SemanticMap) / sizeof(kRod25SemanticMap[0]));
+        if (raw_class_id >= 0 && raw_class_id < n) {
+            return kRod25SemanticMap[raw_class_id];
+        }
+        return GENERIC_OBSTACLE;
     }
 
     if (raw_class_id == 0) return PERSON;
@@ -101,6 +171,10 @@ bool IsObstacleClass(int semantic_class_id)
 
 bool IsFurnitureLikeRawClass(int raw_class_id)
 {
+    if (ModelClassCount() == 25) {
+        return IsFurnitureLikeSemantic(SemanticClassFromRaw(raw_class_id));
+    }
+
     const int ids[] = {13, 56, 57, 59, 60};
     return any_of(raw_class_id, ids, 5);
 }
@@ -125,6 +199,16 @@ bool IsVehicleSemantic(int semantic_class_id)
 float CandidateThreshold(int raw_class_id)
 {
     const int sem = SemanticClassFromRaw(raw_class_id);
+    if (ModelClassCount() == 25) {
+        if (sem == PERSON) return 0.14f;
+        if (sem == CHAIR_SEAT) return 0.18f;
+        // Detection recall and navigation risk are separate concerns.  Keep
+        // vehicle candidates for tracking, then require geometric evidence in
+        // the planner before they can trigger an urgent action.
+        if (sem == VEHICLE_BICYCLE) return 0.28f;
+        if (sem == SMALL_OBJECT) return 0.22f;
+        return 0.24f;
+    }
     if (sem == PERSON || IsFurnitureLikeSemantic(sem)) return 0.16f;
     if (sem == BAG_SUITCASE || sem == SMALL_OBJECT) return 0.18f;
     if (sem == VEHICLE_BICYCLE) return 0.20f;
@@ -166,6 +250,13 @@ std::string RawLabel(int raw_class_id)
     if (ModelClassCount() == NUM_SEMANTIC_CLASSES) {
         return SemanticLabel(raw_class_id);
     }
+    if (ModelClassCount() == 25) {
+        const int n = static_cast<int>(sizeof(kRod25Names) / sizeof(kRod25Names[0]));
+        if (raw_class_id >= 0 && raw_class_id < n) {
+            return kRod25Names[raw_class_id];
+        }
+        return "unknown";
+    }
     const int n = static_cast<int>(sizeof(kCocoNames) / sizeof(kCocoNames[0]));
     if (raw_class_id >= 0 && raw_class_id < n) {
         return kCocoNames[raw_class_id];
@@ -175,4 +266,3 @@ std::string RawLabel(int raw_class_id)
 
 }  // namespace semantic
 }  // namespace obstacle
-
