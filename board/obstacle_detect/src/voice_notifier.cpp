@@ -134,15 +134,15 @@ VoiceNotifier::VoiceNotifier()
       fault_repeat_ms_(2000),
       fault_hold_ms_(200),
       switch_min_ms_(0),
-      tx_gap_ms_(650),
+      tx_gap_ms_(800),
       pre_stop_(false),
       ack_enabled_(false),
       require_ack_(false),
       query_idle_(false),
       fixed_frame_(true),
       use_prompt_prefix_(false),
-      reopen_each_tx_(true),
-      passive_rx_(true),
+      reopen_each_tx_(false),
+      passive_rx_(false),
       diagnostic_(false),
       ack_timeout_ms_(500),
       idle_timeout_ms_(80),
@@ -195,15 +195,15 @@ bool VoiceNotifier::InitializeFromEnv()
     fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 2000));
     fault_hold_ms_ = std::max(0, getenv_int("A1_VOICE_FAULT_HOLD_MS", 200));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
-    tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 650));
+    tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 800));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
     ack_enabled_ = getenv_bool("A1_VOICE_ACK", false);
     require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", false);
     query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", false);
     fixed_frame_ = getenv_bool("A1_VOICE_FIXED_FRAME", true);
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
-    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", true);
-    passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", true);
+    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", false);
+    passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", false);
     diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
     ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 500));
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
@@ -265,7 +265,11 @@ bool VoiceNotifier::InitializeFromEnv()
     } else {
         std::cout << "[VOICE][INFO] ready mode=" << mode
                   << " baud=" << baud
-                  << " protocol=fixed_frame latest_action_mailbox=on"
+                  << " protocol=fixed_frame"
+                  << " transport=persistent_byte_paced"
+                  << " byte_gap_us=" << byte_gap_us_
+                  << " tx_gap_ms=" << tx_gap_ms_
+                  << " latest_action_mailbox=on"
                   << std::endl;
     }
 
@@ -876,11 +880,12 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sent_time_).count());
     const bool changed_action = key != last_key_;
     const bool risk_upgrade = changed_action && action != "clear";
-    const bool urgent_override = action == "stop";
-    // STOP may interrupt immediately. A fault owns the highest-priority
-    // mailbox slot, but still observes the minimum frame gap so its speech
-    // frame cannot collide with the tail of the preceding action frame.
-    if (!urgent_override && since_ms < tx_gap_ms_) {
+    // Keep the UART frame outside the preceding two-character phrase. Safety
+    // actions use a shorter bound, but are not injected mid-frame: SYN6288
+    // otherwise accepts the UART write at the driver while discarding speech.
+    const bool safety_action = action == "stop" || action == "system_fault";
+    const int minimum_gap_ms = safety_action ? std::min(tx_gap_ms_, 600) : tx_gap_ms_;
+    if (since_ms < minimum_gap_ms) {
         if (reason != nullptr) *reason = "tx_gap";
         return false;
     }
