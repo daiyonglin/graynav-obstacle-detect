@@ -136,12 +136,12 @@ VoiceNotifier::VoiceNotifier()
       switch_min_ms_(0),
       tx_gap_ms_(650),
       pre_stop_(false),
-      ack_enabled_(true),
-      require_ack_(true),
-      query_idle_(true),
+      ack_enabled_(false),
+      require_ack_(false),
+      query_idle_(false),
       fixed_frame_(true),
       use_prompt_prefix_(false),
-      reopen_each_tx_(false),
+      reopen_each_tx_(true),
       passive_rx_(false),
       diagnostic_(false),
       ack_timeout_ms_(500),
@@ -149,8 +149,8 @@ VoiceNotifier::VoiceNotifier()
       recover_wait_ms_(1000),
       retry_count_(0),
       baud_(9600),
-      byte_gap_us_(500),
-      post_tx_delay_ms_(15),
+      byte_gap_us_(1000),
+      post_tx_delay_ms_(30),
       passive_rx_ms_(80),
       soft_reset_every_tx_(0),
       consecutive_no_rx_(0),
@@ -195,12 +195,12 @@ bool VoiceNotifier::InitializeFromEnv()
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 650));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
-    ack_enabled_ = getenv_bool("A1_VOICE_ACK", true);
-    require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", true);
-    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", true);
+    ack_enabled_ = getenv_bool("A1_VOICE_ACK", false);
+    require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", false);
+    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", false);
     fixed_frame_ = getenv_bool("A1_VOICE_FIXED_FRAME", true);
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
-    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", false);
+    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", true);
     passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", false);
     diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
     ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 500));
@@ -209,8 +209,8 @@ bool VoiceNotifier::InitializeFromEnv()
     retry_count_ = std::max(0, getenv_int("A1_VOICE_RETRY", 1));
     // The A1 UART driver is reliable with SYN6288 speech frames when bytes are
     // submitted individually. Keep this below the SYN6288 8 ms limit.
-    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 500));
-    post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 15));
+    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 1000));
+    post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
     soft_reset_every_tx_ = std::max(0, getenv_int("A1_VOICE_SOFT_RESET_EVERY_TX", 0));
 
@@ -644,17 +644,18 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
     std::string pre_detail;
     last_tx_detail_ = "not_sent";
     if (interrupt_current) {
-        const bool stop_ok = SendFrameWithStatus(kSyn6288Stop, "cancel");
-        usleep(10000);
-        pre_detail = std::string("cancel=") + (stop_ok ? "accepted" : "failed") + ",";
-        if (!stop_ok) return false;
-        module_state_ = ModuleState::Idle;
-    } else if (interrupt_current && pre_stop_) {
-        const bool stop_ok = SendBytes(kSyn6288Stop);
-        usleep(static_cast<useconds_t>(recover_wait_ms_) * 1000);
-        DrainRx(80);
-        pre_detail = std::string("pre_stop=") + (stop_ok ? "ok" : "fail") + ",";
-        module_state_ = ModuleState::Idle;
+        // A rejected optional cancel frame must never suppress the actual
+        // navigation instruction. Directly send the newest action unless
+        // pre-stop is explicitly enabled for a verified module revision.
+        if (pre_stop_) {
+            const bool stop_ok = SendBytes(kSyn6288Stop);
+            usleep(static_cast<useconds_t>(recover_wait_ms_) * 1000);
+            DrainRx(80);
+            pre_detail = std::string("pre_stop=") + (stop_ok ? "ok" : "fail") + ",";
+            module_state_ = ModuleState::Idle;
+        } else {
+            pre_detail = "interrupt_direct,";
+        }
     } else {
         const int wait_ms = std::max(120, getenv_int("A1_VOICE_WAIT_IDLE_MS", 650));
         if (!WaitUntilIdle(wait_ms, false)) {
