@@ -136,23 +136,22 @@ VoiceNotifier::VoiceNotifier()
       switch_min_ms_(0),
       tx_gap_ms_(650),
       pre_stop_(false),
-      ack_enabled_(true),
+      ack_enabled_(false),
       require_ack_(false),
-      query_idle_(true),
+      query_idle_(false),
       fixed_frame_(true),
       use_prompt_prefix_(false),
-      reopen_each_tx_(false),
-      passive_rx_(false),
+      reopen_each_tx_(true),
+      passive_rx_(true),
       diagnostic_(false),
       ack_timeout_ms_(500),
       idle_timeout_ms_(80),
       recover_wait_ms_(1000),
       retry_count_(0),
       baud_(9600),
-      byte_gap_us_(0),
+      byte_gap_us_(1000),
       post_tx_delay_ms_(30),
       passive_rx_ms_(80),
-      soft_reset_every_tx_(0),
       consecutive_no_rx_(0),
       consecutive_tx_failures_(0),
       tx_failure_count_(0),
@@ -198,25 +197,21 @@ bool VoiceNotifier::InitializeFromEnv()
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 650));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
-    ack_enabled_ = getenv_bool("A1_VOICE_ACK", true);
+    ack_enabled_ = getenv_bool("A1_VOICE_ACK", false);
     require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", false);
-    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", true);
+    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", false);
     fixed_frame_ = getenv_bool("A1_VOICE_FIXED_FRAME", true);
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
-    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", false);
-    passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", false);
+    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", true);
+    passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", true);
     diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
     ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 500));
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));
     retry_count_ = std::max(0, getenv_int("A1_VOICE_RETRY", 1));
-    // A SYN6288 action frame is only 10 bytes, below the A1 32-byte FIFO.
-    // Submit it in one API call so Linux scheduling cannot violate the
-    // module's maximum inter-byte interval.
-    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 0));
+    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 1000));
     post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
-    soft_reset_every_tx_ = std::max(0, getenv_int("A1_VOICE_SOFT_RESET_EVERY_TX", 0));
 
     const int baud = getenv_int("A1_VOICE_BAUD", 9600);
     baud_ = baud;
@@ -265,7 +260,6 @@ bool VoiceNotifier::InitializeFromEnv()
               << " passive_rx=" << (passive_rx_ ? 1 : 0)
               << " passive_rx_ms=" << passive_rx_ms_
               << " recover_wait_ms=" << recover_wait_ms_
-              << " soft_reset_every_tx=" << soft_reset_every_tx_
               << " retry=" << retry_count_
                   << std::endl;
     } else {
@@ -396,30 +390,14 @@ bool VoiceNotifier::SendBytes(const std::vector<uint8_t>& bytes)
     }
 
     if (backend_ == Backend::A1UartApi) {
-        if (uart_ == nullptr) {
-            return false;
-        }
-        if (byte_gap_us_ > 0) {
-            for (size_t i = 0; i < bytes.size(); ++i) {
-                if (uart_send_data(uart_, UART_TX0, &bytes[i], 1) != UART_SUCCESS) {
-                    std::cout << "[VOICE][WARN] uart_send_data byte failed at " << i << std::endl;
-                    return false;
-                }
-                usleep(static_cast<useconds_t>(byte_gap_us_));
-            }
-            if (post_tx_delay_ms_ > 0) {
-                usleep(static_cast<useconds_t>(post_tx_delay_ms_) * 1000);
-            }
-            return true;
-        }
-        for (size_t offset = 0; offset < bytes.size(); offset += kA1UartFifoBytes) {
-            const size_t chunk = std::min(kA1UartFifoBytes, bytes.size() - offset);
-            if (uart_send_data(uart_, UART_TX0, &bytes[offset], static_cast<uint32_t>(chunk)) != UART_SUCCESS) {
-                std::cout << "[VOICE][WARN] uart_send_data failed." << std::endl;
+        if (uart_ == nullptr) return false;
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            if (uart_send_data(uart_, UART_TX0, &bytes[i], 1) != UART_SUCCESS) {
+                std::cout << "[VOICE][WARN] uart_send_data byte failed at " << i << std::endl;
                 return false;
             }
-            if (offset + chunk < bytes.size()) {
-                usleep(1000);
+            if (byte_gap_us_ > 0 && i + 1 < bytes.size()) {
+                usleep(static_cast<useconds_t>(byte_gap_us_));
             }
         }
         if (post_tx_delay_ms_ > 0) {
@@ -725,28 +703,6 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             last_tx_detail_ = pre_detail + "reopen=fail,frame_hex=" + hex_bytes(frame);
             return false;
         }
-        bool recovery_sent = false;
-        const int sent_count = tx_count_.load();
-        if (action != "system_fault" && soft_reset_every_tx_ > 0 && sent_count > 0 &&
-            sent_count % soft_reset_every_tx_ == 0) {
-            recovery_sent = SendBytes(kSyn6288Stop);
-            usleep(220000);
-            DrainRx(40);
-            ++recovery_count_;
-        }
-        const int no_rx_recover_threshold = std::max(
-            3, getenv_int("A1_VOICE_NO_RX_RECOVER", 5));
-        if (!recovery_sent && passive_rx_ &&
-            consecutive_no_rx_.load() >= no_rx_recover_threshold) {
-            // The module previously returned IDLE and then went silent in long
-            // runs. Clear a potentially wedged synthesis transaction, retain
-            // only the latest action, and immediately send that action again.
-            recovery_sent = SendBytes(kSyn6288Stop) || recovery_sent;
-            usleep(180000);
-            DrainRx(40);
-            consecutive_no_rx_ = 0;
-            ++recovery_count_;
-        }
         if (!SendBytes(frame)) {
             last_tx_detail_ = pre_detail + "reopen=ok,blind_tx:uart_send_failed,frame_hex=" + hex_bytes(frame);
             return false;
@@ -756,21 +712,14 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(passive_rx_ms_);
             uint8_t value = 0;
             int rx_count = 0;
-            bool recognized_status = false;
-            bool receive_failed = false;
             while (std::chrono::steady_clock::now() < deadline) {
                 if (ReadResponseByte(&value, 5)) {
                     if (!rx_detail.empty()) rx_detail += "/";
                     rx_detail += hex_byte(value) + "(" + syn6288_status_name(value) + ")";
                     rx_count++;
-                    if (value == 0x41 || value == 0x4A || value == 0x4E || value == 0x4F) {
-                        recognized_status = true;
-                        last_rx_code_ = value;
-                    }
-                    if (value == 0x45) {
-                        receive_failed = true;
-                        last_rx_code_ = value;
-                    }
+                    if (value == 0x41) ++rx_accepted_count_;
+                    if (value == 0x4F) ++rx_idle_count_;
+                    if (value == 0x45) ++rx_rejected_count_;
                     continue;
                 }
                 usleep(5000);
@@ -778,34 +727,6 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
             if (rx_count == 0) {
                 rx_detail = "none";
             }
-            if (receive_failed) {
-                // SYN6288 explicitly rejected the command. Clear the current
-                // transaction and retry the newest action once; reporting UART
-                // write success alone would otherwise hide a silent module.
-                const bool stop_ok = SendBytes(kSyn6288Stop);
-                usleep(260000);
-                DrainRx(60);
-                const bool reopen_retry_ok = ReopenBackend();
-                const bool retry_ok = reopen_retry_ok && SendBytes(frame);
-                rx_detail += std::string("/retry_stop=") + (stop_ok ? "ok" : "fail") +
-                             ",retry_tx=" + (retry_ok ? "ok" : "fail");
-                bool retry_rejected = false;
-                if (retry_ok) {
-                    uint8_t retry_status = 0;
-                    if (ReadResponseByte(&retry_status, 120)) {
-                        rx_detail += ",retry_rx=" + hex_byte(retry_status) +
-                                     "(" + syn6288_status_name(retry_status) + ")";
-                        recognized_status = retry_status == 0x41 || retry_status == 0x4A ||
-                                            retry_status == 0x4E || retry_status == 0x4F;
-                        retry_rejected = retry_status == 0x45;
-                    }
-                }
-                if (!retry_ok || retry_rejected) {
-                    last_tx_detail_ = pre_detail + "receive_failed," + rx_detail;
-                    return false;
-                }
-            }
-            consecutive_no_rx_ = recognized_status ? 0 : consecutive_no_rx_ + 1;
         } else {
             rx_detail = "off";
         }
@@ -815,8 +736,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
                           "," + (fixed_frame_ ? "fixed_frame:blind_tx" : "dynamic_frame:blind_tx") +
                           ",frame_hex=" + hex_bytes(frame) +
                           ",rx=" + rx_detail +
-                          ",no_rx=" + std::to_string(consecutive_no_rx_.load()) +
-                          ",recover=" + (recovery_sent ? "stop_sent" : "none");
+                          ",transport=legacy_stable";
         ++tx_count_;
         return true;
     }
@@ -956,10 +876,10 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sent_time_).count());
     const bool changed_action = key != last_key_;
     const bool risk_upgrade = changed_action && action != "clear";
-    const bool urgent_override = action == "stop" || action == "system_fault";
-    // STOP and device faults may interrupt immediately. LEFT/RIGHT/SLOW must
-    // obey the UART gap even when they represent a risk increase; otherwise
-    // rapidly alternating planner states overload SYN6288 and cause 0x45.
+    const bool urgent_override = action == "stop";
+    // STOP may interrupt immediately. A fault owns the highest-priority
+    // mailbox slot, but still observes the minimum frame gap so its speech
+    // frame cannot collide with the tail of the preceding action frame.
     if (!urgent_override && since_ms < tx_gap_ms_) {
         if (reason != nullptr) *reason = "tx_gap";
         return false;
@@ -1085,6 +1005,7 @@ void VoiceNotifier::WorkerLoop()
             if (consecutive_tx_failures_.load() >= 3) {
                 CloseBackend();
                 ReopenBackend();
+                consecutive_tx_failures_ = 0;
             }
             std::lock_guard<std::mutex> lock(worker_mutex_);
             tx_in_flight_ = false;
@@ -1138,6 +1059,16 @@ void VoiceNotifier::Update(int frame_id,
                   << " pending=" << (pending_ready_ ? 1 : 0)
                   << " in_flight=" << (tx_in_flight_ ? 1 : 0)
                   << std::endl;
+    }
+    // A queued safety instruction must be transmitted at least once before a
+    // lower-risk state can replace it. SYSTEM_FAULT outranks every action;
+    // STOP outranks direction, slow and clear.
+    if (pending_ready_ && pending_action_ == "system_fault" && action != "system_fault") {
+        return;
+    }
+    if (pending_ready_ && pending_action_ == "stop" &&
+        action != "stop" && action != "system_fault") {
+        return;
     }
     if ((pending_ready_ && pending_key_ == key) ||
         (tx_in_flight_ && in_flight_key_ == key)) {

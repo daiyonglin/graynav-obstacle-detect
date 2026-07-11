@@ -157,7 +157,6 @@ private:
     int byte_gap_us_;
     int post_tx_delay_ms_;
     int passive_rx_ms_;
-    int soft_reset_every_tx_;
     std::atomic<int> consecutive_no_rx_;
     std::atomic<int> consecutive_tx_failures_;
     std::atomic<int> tx_failure_count_;
