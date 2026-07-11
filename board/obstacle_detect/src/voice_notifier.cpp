@@ -149,7 +149,7 @@ VoiceNotifier::VoiceNotifier()
       recover_wait_ms_(1000),
       retry_count_(0),
       baud_(9600),
-      byte_gap_us_(0),
+      byte_gap_us_(500),
       post_tx_delay_ms_(15),
       passive_rx_ms_(80),
       soft_reset_every_tx_(0),
@@ -207,7 +207,9 @@ bool VoiceNotifier::InitializeFromEnv()
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));
     retry_count_ = std::max(0, getenv_int("A1_VOICE_RETRY", 1));
-    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 0));
+    // The A1 UART driver is reliable with SYN6288 speech frames when bytes are
+    // submitted individually. Keep this below the SYN6288 8 ms limit.
+    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 500));
     post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 15));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
     soft_reset_every_tx_ = std::max(0, getenv_int("A1_VOICE_SOFT_RESET_EVERY_TX", 0));
