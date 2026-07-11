@@ -24,14 +24,16 @@ const std::vector<uint8_t> kSyn6288Query = {0xFD, 0x00, 0x02, 0x21, 0xDE};
 const uint8_t kPromptPrefix[] = {0x5B, 0x76, 0x38, 0x5D, 0x5B, 0x74, 0x35, 0x5D};
 const uint8_t kPromptClear[] = {0xD6, 0xB1, 0xD0, 0xD0};
 const uint8_t kPromptSlow[] = {0xBC, 0xF5, 0xCB, 0xD9};
-const uint8_t kPromptStop[] = {0xCD, 0xA3, 0xCF, 0xC2};
+// A single-character emergency prompt finishes quickly and cannot be
+// continuously restarted by repeated STOP decisions.
+const uint8_t kPromptStop[] = {0xCD, 0xA3};
 const uint8_t kPromptLeft[] = {0xD7, 0xF3, 0xD7, 0xAA};
 const uint8_t kPromptRight[] = {0xD3, 0xD2, 0xD7, 0xAA};
 const uint8_t kPromptFault[] = {0xD2, 0xEC, 0xB3, 0xA3};
 
 const std::vector<uint8_t> kFixedClearFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD6, 0xB1, 0xD0, 0xD0, 0x9D};
 const std::vector<uint8_t> kFixedSlowFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xBC, 0xF5, 0xCB, 0xD9, 0xA1};
-const std::vector<uint8_t> kFixedStopFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xCD, 0xA3, 0xCF, 0xC2, 0x99};
+const std::vector<uint8_t> kFixedStopFrame = {0xFD, 0x00, 0x05, 0x01, 0x01, 0xCD, 0xA3, 0x96};
 const std::vector<uint8_t> kFixedLeftFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD7, 0xF3, 0xD7, 0xAA, 0xA3};
 const std::vector<uint8_t> kFixedRightFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD3, 0xD2, 0xD7, 0xAA, 0x86};
 const std::vector<uint8_t> kFixedFaultFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD2, 0xEC, 0xB3, 0xA3, 0xD4};
@@ -130,8 +132,8 @@ VoiceNotifier::VoiceNotifier()
       clear_stable_needed_(3),
       cooldown_ms_(1200),
       clear_repeat_ms_(1200),
-      stop_repeat_ms_(900),
-      fault_repeat_ms_(2000),
+      stop_repeat_ms_(1600),
+      fault_repeat_ms_(1800),
       fault_hold_ms_(200),
       switch_min_ms_(0),
       tx_gap_ms_(800),
@@ -191,8 +193,8 @@ bool VoiceNotifier::InitializeFromEnv()
     clear_stable_needed_ = std::max(stable_needed_, getenv_int("A1_VOICE_CLEAR_STABLE_FRAMES", 3));
     cooldown_ms_ = std::max(600, getenv_int("A1_VOICE_COOLDOWN_MS", 1200));
     clear_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 1200));
-    stop_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_STOP_REPEAT_MS", 900));
-    fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 2000));
+    stop_repeat_ms_ = std::max(1000, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1600));
+    fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 1800));
     fault_hold_ms_ = std::max(0, getenv_int("A1_VOICE_FAULT_HOLD_MS", 200));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 800));
@@ -274,6 +276,10 @@ bool VoiceNotifier::InitializeFromEnv()
     }
 
     DrainRx(80);
+    // The speech module and level shifter do not always become ready at the
+    // same instant as the A1 application. Start the normal cooldown clock now
+    // so the first synthesis frame is sent after a deterministic guard time.
+    last_sent_time_ = std::chrono::steady_clock::now();
     if (query_idle_) {
         uint8_t state = 0;
         if (QueryBusyState(&state)) {
@@ -884,7 +890,10 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
     // actions use a shorter bound, but are not injected mid-frame: SYN6288
     // otherwise accepts the UART write at the driver while discarding speech.
     const bool safety_action = action == "stop" || action == "system_fault";
-    const int minimum_gap_ms = safety_action ? std::min(tx_gap_ms_, 600) : tx_gap_ms_;
+    int minimum_gap_ms = safety_action ? std::min(tx_gap_ms_, 600) : tx_gap_ms_;
+    if ((last_key_ == "stop" || last_key_ == "system_fault") && action != last_key_) {
+        minimum_gap_ms = std::max(minimum_gap_ms, 1200);
+    }
     if (since_ms < minimum_gap_ms) {
         if (reason != nullptr) *reason = "tx_gap";
         return false;
@@ -965,11 +974,13 @@ void VoiceNotifier::WorkerLoop()
 
         const bool changed_risk_action =
             (reason == "risk_changed" || reason == "changed_stable") && action != "clear";
+        const bool action_transition = reason.find("changed") != std::string::npos;
         const bool interrupt = action == "stop" || action == "system_fault" || changed_risk_action;
         const bool ok = SendPrompt(action, interrupt);
         const bool busy_defer = !ok && last_tx_detail_.find("module_busy_pending") != std::string::npos;
         const bool superseded = !ok && last_tx_detail_.find("superseded_by_urgent") != std::string::npos;
-        if (diagnostic_ || action == "system_fault" || (!ok && !busy_defer && !superseded) ||
+        if (diagnostic_ || action_transition || action == "system_fault" ||
+            (!ok && !busy_defer && !superseded) ||
             last_tx_detail_.find("receive_failed") != std::string::npos) {
             std::cout << (ok ? "[VOICE][TX]" : "[VOICE][WARN]")
                       << " frame=" << frame_id
