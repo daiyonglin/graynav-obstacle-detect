@@ -149,7 +149,7 @@ VoiceNotifier::VoiceNotifier()
       recover_wait_ms_(1000),
       retry_count_(0),
       baud_(9600),
-      byte_gap_us_(1000),
+      byte_gap_us_(0),
       post_tx_delay_ms_(30),
       passive_rx_ms_(80),
       soft_reset_every_tx_(0),
@@ -210,9 +210,10 @@ bool VoiceNotifier::InitializeFromEnv()
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));
     retry_count_ = std::max(0, getenv_int("A1_VOICE_RETRY", 1));
-    // The A1 UART driver is reliable with SYN6288 speech frames when bytes are
-    // submitted individually. Keep this below the SYN6288 8 ms limit.
-    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 1000));
+    // A SYN6288 action frame is only 10 bytes, below the A1 32-byte FIFO.
+    // Submit it in one API call so Linux scheduling cannot violate the
+    // module's maximum inter-byte interval.
+    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 0));
     post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
     soft_reset_every_tx_ = std::max(0, getenv_int("A1_VOICE_SOFT_RESET_EVERY_TX", 0));
@@ -1080,23 +1081,17 @@ void VoiceNotifier::WorkerLoop()
             ++consecutive_tx_failures_;
             ++tx_failure_count_;
             ++recovery_count_;
-            usleep(150000);
-            bool recovered = true;
+            usleep(250000);
             if (consecutive_tx_failures_.load() >= 3) {
                 CloseBackend();
-                recovered = ReopenBackend();
+                ReopenBackend();
             }
             std::lock_guard<std::mutex> lock(worker_mutex_);
             tx_in_flight_ = false;
             in_flight_key_.clear();
-            if (!worker_stop_ && !pending_ready_) {
-                pending_frame_id_ = frame_id;
-                pending_action_ = action;
-                pending_key_ = key;
-                pending_reason_ = recovered ? "uart_recovered_retry" : "uart_reopen_retry";
-                pending_ready_ = true;
-                worker_cv_.notify_one();
-            }
+            // Never pin the worker to a rejected historical action. Update()
+            // supplies the latest planner state; an action that arrived during
+            // recovery is already preserved by the one-slot mailbox.
         }
     }
 }
