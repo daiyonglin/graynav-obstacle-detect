@@ -136,12 +136,12 @@ VoiceNotifier::VoiceNotifier()
       switch_min_ms_(0),
       tx_gap_ms_(650),
       pre_stop_(false),
-      ack_enabled_(false),
+      ack_enabled_(true),
       require_ack_(false),
-      query_idle_(false),
+      query_idle_(true),
       fixed_frame_(true),
       use_prompt_prefix_(false),
-      reopen_each_tx_(true),
+      reopen_each_tx_(false),
       passive_rx_(false),
       diagnostic_(false),
       ack_timeout_ms_(500),
@@ -158,6 +158,9 @@ VoiceNotifier::VoiceNotifier()
       tx_failure_count_(0),
       recovery_count_(0),
       tx_count_(0),
+      rx_accepted_count_(0),
+      rx_idle_count_(0),
+      rx_rejected_count_(0),
       last_rx_code_(0),
       module_state_(ModuleState::Unknown),
       last_sent_frame_(-100000),
@@ -195,12 +198,12 @@ bool VoiceNotifier::InitializeFromEnv()
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 650));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
-    ack_enabled_ = getenv_bool("A1_VOICE_ACK", false);
+    ack_enabled_ = getenv_bool("A1_VOICE_ACK", true);
     require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", false);
-    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", false);
+    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", true);
     fixed_frame_ = getenv_bool("A1_VOICE_FIXED_FRAME", true);
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
-    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", true);
+    reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", false);
     passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", false);
     diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
     ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 500));
@@ -524,11 +527,36 @@ bool VoiceNotifier::ReadResponseByte(uint8_t* value, int timeout_ms)
 
 bool VoiceNotifier::QueryBusyState(uint8_t* value)
 {
-    if (!SendBytes(kSyn6288Query)) {
-        if (value != nullptr) *value = 0;
+    if (value == nullptr) return false;
+    *value = 0;
+
+    // The module may have already emitted an asynchronous 0x4F after the
+    // previous phrase. Consume only meaningful state bytes; ACK bytes and
+    // electrical noise must not be mistaken for a busy/idle answer.
+    const auto scan_state = [this, value](int timeout_ms) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeout_ms);
+        uint8_t code = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (!ReadResponseByte(&code, 5)) continue;
+            if (code == 0x4F) {
+                ++rx_idle_count_;
+                *value = code;
+                return true;
+            }
+            if (code == 0x4E) {
+                *value = code;
+                return true;
+            }
+            if (code == 0x41) ++rx_accepted_count_;
+            if (code == 0x45) ++rx_rejected_count_;
+        }
         return false;
-    }
-    return ReadResponseByte(value, idle_timeout_ms_);
+    };
+
+    if (scan_state(20)) return true;
+    if (!SendBytes(kSyn6288Query)) return false;
+    return scan_state(idle_timeout_ms_);
 }
 
 bool VoiceNotifier::WaitUntilIdle(int timeout_ms, bool allow_unknown)
@@ -571,8 +599,9 @@ bool VoiceNotifier::WaitUntilIdle(int timeout_ms, bool allow_unknown)
             return allow_unknown;
         }
         last_tx_detail_ = "idle_timeout";
-        if (allow_unknown) {
+        if (allow_unknown || !require_ack_) {
             module_state_ = ModuleState::Unknown;
+            if (!allow_unknown) last_tx_detail_ = "idle_timeout_fallback";
             return true;
         }
         usleep(80000);
@@ -585,9 +614,7 @@ bool VoiceNotifier::SendFrameWithStatus(const std::vector<uint8_t>& bytes, const
 {
     last_tx_detail_ = "tx_pending";
     last_rx_code_ = 0;
-    if (ack_enabled_) {
-        DrainRx(20);
-    }
+    if (ack_enabled_) DrainRx(10);
     if (!SendBytes(bytes)) {
         last_tx_detail_ = std::string(tag) + ":uart_send_failed";
         return false;
@@ -595,25 +622,50 @@ bool VoiceNotifier::SendFrameWithStatus(const std::vector<uint8_t>& bytes, const
 
     bool accepted = true;
     if (ack_enabled_) {
-        uint8_t ack = 0;
-        if (ReadResponseByte(&ack, ack_timeout_ms_)) {
-            last_rx_code_ = ack;
-            last_tx_detail_ = std::string(tag) + ":ack=" + hex_byte(ack) + "(" + syn6288_status_name(ack) + ")";
-            accepted = (ack != 0x45);
-            if (ack == 0x41) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(ack_timeout_ms_);
+        uint8_t code = 0;
+        bool saw_ack = false;
+        bool saw_reject = false;
+        std::string rx_codes;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (!ReadResponseByte(&code, 5)) continue;
+            if (!rx_codes.empty()) rx_codes += "/";
+            rx_codes += hex_byte(code);
+            if (code == 0x41) {
+                ++rx_accepted_count_;
+                last_rx_code_ = code;
+                saw_ack = true;
                 module_state_ = ModuleState::Speaking;
-            } else if (ack == 0x4F || ack == 0x4A) {
-                module_state_ = ModuleState::Idle;
-            } else if (ack == 0x4E) {
-                module_state_ = ModuleState::Speaking;
-                accepted = false;
-            } else if (ack == 0x45) {
-                module_state_ = ModuleState::ErrorRecover;
+                break;
             }
+            if (code == 0x45) {
+                ++rx_rejected_count_;
+                last_rx_code_ = code;
+                saw_reject = true;
+                module_state_ = ModuleState::ErrorRecover;
+                break;
+            }
+            if (code == 0x4F) {
+                ++rx_idle_count_;
+                module_state_ = ModuleState::Idle;
+            } else if (code == 0x4E) {
+                module_state_ = ModuleState::Speaking;
+            }
+        }
+        if (saw_ack) {
+            last_tx_detail_ = std::string(tag) + ":ack=0x41(accepted),rx=" + rx_codes;
+            accepted = true;
+            consecutive_no_rx_ = 0;
+        } else if (saw_reject) {
+            last_tx_detail_ = std::string(tag) + ":ack=0x45(receive_failed),rx=" + rx_codes;
+            accepted = false;
         } else {
             last_rx_code_ = 0;
-            last_tx_detail_ = std::string(tag) + ":ack_timeout";
+            last_tx_detail_ = std::string(tag) + ":ack_timeout,rx=" +
+                              (rx_codes.empty() ? "none" : rx_codes);
             accepted = !require_ack_;
+            ++consecutive_no_rx_;
             if (accepted) {
                 module_state_ = ModuleState::Unknown;
             }
@@ -623,19 +675,6 @@ bool VoiceNotifier::SendFrameWithStatus(const std::vector<uint8_t>& bytes, const
         module_state_ = ModuleState::Unknown;
     }
 
-    if (query_idle_) {
-        uint8_t state = 0;
-        if (QueryBusyState(&state)) {
-            last_tx_detail_ += ",state=" + hex_byte(state) + "(" + syn6288_status_name(state) + ")";
-            if (state == 0x4F) {
-                module_state_ = ModuleState::Idle;
-            } else if (state == 0x4E) {
-                module_state_ = ModuleState::Speaking;
-            }
-        } else {
-            last_tx_detail_ += ",state_timeout";
-        }
-    }
     return accepted;
 }
 
@@ -784,6 +823,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
     std::string previous_failure;
     for (int attempt = 0; attempt <= retry_count_; ++attempt) {
         if (SendFrameWithStatus(frame, "speak")) {
+            ++tx_count_;
             last_tx_detail_ = pre_detail + last_tx_detail_;
             if (attempt > 0) {
                 last_tx_detail_ += ",prev=" + previous_failure + ",retry_ok";
@@ -792,14 +832,11 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
         }
         const std::string failed_detail = last_tx_detail_;
         if (attempt < retry_count_) {
-            if (last_rx_code_ == 0x45 || interrupt_current) {
-                const bool stop_ok = SendFrameWithStatus(kSyn6288Stop, "retry_cancel");
-                usleep(10000);
-                previous_failure = failed_detail + ",recover_stop=" + (stop_ok ? "ok" : "fail");
-            } else {
-                usleep(180000);
-                previous_failure = failed_detail + ",recover_wait";
-            }
+            // A 0x45 means the speech frame itself must be resent. Sending a
+            // stop frame here can also be rejected and previously left the
+            // module permanently silent.
+            usleep(last_rx_code_ == 0x45 ? 120000 : 180000);
+            previous_failure = failed_detail + ",direct_resend";
         }
     }
     if (!previous_failure.empty()) {
@@ -1095,6 +1132,9 @@ void VoiceNotifier::Update(int frame_id,
                 std::chrono::steady_clock::now() - last_sent_time_).count());
         std::cout << "[VOICE][HEALTH] frame=" << frame_id
                   << " tx_count=" << tx_count_.load()
+                  << " ack=" << rx_accepted_count_.load()
+                  << " idle=" << rx_idle_count_.load()
+                  << " reject=" << rx_rejected_count_.load()
                   << " tx_failures=" << tx_failure_count_.load()
                   << " consecutive_failures=" << consecutive_tx_failures_.load()
                   << " no_rx=" << consecutive_no_rx_.load()

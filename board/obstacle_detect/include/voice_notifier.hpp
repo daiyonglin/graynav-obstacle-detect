@@ -163,6 +163,9 @@ private:
     std::atomic<int> tx_failure_count_;
     std::atomic<int> recovery_count_;
     std::atomic<int> tx_count_;
+    std::atomic<int> rx_accepted_count_;
+    std::atomic<int> rx_idle_count_;
+    std::atomic<int> rx_rejected_count_;
     uint8_t last_rx_code_;
     ModuleState module_state_;
     int last_sent_frame_;
