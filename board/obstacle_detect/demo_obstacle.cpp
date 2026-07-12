@@ -140,7 +140,9 @@ struct SystemHealth {
         const bool bright_cover = light.mean > 230.0f && light.bright_ratio > 0.88f;
         const bool flat_frame = light.stddev > 0.0f && light.stddev < 2.5f;
         const bool bad = dark_cover || bright_cover || flat_frame;
-        data_fault_frames = bad ? data_fault_frames + 1 : 0;
+        // Use a leaky accumulator so a single bright edge in an otherwise
+        // covered image cannot immediately erase the sensor-fault evidence.
+        data_fault_frames = bad ? data_fault_frames + 1 : std::max(0, data_fault_frames - 1);
         if (last_image_hash != 0 && light.sample_hash == last_image_hash) {
             ++frozen_frames;
         } else {
@@ -202,8 +204,15 @@ struct SystemHealth {
             fault_latched = true;
             healthy_recovery_frames = 0;
         } else if (fault_latched) {
-            ++healthy_recovery_frames;
-            if (healthy_recovery_frames >= 5) {
+            const bool recovery_clean = capture_failures == 0 && inference_failures == 0 &&
+                                        data_fault_frames == 0 && frozen_frames == 0 &&
+                                        resource_fault_frames == 0 && low_memory_frames == 0 &&
+                                        candidate_burst_frames == 0;
+            healthy_recovery_frames = recovery_clean ? healthy_recovery_frames + 1 : 0;
+            // A covered lens can briefly expose a bright edge and produce a
+            // few nominal frames. Require sustained healthy imagery before
+            // allowing CLEAR/navigation speech again.
+            if (healthy_recovery_frames >= 30) {
                 fault_latched = false;
                 healthy_recovery_frames = 0;
             }

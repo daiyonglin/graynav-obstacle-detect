@@ -26,14 +26,14 @@ const uint8_t kPromptClear[] = {0xD6, 0xB1, 0xD0, 0xD0};
 const uint8_t kPromptSlow[] = {0xBC, 0xF5, 0xCB, 0xD9};
 // A single-character emergency prompt finishes quickly and cannot be
 // continuously restarted by repeated STOP decisions.
-const uint8_t kPromptStop[] = {0xCD, 0xA3};
+const uint8_t kPromptStop[] = {0xCD, 0xA3, 0xCF, 0xC2};
 const uint8_t kPromptLeft[] = {0xD7, 0xF3, 0xD7, 0xAA};
 const uint8_t kPromptRight[] = {0xD3, 0xD2, 0xD7, 0xAA};
 const uint8_t kPromptFault[] = {0xD2, 0xEC, 0xB3, 0xA3};
 
 const std::vector<uint8_t> kFixedClearFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD6, 0xB1, 0xD0, 0xD0, 0x9D};
 const std::vector<uint8_t> kFixedSlowFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xBC, 0xF5, 0xCB, 0xD9, 0xA1};
-const std::vector<uint8_t> kFixedStopFrame = {0xFD, 0x00, 0x05, 0x01, 0x01, 0xCD, 0xA3, 0x96};
+const std::vector<uint8_t> kFixedStopFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xCD, 0xA3, 0xCF, 0xC2, 0x99};
 const std::vector<uint8_t> kFixedLeftFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD7, 0xF3, 0xD7, 0xAA, 0xA3};
 const std::vector<uint8_t> kFixedRightFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD3, 0xD2, 0xD7, 0xAA, 0x86};
 const std::vector<uint8_t> kFixedFaultFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD2, 0xEC, 0xB3, 0xA3, 0xD4};
@@ -147,7 +147,7 @@ VoiceNotifier::VoiceNotifier()
       clear_repeat_ms_(1200),
       stop_repeat_ms_(1600),
       fault_repeat_ms_(1800),
-      fault_hold_ms_(200),
+      fault_hold_ms_(2500),
       switch_min_ms_(0),
       tx_gap_ms_(800),
       pre_stop_(false),
@@ -226,7 +226,7 @@ bool VoiceNotifier::InitializeFromEnv()
     clear_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 1200));
     stop_repeat_ms_ = std::max(1000, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1600));
     fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 1800));
-    fault_hold_ms_ = std::max(0, getenv_int("A1_VOICE_FAULT_HOLD_MS", 200));
+    fault_hold_ms_ = std::max(1000, getenv_int("A1_VOICE_FAULT_HOLD_MS", 2500));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 800));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
@@ -800,8 +800,7 @@ std::string VoiceNotifier::BuildVoiceKey(const DetectionResult& result,
                                          const AvoidanceDecision& decision) const
 {
     (void)result;
-    const std::string action = decision.action.empty() ? "clear" : decision.action;
-    return action;
+    return decision.action.empty() ? "clear" : decision.action;
 }
 
 std::vector<uint8_t> VoiceNotifier::BuildPromptPayload(const std::string& action) const
@@ -1047,6 +1046,10 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
     if (code == 0x4F) {
         ++rx_idle_count_;
         status_query_pending_ = false;
+        // In paced compatibility mode RX completion bytes can belong to the
+        // previous phrase. Use the deterministic phrase timer so a late 0x4F
+        // cannot truncate a newly selected safety prompt.
+        if (!require_ack_) return;
         if (tx_in_flight_) {
             if (module_state_.load() != ModuleState::Speaking) {
                 // A preempted phrase may report IDLE before the replacement
@@ -1272,7 +1275,7 @@ void VoiceNotifier::WorkerLoop()
             const bool direction_switch =
                 (active_action == "turn_left" || active_action == "turn_right") &&
                 (action == "turn_left" || action == "turn_right") && action != active_action;
-            if (action != active_action &&
+            if (require_ack_ && action != active_action &&
                 (ActionPriority(action) > ActionPriority(active_action) || direction_switch)) {
                 StartProtocolSpeech(frame_id, action, true);
             }
@@ -1298,7 +1301,15 @@ void VoiceNotifier::Update(int frame_id,
         return;
     }
     (void)result;
-    const std::string action = decision.action.empty() ? "clear" : decision.action;
+    std::string action = decision.action.empty() ? "clear" : decision.action;
+    const auto now = std::chrono::steady_clock::now();
+    if (action == "system_fault") {
+        last_fault_seen_time_ = now;
+    } else {
+        const int since_fault_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fault_seen_time_).count());
+        if (since_fault_ms < fault_hold_ms_) action = "system_fault";
+    }
     if (action != "stop" && action != "system_fault" && frame_id % frame_interval_ != 0) {
         return;
     }
