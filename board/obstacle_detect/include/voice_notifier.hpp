@@ -40,8 +40,10 @@ public:
     enum class ModuleState {
         Unknown,
         Idle,
+        WaitAccept,
         Speaking,
-        ErrorRecover
+        ErrorRecover,
+        Offline
     };
 
     VoiceNotifier();
@@ -120,6 +122,25 @@ private:
     // Performs potentially slow UART transactions outside the inference loop.
     void WorkerLoop();
 
+    // Continuously drains and parses all status bytes currently in the RX FIFO.
+    void PumpRx();
+
+    // Advances the SYN6288 transaction state from one protocol status byte.
+    void HandleStatusByte(uint8_t code);
+
+    // Starts or preempts one atomic speech transaction from the latest action.
+    bool StartProtocolSpeech(int frame_id, const std::string& action, bool preempt);
+
+    // Handles ACK/playback timeouts, one retry, status query and resynchronization.
+    void HandleProtocolTimeouts();
+
+    // Reopens UART only after a complete protocol transaction has failed.
+    void RecoverProtocol(const char* reason);
+
+    // Returns action priority and post-completion repeat interval.
+    int ActionPriority(const std::string& action) const;
+    int RepeatIntervalMs(const std::string& action) const;
+
     // Closes whichever UART/GPIO backend was opened.
     void CloseBackend();
 
@@ -157,6 +178,9 @@ private:
     int byte_gap_us_;
     int post_tx_delay_ms_;
     int passive_rx_ms_;
+    int play_timeout_ms_;
+    int inter_frame_ms_;
+    int rx_poll_ms_;
     std::atomic<int> consecutive_no_rx_;
     std::atomic<int> consecutive_tx_failures_;
     std::atomic<int> tx_failure_count_;
@@ -165,8 +189,14 @@ private:
     std::atomic<int> rx_accepted_count_;
     std::atomic<int> rx_idle_count_;
     std::atomic<int> rx_rejected_count_;
+    std::atomic<int> rx_completed_count_;
+    std::atomic<int> rx_unknown_count_;
+    std::atomic<int> rx_byte_count_;
+    std::atomic<int> ack_timeout_count_;
+    std::atomic<int> play_timeout_count_;
+    std::atomic<unsigned int> transaction_seq_;
     uint8_t last_rx_code_;
-    ModuleState module_state_;
+    std::atomic<ModuleState> module_state_;
     int last_sent_frame_;
     std::string last_action_;
     std::string last_key_;
@@ -186,6 +216,16 @@ private:
     std::string pending_reason_;
     std::string in_flight_key_;
     std::deque<uint8_t> rx_queue_;
+    std::vector<uint8_t> transaction_frame_;
+    int transaction_frame_id_;
+    int transaction_retry_;
+    bool transaction_accepted_;
+    bool status_query_pending_;
+    std::chrono::steady_clock::time_point protocol_started_time_;
+    std::chrono::steady_clock::time_point transaction_tx_time_;
+    std::chrono::steady_clock::time_point transaction_accept_time_;
+    std::chrono::steady_clock::time_point status_query_time_;
+    std::chrono::steady_clock::time_point last_frame_tx_time_;
 };
 
 }  // namespace obstacle

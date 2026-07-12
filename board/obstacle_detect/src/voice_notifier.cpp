@@ -118,6 +118,19 @@ std::string hex_bytes(const std::vector<uint8_t>& bytes)
     return out;
 }
 
+const char* module_state_name(VoiceNotifier::ModuleState state)
+{
+    switch (state) {
+        case VoiceNotifier::ModuleState::Unknown: return "UNKNOWN";
+        case VoiceNotifier::ModuleState::Idle: return "IDLE";
+        case VoiceNotifier::ModuleState::WaitAccept: return "WAIT_ACCEPT";
+        case VoiceNotifier::ModuleState::Speaking: return "PLAYING";
+        case VoiceNotifier::ModuleState::ErrorRecover: return "RECOVER";
+        case VoiceNotifier::ModuleState::Offline: return "OFFLINE";
+    }
+    return "UNKNOWN";
+}
+
 }  // namespace
 
 VoiceNotifier::VoiceNotifier()
@@ -138,22 +151,25 @@ VoiceNotifier::VoiceNotifier()
       switch_min_ms_(0),
       tx_gap_ms_(800),
       pre_stop_(false),
-      ack_enabled_(false),
-      require_ack_(false),
-      query_idle_(false),
+      ack_enabled_(true),
+      require_ack_(true),
+      query_idle_(true),
       fixed_frame_(true),
       use_prompt_prefix_(false),
       reopen_each_tx_(false),
-      passive_rx_(false),
+      passive_rx_(true),
       diagnostic_(false),
-      ack_timeout_ms_(500),
+      ack_timeout_ms_(200),
       idle_timeout_ms_(80),
       recover_wait_ms_(1000),
       retry_count_(0),
       baud_(9600),
-      byte_gap_us_(1000),
+      byte_gap_us_(0),
       post_tx_delay_ms_(30),
       passive_rx_ms_(80),
+      play_timeout_ms_(3000),
+      inter_frame_ms_(12),
+      rx_poll_ms_(3),
       consecutive_no_rx_(0),
       consecutive_tx_failures_(0),
       tx_failure_count_(0),
@@ -162,6 +178,12 @@ VoiceNotifier::VoiceNotifier()
       rx_accepted_count_(0),
       rx_idle_count_(0),
       rx_rejected_count_(0),
+      rx_completed_count_(0),
+      rx_unknown_count_(0),
+      rx_byte_count_(0),
+      ack_timeout_count_(0),
+      play_timeout_count_(0),
+      transaction_seq_(0),
       last_rx_code_(0),
       module_state_(ModuleState::Unknown),
       last_sent_frame_(-100000),
@@ -174,7 +196,16 @@ VoiceNotifier::VoiceNotifier()
       worker_stop_(false),
       pending_ready_(false),
       tx_in_flight_(false),
-      pending_frame_id_(0) {}
+      pending_frame_id_(0),
+      transaction_frame_id_(0),
+      transaction_retry_(0),
+      transaction_accepted_(false),
+      status_query_pending_(false),
+      protocol_started_time_(std::chrono::steady_clock::now()),
+      transaction_tx_time_(std::chrono::steady_clock::now()),
+      transaction_accept_time_(std::chrono::steady_clock::now()),
+      status_query_time_(std::chrono::steady_clock::now()),
+      last_frame_tx_time_(std::chrono::steady_clock::now() - std::chrono::seconds(1)) {}
 
 bool VoiceNotifier::InitializeFromEnv()
 {
@@ -199,21 +230,24 @@ bool VoiceNotifier::InitializeFromEnv()
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 800));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
-    ack_enabled_ = getenv_bool("A1_VOICE_ACK", false);
-    require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", false);
-    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", false);
+    ack_enabled_ = getenv_bool("A1_VOICE_ACK", true);
+    require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", true);
+    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", true);
     fixed_frame_ = getenv_bool("A1_VOICE_FIXED_FRAME", true);
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
     reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", false);
-    passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", false);
+    passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", true);
     diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
-    ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 500));
+    ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 200));
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));
     retry_count_ = std::max(0, getenv_int("A1_VOICE_RETRY", 1));
-    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 1000));
+    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 0));
     post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
+    play_timeout_ms_ = std::max(1000, getenv_int("A1_VOICE_PLAY_TIMEOUT_MS", 3000));
+    inter_frame_ms_ = std::max(9, getenv_int("A1_VOICE_INTER_FRAME_MS", 12));
+    rx_poll_ms_ = std::max(1, getenv_int("A1_VOICE_RX_POLL_MS", 3));
 
     const int baud = getenv_int("A1_VOICE_BAUD", 9600);
     baud_ = baud;
@@ -268,43 +302,19 @@ bool VoiceNotifier::InitializeFromEnv()
         std::cout << "[VOICE][INFO] ready mode=" << mode
                   << " baud=" << baud
                   << " protocol=fixed_frame"
-                  << " transport=persistent_byte_paced"
-                  << " byte_gap_us=" << byte_gap_us_
+                  << " protocol=syn6288_state_machine_v1"
+                  << " transport=persistent_atomic_duplex"
                   << " tx_gap_ms=" << tx_gap_ms_
                   << " latest_action_mailbox=on"
                   << std::endl;
     }
 
-    DrainRx(80);
-    // The speech module and level shifter do not always become ready at the
-    // same instant as the A1 application. Start the normal cooldown clock now
-    // so the first synthesis frame is sent after a deterministic guard time.
+    // RX is never discarded in production. The protocol worker continuously
+    // consumes 0x41/0x45/0x4A/0x4E/0x4F after it starts.
+    protocol_started_time_ = std::chrono::steady_clock::now();
+    module_state_ = ModuleState::Unknown;
     last_sent_time_ = std::chrono::steady_clock::now();
-    if (query_idle_) {
-        uint8_t state = 0;
-        if (QueryBusyState(&state)) {
-            module_state_ = (state == 0x4F) ? ModuleState::Idle :
-                            (state == 0x4E) ? ModuleState::Speaking :
-                            ModuleState::Unknown;
-            std::cout << "[VOICE][INFO] initial module state="
-                      << hex_byte(state) << "(" << syn6288_status_name(state) << ")"
-                      << std::endl;
-        } else {
-            std::cout << "[VOICE][WARN] initial module state query timed out; will use ACK/blind fallback." << std::endl;
-        }
-    }
 
-    if (getenv_bool("A1_VOICE_TEST_ON_START", false)) {
-        const bool ok = SendPrompt("clear", false);
-        last_key_ = "clear";
-        last_sent_time_ = std::chrono::steady_clock::now();
-        std::cout << "[VOICE][TX] frame=0 action=clear reason=startup status="
-                  << (ok ? "ok" : "fail")
-                  << " detail=" << last_tx_detail_ << std::endl;
-    }
-    if (getenv_bool("A1_VOICE_SELFTEST", false)) {
-        RunStartupSelfTest();
-    }
     worker_stop_ = false;
     pending_ready_ = false;
     worker_ = std::thread(&VoiceNotifier::WorkerLoop, this);
@@ -401,12 +411,16 @@ bool VoiceNotifier::SendBytes(const std::vector<uint8_t>& bytes)
 
     if (backend_ == Backend::A1UartApi) {
         if (uart_ == nullptr) return false;
-        for (size_t i = 0; i < bytes.size(); ++i) {
-            if (uart_send_data(uart_, UART_TX0, &bytes[i], 1) != UART_SUCCESS) {
-                std::cout << "[VOICE][WARN] uart_send_data byte failed at " << i << std::endl;
+        // The official API owns a 32-byte TX FIFO. Submit each SYN6288 frame
+        // in one call so Linux scheduling cannot insert an invalid inter-byte
+        // gap. Navigation frames are 8-10 bytes and therefore need one chunk.
+        for (size_t offset = 0; offset < bytes.size(); offset += kA1UartFifoBytes) {
+            const size_t chunk = std::min(kA1UartFifoBytes, bytes.size() - offset);
+            if (uart_send_data(uart_, UART_TX0, &bytes[offset], static_cast<uint32_t>(chunk)) != UART_SUCCESS) {
+                std::cout << "[VOICE][WARN] uart_send_data frame failed at " << offset << std::endl;
                 return false;
             }
-            if (byte_gap_us_ > 0 && i + 1 < bytes.size()) {
+            if (byte_gap_us_ > 0 && offset + chunk < bytes.size()) {
                 usleep(static_cast<useconds_t>(byte_gap_us_));
             }
         }
@@ -746,7 +760,7 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
                           "," + (fixed_frame_ ? "fixed_frame:blind_tx" : "dynamic_frame:blind_tx") +
                           ",frame_hex=" + hex_bytes(frame) +
                           ",rx=" + rx_detail +
-                          ",transport=legacy_stable";
+                          ",transport=persistent_atomic_blind";
         ++tx_count_;
         return true;
     }
@@ -952,83 +966,298 @@ void VoiceNotifier::CommitSent(const std::string& action, const std::string& key
     last_sent_time_ = std::chrono::steady_clock::now();
 }
 
+int VoiceNotifier::ActionPriority(const std::string& action) const
+{
+    if (action == "system_fault") return 100;
+    if (action == "stop") return 90;
+    if (action == "turn_left" || action == "turn_right") return 70;
+    if (action == "slow") return 50;
+    return 10;
+}
+
+int VoiceNotifier::RepeatIntervalMs(const std::string& action) const
+{
+    if (action == "system_fault") return fault_repeat_ms_;
+    if (action == "stop") return stop_repeat_ms_;
+    if (action == "clear") return clear_repeat_ms_;
+    return cooldown_ms_;
+}
+
+void VoiceNotifier::PumpRx()
+{
+    if (backend_ != Backend::A1UartApi || uart_ == nullptr) return;
+
+    for (int round = 0; round < 4; ++round) {
+        uint8_t data[32] = {0};
+        uint32_t received = 0;
+        const int ret = uart_receive_data(uart_, UART_RX0, data, sizeof(data), &received);
+        if (ret != UART_SUCCESS || received == 0) break;
+        rx_byte_count_ += static_cast<int>(received);
+        for (uint32_t i = 0; i < received; ++i) HandleStatusByte(data[i]);
+        if (received < sizeof(data)) break;
+    }
+}
+
+void VoiceNotifier::HandleStatusByte(uint8_t code)
+{
+    const auto now = std::chrono::steady_clock::now();
+    last_rx_code_ = code;
+    if (code == 0x41) {
+        if (status_query_pending_) return;
+        if (module_state_.load() == ModuleState::WaitAccept && tx_in_flight_) {
+            transaction_accepted_ = true;
+            transaction_accept_time_ = now;
+            module_state_ = ModuleState::Speaking;
+            ++rx_accepted_count_;
+            consecutive_no_rx_ = 0;
+            const int latency = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_tx_time_).count());
+            std::cout << "[VOICE] seq=" << transaction_seq_.load()
+                      << " ACK code=0x41 latency_ms=" << latency << std::endl;
+        }
+        return;
+    }
+    if (code == 0x45) {
+        ++rx_rejected_count_;
+        if (module_state_.load() == ModuleState::WaitAccept && tx_in_flight_) {
+            module_state_ = ModuleState::ErrorRecover;
+            transaction_tx_time_ = now;
+            std::cout << "[VOICE][WARN] seq=" << transaction_seq_.load()
+                      << " REJECT code=0x45 retry=" << transaction_retry_ << std::endl;
+        }
+        return;
+    }
+    if (code == 0x4A) {
+        status_query_pending_ = false;
+        if (!tx_in_flight_) module_state_ = ModuleState::Idle;
+        return;
+    }
+    if (code == 0x4E) {
+        status_query_pending_ = false;
+        module_state_ = ModuleState::Speaking;
+        if (tx_in_flight_) {
+            transaction_accept_time_ = now;
+        }
+        return;
+    }
+    if (code == 0x4F) {
+        ++rx_idle_count_;
+        status_query_pending_ = false;
+        if (tx_in_flight_) {
+            if (module_state_.load() != ModuleState::Speaking) {
+                // A preempted phrase may report IDLE before the replacement
+                // frame reports 0x41. It must not complete the new transaction.
+                if (diagnostic_) {
+                    std::cout << "[VOICE][WARN] stale_idle_while_waiting_ack seq="
+                              << transaction_seq_.load() << std::endl;
+                }
+                return;
+            }
+            const int duration = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_accept_time_).count());
+            ++rx_completed_count_;
+            {
+                std::lock_guard<std::mutex> lock(worker_mutex_);
+                CommitSent(in_flight_key_, in_flight_key_);
+                last_sent_frame_ = transaction_frame_id_;
+                tx_in_flight_ = false;
+                in_flight_key_.clear();
+            }
+            std::cout << "[VOICE] seq=" << transaction_seq_.load()
+                      << " DONE code=0x4F duration_ms=" << duration << std::endl;
+        }
+        module_state_ = ModuleState::Idle;
+        return;
+    }
+    ++rx_unknown_count_;
+    if (diagnostic_) {
+        std::cout << "[VOICE][WARN] unknown_rx=" << hex_byte(code) << std::endl;
+    }
+}
+
+bool VoiceNotifier::StartProtocolSpeech(int frame_id, const std::string& action, bool preempt)
+{
+    const auto now = std::chrono::steady_clock::now();
+    const int gap = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - last_frame_tx_time_).count());
+    if (gap < inter_frame_ms_) {
+        usleep(static_cast<useconds_t>(inter_frame_ms_ - gap) * 1000);
+    }
+
+    const std::vector<uint8_t> frame =
+        fixed_frame_ ? BuildFixedPromptFrame(action) : BuildSyn6288Frame(BuildPromptPayload(action));
+    if (frame.empty() || frame.size() > kA1UartFifoBytes || !SendBytes(frame)) {
+        ++tx_failure_count_;
+        ++consecutive_tx_failures_;
+        return false;
+    }
+
+    last_frame_tx_time_ = std::chrono::steady_clock::now();
+    transaction_frame_ = frame;
+    transaction_frame_id_ = frame_id;
+    transaction_retry_ = 0;
+    transaction_accepted_ = false;
+    status_query_pending_ = false;
+    transaction_tx_time_ = last_frame_tx_time_;
+    transaction_accept_time_ = last_frame_tx_time_;
+    module_state_ = ModuleState::WaitAccept;
+    ++transaction_seq_;
+    ++tx_count_;
+    consecutive_tx_failures_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        tx_in_flight_ = true;
+        in_flight_key_ = action;
+    }
+    std::cout << "[VOICE] seq=" << transaction_seq_.load()
+              << (preempt ? " PREEMPT" : " TX")
+              << " frame=" << frame_id
+              << " action=" << action
+              << " bytes=" << frame.size() << std::endl;
+    return true;
+}
+
+void VoiceNotifier::RecoverProtocol(const char* reason)
+{
+    ++recovery_count_;
+    std::cout << "[VOICE][ERROR] transport_resync reason=" << reason
+              << " recoveries=" << recovery_count_.load() << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        tx_in_flight_ = false;
+        in_flight_key_.clear();
+    }
+    status_query_pending_ = false;
+    transaction_accepted_ = false;
+    CloseBackend();
+    usleep(100000);
+    if (ReopenBackend()) {
+        module_state_ = ModuleState::Unknown;
+        protocol_started_time_ = std::chrono::steady_clock::now();
+        consecutive_tx_failures_ = 0;
+    } else {
+        module_state_ = ModuleState::Offline;
+        protocol_started_time_ = std::chrono::steady_clock::now();
+        ++tx_failure_count_;
+    }
+}
+
+void VoiceNotifier::HandleProtocolTimeouts()
+{
+    const auto now = std::chrono::steady_clock::now();
+    const ModuleState state = module_state_.load();
+    if (state == ModuleState::Unknown) {
+        const int elapsed = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - protocol_started_time_).count());
+        if (!status_query_pending_ && elapsed >= 500) {
+            if (SendBytes(kSyn6288Query)) {
+                status_query_pending_ = true;
+                status_query_time_ = std::chrono::steady_clock::now();
+                last_frame_tx_time_ = status_query_time_;
+            }
+        } else if (status_query_pending_) {
+            const int query_age = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - status_query_time_).count());
+            if (query_age >= ack_timeout_ms_) RecoverProtocol("startup_query_timeout");
+        }
+        return;
+    }
+    if (state == ModuleState::Offline) {
+        const int elapsed = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - protocol_started_time_).count());
+        if (elapsed >= 3000) RecoverProtocol("offline_retry");
+        return;
+    }
+    if (state == ModuleState::WaitAccept || state == ModuleState::ErrorRecover) {
+        const int age = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_tx_time_).count());
+        const bool timeout = state == ModuleState::WaitAccept && age >= ack_timeout_ms_;
+        const bool rejected_ready = state == ModuleState::ErrorRecover && age >= 20;
+        if (!timeout && !rejected_ready) return;
+        if (timeout) ++ack_timeout_count_;
+        if (transaction_retry_ < 1) {
+            usleep(static_cast<useconds_t>(inter_frame_ms_) * 1000);
+            if (SendBytes(transaction_frame_)) {
+                ++transaction_retry_;
+                ++tx_count_;
+                transaction_tx_time_ = std::chrono::steady_clock::now();
+                last_frame_tx_time_ = transaction_tx_time_;
+                module_state_ = ModuleState::WaitAccept;
+                std::cout << "[VOICE][WARN] seq=" << transaction_seq_.load()
+                          << " RETRY reason=" << (timeout ? "ack_timeout" : "reject") << std::endl;
+                return;
+            }
+        }
+        RecoverProtocol(timeout ? "ack_timeout" : "receive_failed");
+        return;
+    }
+    if (state == ModuleState::Speaking && tx_in_flight_) {
+        const int age = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_accept_time_).count());
+        if (!status_query_pending_ && age >= play_timeout_ms_) {
+            ++play_timeout_count_;
+            if (SendBytes(kSyn6288Query)) {
+                status_query_pending_ = true;
+                status_query_time_ = std::chrono::steady_clock::now();
+                last_frame_tx_time_ = status_query_time_;
+            } else {
+                RecoverProtocol("status_query_send_failed");
+            }
+        } else if (status_query_pending_) {
+            const int query_age = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - status_query_time_).count());
+            if (query_age >= ack_timeout_ms_) RecoverProtocol("play_query_timeout");
+        }
+    }
+}
+
 void VoiceNotifier::WorkerLoop()
 {
     while (true) {
-        int frame_id = 0;
-        std::string action;
-        std::string key;
-        std::string reason;
         {
             std::unique_lock<std::mutex> lock(worker_mutex_);
-            worker_cv_.wait(lock, [this]() { return worker_stop_ || pending_ready_; });
-            if (worker_stop_ && !pending_ready_) break;
-            frame_id = pending_frame_id_;
-            action = pending_action_;
-            key = pending_key_;
-            reason = pending_reason_;
-            pending_ready_ = false;
-            tx_in_flight_ = true;
-            in_flight_key_ = key;
+            worker_cv_.wait_for(lock, std::chrono::milliseconds(rx_poll_ms_),
+                                [this]() { return worker_stop_; });
+            if (worker_stop_) break;
         }
 
-        const bool changed_risk_action =
-            (reason == "risk_changed" || reason == "changed_stable") && action != "clear";
-        const bool action_transition = reason.find("changed") != std::string::npos;
-        const bool interrupt = action == "stop" || action == "system_fault" || changed_risk_action;
-        const bool ok = SendPrompt(action, interrupt);
-        const bool busy_defer = !ok && last_tx_detail_.find("module_busy_pending") != std::string::npos;
-        const bool superseded = !ok && last_tx_detail_.find("superseded_by_urgent") != std::string::npos;
-        if (diagnostic_ || action_transition || action == "system_fault" ||
-            (!ok && !busy_defer && !superseded) ||
-            last_tx_detail_.find("receive_failed") != std::string::npos) {
-            std::cout << (ok ? "[VOICE][TX]" : "[VOICE][WARN]")
-                      << " frame=" << frame_id
-                      << " action=" << action
-                      << " reason=" << reason
-                      << " status=" << (ok ? "ok" : "fail")
-                      << " detail=" << last_tx_detail_ << std::endl;
+        PumpRx();
+        HandleProtocolTimeouts();
+
+        int frame_id = 0;
+        std::string action;
+        bool have_action = false;
+        bool active = false;
+        std::string active_action;
+        {
+            std::lock_guard<std::mutex> lock(worker_mutex_);
+            have_action = pending_ready_;
+            frame_id = pending_frame_id_;
+            action = pending_action_;
+            active = tx_in_flight_;
+            active_action = in_flight_key_;
         }
-        if (ok) {
-            std::lock_guard<std::mutex> lock(worker_mutex_);
-            consecutive_tx_failures_ = 0;
-            CommitSent(action, key);
-            last_sent_frame_ = frame_id;
-            tx_in_flight_ = false;
-            in_flight_key_.clear();
-        } else if (superseded) {
-            std::lock_guard<std::mutex> lock(worker_mutex_);
-            tx_in_flight_ = false;
-            in_flight_key_.clear();
-        } else if (busy_defer) {
-            usleep(20000);
-            std::lock_guard<std::mutex> lock(worker_mutex_);
-            tx_in_flight_ = false;
-            in_flight_key_.clear();
-            if (!worker_stop_ && !pending_ready_) {
-                pending_frame_id_ = frame_id;
-                pending_action_ = action;
-                pending_key_ = key;
-                pending_reason_ = "wait_module_idle";
-                pending_ready_ = true;
-                worker_cv_.notify_one();
+        if (!have_action) continue;
+
+        const ModuleState state = module_state_.load();
+        if (active) {
+            const bool direction_switch =
+                (active_action == "turn_left" || active_action == "turn_right") &&
+                (action == "turn_left" || action == "turn_right") && action != active_action;
+            if (action != active_action &&
+                (ActionPriority(action) > ActionPriority(active_action) || direction_switch)) {
+                StartProtocolSpeech(frame_id, action, true);
             }
-        } else {
-            ++consecutive_tx_failures_;
-            ++tx_failure_count_;
-            ++recovery_count_;
-            usleep(250000);
-            if (consecutive_tx_failures_.load() >= 3) {
-                CloseBackend();
-                ReopenBackend();
-                consecutive_tx_failures_ = 0;
-            }
-            std::lock_guard<std::mutex> lock(worker_mutex_);
-            tx_in_flight_ = false;
-            in_flight_key_.clear();
-            // Never pin the worker to a rejected historical action. Update()
-            // supplies the latest planner state; an action that arrived during
-            // recovery is already preserved by the one-slot mailbox.
+            continue;
+        }
+        if (state != ModuleState::Idle) continue;
+
+        const auto now = std::chrono::steady_clock::now();
+        const int since_complete = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sent_time_).count());
+        const bool changed = action != last_key_;
+        if (changed || since_complete >= RepeatIntervalMs(action)) {
+            StartProtocolSpeech(frame_id, action, false);
         }
     }
 }
@@ -1040,65 +1269,32 @@ void VoiceNotifier::Update(int frame_id,
     if (mode_ == Mode::Disabled) {
         return;
     }
-    std::string action = decision.action.empty() ? "clear" : decision.action;
-    const auto now = std::chrono::steady_clock::now();
-    if (action == "system_fault") {
-        last_fault_seen_time_ = now;
-    } else {
-        const int since_fault_ms = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - last_fault_seen_time_).count());
-        if (since_fault_ms < fault_hold_ms_) {
-            action = "system_fault";
-        }
-    }
-    if (action != "stop" && frame_id % frame_interval_ != 0) {
+    (void)result;
+    const std::string action = decision.action.empty() ? "clear" : decision.action;
+    if (action != "stop" && action != "system_fault" && frame_id % frame_interval_ != 0) {
         return;
     }
-    const std::string key = action;
-    std::string reason;
     std::lock_guard<std::mutex> lock(worker_mutex_);
     if (frame_id % 300 == 0) {
-        const int since_ms = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - last_sent_time_).count());
         std::cout << "[VOICE][HEALTH] frame=" << frame_id
-                  << " tx_count=" << tx_count_.load()
-                  << " ack=" << rx_accepted_count_.load()
-                  << " idle=" << rx_idle_count_.load()
-                  << " reject=" << rx_rejected_count_.load()
-                  << " tx_failures=" << tx_failure_count_.load()
-                  << " consecutive_failures=" << consecutive_tx_failures_.load()
-                  << " no_rx=" << consecutive_no_rx_.load()
+                  << " state=" << module_state_name(module_state_.load())
+                  << " current=" << (in_flight_key_.empty() ? "none" : in_flight_key_)
+                  << " latest=" << (pending_action_.empty() ? action : pending_action_)
+                  << " tx=" << tx_count_.load()
+                  << " accepted=" << rx_accepted_count_.load()
+                  << " completed=" << rx_completed_count_.load()
+                  << " rejected=" << rx_rejected_count_.load()
+                  << " ack_timeout=" << ack_timeout_count_.load()
+                  << " play_timeout=" << play_timeout_count_.load()
+                  << " rx_bytes=" << rx_byte_count_.load()
                   << " recoveries=" << recovery_count_.load()
-                  << " last_tx_age_ms=" << since_ms
-                  << " pending=" << (pending_ready_ ? 1 : 0)
-                  << " in_flight=" << (tx_in_flight_ ? 1 : 0)
                   << std::endl;
     }
-    // A queued safety instruction must be transmitted at least once before a
-    // lower-risk state can replace it. SYSTEM_FAULT outranks every action;
-    // STOP outranks direction, slow and clear.
-    if (pending_ready_ && pending_action_ == "system_fault" && action != "system_fault") {
-        return;
-    }
-    if (pending_ready_ && pending_action_ == "stop" &&
-        action != "stop" && action != "system_fault") {
-        return;
-    }
-    if ((pending_ready_ && pending_key_ == key) ||
-        (tx_in_flight_ && in_flight_key_ == key)) {
-        return;
-    }
-    if (ShouldSend(action, key, &reason)) {
-        // Latest-state mailbox: a new decision replaces any unsent old one.
-        pending_frame_id_ = frame_id;
-        pending_action_ = action;
-        pending_key_ = key;
-        pending_reason_ = reason;
-        pending_ready_ = true;
-        worker_cv_.notify_one();
-    }
+    pending_frame_id_ = frame_id;
+    pending_action_ = action;
+    pending_key_ = action;
+    pending_ready_ = true;
+    worker_cv_.notify_one();
 }
 
 void VoiceNotifier::CloseBackend()
