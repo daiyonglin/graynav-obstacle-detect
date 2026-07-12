@@ -242,7 +242,7 @@ bool VoiceNotifier::InitializeFromEnv()
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));
     retry_count_ = std::max(0, getenv_int("A1_VOICE_RETRY", 1));
-    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 0));
+    byte_gap_us_ = std::max(0, getenv_int("A1_VOICE_BYTE_GAP_US", 2000));
     post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
     play_timeout_ms_ = std::max(1000, getenv_int("A1_VOICE_PLAY_TIMEOUT_MS", 3000));
@@ -302,8 +302,8 @@ bool VoiceNotifier::InitializeFromEnv()
         std::cout << "[VOICE][INFO] ready mode=" << mode
                   << " baud=" << baud
                   << " protocol=fixed_frame"
-                  << " protocol=syn6288_state_machine_v1"
-                  << " transport=persistent_atomic_duplex"
+                  << " protocol=syn6288_compat_state_machine_v2"
+                  << " transport=persistent_paced_duplex"
                   << " tx_gap_ms=" << tx_gap_ms_
                   << " latest_action_mailbox=on"
                   << std::endl;
@@ -312,7 +312,9 @@ bool VoiceNotifier::InitializeFromEnv()
     // RX is never discarded in production. The protocol worker continuously
     // consumes 0x41/0x45/0x4A/0x4E/0x4F after it starts.
     protocol_started_time_ = std::chrono::steady_clock::now();
-    module_state_ = ModuleState::Unknown;
+    // Status-query replies are not reliable on every SYN6288 carrier board.
+    // Start ready to speak and use RX status as optional confirmation.
+    module_state_ = ModuleState::Idle;
     last_sent_time_ = std::chrono::steady_clock::now();
 
     worker_stop_ = false;
@@ -411,11 +413,13 @@ bool VoiceNotifier::SendBytes(const std::vector<uint8_t>& bytes)
 
     if (backend_ == Backend::A1UartApi) {
         if (uart_ == nullptr) return false;
-        // The official API owns a 32-byte TX FIFO. Submit each SYN6288 frame
-        // in one call so Linux scheduling cannot insert an invalid inter-byte
-        // gap. Navigation frames are 8-10 bytes and therefore need one chunk.
-        for (size_t offset = 0; offset < bytes.size(); offset += kA1UartFifoBytes) {
-            const size_t chunk = std::min(kA1UartFifoBytes, bytes.size() - offset);
+        // This A1 UART driver/module combination has been verified with
+        // byte-paced writes. A whole-frame API call is acknowledged as 0x45
+        // by the attached SYN6288 board, so preserve the module's required
+        // inter-byte timing while keeping the UART handle persistent.
+        const size_t chunk_size = byte_gap_us_ > 0 ? 1 : kA1UartFifoBytes;
+        for (size_t offset = 0; offset < bytes.size(); offset += chunk_size) {
+            const size_t chunk = std::min(chunk_size, bytes.size() - offset);
             if (uart_send_data(uart_, UART_TX0, &bytes[offset], static_cast<uint32_t>(chunk)) != UART_SUCCESS) {
                 std::cout << "[VOICE][WARN] uart_send_data frame failed at " << offset << std::endl;
                 return false;
@@ -1019,7 +1023,7 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
     }
     if (code == 0x45) {
         ++rx_rejected_count_;
-        if (module_state_.load() == ModuleState::WaitAccept && tx_in_flight_) {
+        if (require_ack_ && module_state_.load() == ModuleState::WaitAccept && tx_in_flight_) {
             module_state_ = ModuleState::ErrorRecover;
             transaction_tx_time_ = now;
             std::cout << "[VOICE][WARN] seq=" << transaction_seq_.load()
@@ -1100,7 +1104,9 @@ bool VoiceNotifier::StartProtocolSpeech(int frame_id, const std::string& action,
     status_query_pending_ = false;
     transaction_tx_time_ = last_frame_tx_time_;
     transaction_accept_time_ = last_frame_tx_time_;
-    module_state_ = ModuleState::WaitAccept;
+    // ACK is advisory in compatibility mode. The module may omit 0x41/0x4F,
+    // therefore playback is completed by either RX idle or a phrase timer.
+    module_state_ = require_ack_ ? ModuleState::WaitAccept : ModuleState::Speaking;
     ++transaction_seq_;
     ++tx_count_;
     consecutive_tx_failures_ = 0;
@@ -1147,6 +1153,10 @@ void VoiceNotifier::HandleProtocolTimeouts()
     const auto now = std::chrono::steady_clock::now();
     const ModuleState state = module_state_.load();
     if (state == ModuleState::Unknown) {
+        if (!query_idle_) {
+            module_state_ = ModuleState::Idle;
+            return;
+        }
         const int elapsed = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now - protocol_started_time_).count());
         if (!status_query_pending_ && elapsed >= 500) {
@@ -1193,7 +1203,25 @@ void VoiceNotifier::HandleProtocolTimeouts()
     }
     if (state == ModuleState::Speaking && tx_in_flight_) {
         const int age = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_accept_time_).count());
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_tx_time_).count());
+        // Short navigation prompts complete in well under this bound. This
+        // fallback guarantees forward progress when status RX is absent or
+        // the carrier board reports spurious 0x45 bytes.
+        const int timed_completion_ms = transaction_frame_.size() <= 8 ? 650 : 900;
+        if (!require_ack_ && age >= timed_completion_ms) {
+            ++rx_completed_count_;
+            {
+                std::lock_guard<std::mutex> lock(worker_mutex_);
+                CommitSent(in_flight_key_, in_flight_key_);
+                last_sent_frame_ = transaction_frame_id_;
+                tx_in_flight_ = false;
+                in_flight_key_.clear();
+            }
+            module_state_ = ModuleState::Idle;
+            std::cout << "[VOICE] seq=" << transaction_seq_.load()
+                      << " DONE source=timer duration_ms=" << age << std::endl;
+            return;
+        }
         if (!status_query_pending_ && age >= play_timeout_ms_) {
             ++play_timeout_count_;
             if (SendBytes(kSyn6288Query)) {
