@@ -531,6 +531,77 @@ std::string action_display_text(const std::string& action)
     return to_upper_text(action);
 }
 
+// Converts the planner action into separate speed and steering suggestions so
+// the UART summary can be read directly during a demonstration.
+void action_guidance_text(const std::string& action,
+                          std::string& speed,
+                          std::string& direction)
+{
+    if (action == "stop" || action == "system_fault") {
+        speed = "STOP";
+        direction = "HOLD";
+    } else if (action == "slow") {
+        speed = "SLOW";
+        direction = "STRAIGHT";
+    } else if (action == "turn_left") {
+        speed = "SLOW";
+        direction = "LEFT";
+    } else if (action == "turn_right") {
+        speed = "SLOW";
+        direction = "RIGHT";
+    } else {
+        speed = "NORMAL";
+        direction = "STRAIGHT";
+    }
+}
+
+// Produces stable public-facing names for the three scored fault categories.
+std::string fault_type_text(const SystemHealth& health)
+{
+    if (health.state == "sensor") return "CAMERA_DATA";
+    if (health.state == "ai") return "INFERENCE";
+    if (health.state == "resource") return "RESOURCE";
+    return "SYSTEM";
+}
+
+std::string fault_reason_text(const std::string& reason)
+{
+    if (reason == "capture_failed") return "FRAME_CAPTURE_FAILED";
+    if (reason == "frozen_frame") return "FRAME_FROZEN";
+    if (reason == "bad_image") return "LENS_BLOCKED_OR_INVALID_IMAGE";
+    if (reason == "inference_failed") return "MODEL_INFERENCE_FAILED";
+    if (reason == "low_fps") return "PROCESSING_TIMEOUT";
+    if (reason == "low_memory") return "LOW_MEMORY";
+    if (reason == "candidate_burst") return "ABNORMAL_DETECTION_OUTPUT";
+    return to_upper_text(reason);
+}
+
+// Prints one concise fault record. Detailed counters remain available through
+// A1_OUTPUT_SERIAL_DIAG=1, while normal demonstrations see only this summary.
+void print_fault_packet(int frame_id,
+                        const SystemHealth& health,
+                        bool output_serial_diagnostics)
+{
+    std::ostringstream oss;
+    oss << "[FAULT] frame=" << frame_id
+        << " status=ACTIVE"
+        << " type=" << fault_type_text(health)
+        << " reason=" << fault_reason_text(health.reason)
+        << " protection=STOP"
+        << " voice=ABNORMAL"
+        << " recovery=AUTO_MONITORING";
+    if (output_serial_diagnostics) {
+        oss << " capture_fail=" << health.capture_failures
+            << " infer_fail=" << health.inference_failures
+            << " bad_image=" << health.data_fault_frames
+            << " frozen=" << health.frozen_frames
+            << " slow=" << health.resource_fault_frames
+            << " low_mem=" << health.low_memory_frames
+            << " candidate_burst=" << health.candidate_burst_frames;
+    }
+    std::cout << oss.str() << std::endl;
+}
+
 int find_nearest_index(const DetectionResult& result)
 {
     int nearest_idx = -1;
@@ -583,12 +654,18 @@ void print_human_packet(int frame_id,
                 << static_cast<int>(std::round(item->box[3]));
         }
     };
+    std::string speed;
+    std::string direction;
+    action_guidance_text(decision.action, speed, direction);
     const int nearest_idx = find_nearest_index(result);
     if (nearest_idx < 0) {
         std::ostringstream oss;
-        oss << "[F" << frame_id << "] "
-            << action_display_text(decision.action)
-            << " no obstacle";
+        oss << "[NAV] frame=" << frame_id
+            << " speed=" << speed
+            << " direction=" << direction
+            << " obstacle=NONE"
+            << " distance=--"
+            << " risk=CLEAR";
         append_diagnostics(oss, nullptr);
         std::cout << oss.str() << std::endl;
         return;
@@ -597,11 +674,12 @@ void print_human_packet(int frame_id,
     const DetectionItem& item = result.items[nearest_idx];
 
     std::ostringstream oss;
-    oss << "[F" << frame_id << "] "
-        << action_display_text(decision.action)
-        << " dir=" << item.sector
-        << " cls=" << item.label
-        << " dist=";
+    oss << "[NAV] frame=" << frame_id
+        << " speed=" << speed
+        << " direction=" << direction
+        << " obstacle=" << item.label
+        << " sector=" << to_upper_text(item.sector)
+        << " distance=";
     if (item.distance_m >= 0.0f) {
         oss << std::fixed << std::setprecision(2) << item.distance_m << "m";
     } else {
@@ -681,6 +759,9 @@ int main()
     const int perf_interval_frames = env_int_value("A1_PERF_INTERVAL_FRAMES", 60, 10, 600);
     const int sensor_fps = env_int_value("A1_SENSOR_FPS", 90, 1, 240);
     std::string last_osd_action;
+    bool last_fault_active = false;
+    std::string last_fault_reason;
+    std::string last_fault_type = "SYSTEM";
 
     std::cout << "====================================================" << std::endl;
     std::cout << "[INFO] obstacle_detect demo started." << std::endl;
@@ -704,7 +785,8 @@ int main()
         const std::chrono::steady_clock::time_point capture_start = std::chrono::steady_clock::now();
         if (!processor.GetImage(&img_sensor)) {
             capture_failures++;
-            if (capture_failures == 1 || capture_failures % 30 == 0) {
+            if (output_serial_diagnostics &&
+                (capture_failures == 1 || capture_failures % 30 == 0)) {
                 std::cout << "[WARN] skip frame " << frame_id
                           << " because image capture failed, consecutive="
                           << capture_failures << std::endl;
@@ -732,12 +814,11 @@ int main()
                 visualizer.Draw(empty_result, safe_decision);
 #endif
                 if (output_human_summary && frame_id % output_interval_frames == 0) {
-                    std::cout << "[HEALTH][WARN] frame=" << frame_id
-                              << " state=" << system_health.state
-                              << " reason=" << system_health.reason
-                              << " capture_failures=" << system_health.capture_failures
-                              << std::endl;
+                    print_fault_packet(frame_id, system_health, output_serial_diagnostics);
                 }
+                last_fault_active = true;
+                last_fault_reason = system_health.reason;
+                last_fault_type = fault_type_text(system_health);
             }
             usleep(capture_failures <= 10 ? 120000 : 30000);
             continue;
@@ -749,12 +830,12 @@ int main()
 
         light_stats = analyze_light_stats(&img_sensor);
         system_health.UpdateData(light_stats);
-        if ((output_serial_diagnostics &&
-             (frame_id == 1 || frame_id % perf_interval_frames == 0)) ||
-            system_health.data_fault_frames == 1 ||
-            system_health.data_fault_frames == 8 ||
-            (system_health.data_fault_frames > 8 &&
-             system_health.data_fault_frames % 30 == 0)) {
+        if (output_serial_diagnostics &&
+            ((frame_id == 1 || frame_id % perf_interval_frames == 0) ||
+             system_health.data_fault_frames == 1 ||
+             system_health.data_fault_frames == 8 ||
+             (system_health.data_fault_frames > 8 &&
+              system_health.data_fault_frames % 30 == 0))) {
             std::cout << "[HEALTH][DATA] frame=" << frame_id
                       << " state=" << light_stats.state
                       << " mean=" << light_stats.mean
@@ -783,36 +864,41 @@ int main()
         const DetectionResult& stable_result = tracker.StableResult();
         const AvoidanceDecision& tracker_decision = tracker.Decision();
         AvoidanceDecision health_decision = tracker_decision;
-        if (system_health.FaultActive()) {
+        const bool fault_active = system_health.FaultActive();
+        if (fault_active) {
             health_decision = system_health.SafeDecision();
-            if (frame_id % output_interval_frames == 0) {
-                std::cout << "[HEALTH][WARN] frame=" << frame_id
-                          << " state=" << system_health.state
-                          << " reason=" << system_health.reason
-                          << " infer_failures=" << system_health.inference_failures
-                          << " data_fault_frames=" << system_health.data_fault_frames
-                          << " frozen_frames=" << system_health.frozen_frames
-                          << " resource_fault_frames=" << system_health.resource_fault_frames
-                          << " mem_available_kb=" << system_health.memory_available_kb
-                          << " candidate_burst_frames=" << system_health.candidate_burst_frames
-                          << std::endl;
+            if (output_human_summary &&
+                (!last_fault_active || last_fault_reason != system_health.reason ||
+                 frame_id % output_interval_frames == 0)) {
+                print_fault_packet(frame_id, system_health, output_serial_diagnostics);
             }
+        } else if (last_fault_active && output_human_summary) {
+            std::cout << "[FAULT] frame=" << frame_id
+                      << " status=RECOVERED"
+                      << " type=" << last_fault_type
+                      << " protection=RELEASED"
+                      << " navigation=RESUMED" << std::endl;
+        }
+        last_fault_active = fault_active;
+        last_fault_reason = fault_active ? system_health.reason : "ok";
+        if (fault_active) {
+            last_fault_type = fault_type_text(system_health);
         }
 #if A1_ENABLE_VOICE
-        const bool refresh_osd = system_health.FaultActive() ||
+        const bool refresh_osd = fault_active ||
                                  health_decision.action != last_osd_action ||
                                  frame_id % osd_interval_frames == 0;
         if (voice_notifier.WantsOsd() && refresh_osd) {
-            visualizer.Draw(system_health.FaultActive() ? empty_result : stable_result,
+            visualizer.Draw(fault_active ? empty_result : stable_result,
                             health_decision);
             last_osd_action = health_decision.action;
         }
         voice_notifier.Update(frame_id,
-                              system_health.FaultActive() ? empty_result : stable_result,
+                              fault_active ? empty_result : stable_result,
                               health_decision);
 #else
         if (health_decision.action != last_osd_action || frame_id % osd_interval_frames == 0) {
-            visualizer.Draw(system_health.FaultActive() ? empty_result : stable_result,
+            visualizer.Draw(fault_active ? empty_result : stable_result,
                             health_decision);
             last_osd_action = health_decision.action;
         }
@@ -841,7 +927,7 @@ int main()
         if (output_json_lines && frame_id % output_interval_frames == 0) {
             print_json_packet(frame_id, stable_result, health_decision);
         }
-        if (output_human_summary && frame_id % output_interval_frames == 0) {
+        if (output_human_summary && !fault_active && frame_id % output_interval_frames == 0) {
             print_human_packet(frame_id,
                                stable_result,
                                health_decision,
