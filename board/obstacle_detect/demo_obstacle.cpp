@@ -758,6 +758,9 @@ int main()
     const int osd_interval_frames = env_int_value("A1_OSD_INTERVAL_FRAMES", 2, 1, 10);
     const int perf_interval_frames = env_int_value("A1_PERF_INTERVAL_FRAMES", 60, 10, 600);
     const int sensor_fps = env_int_value("A1_SENSOR_FPS", 90, 1, 240);
+    const std::string test_fault_type = env_string_value("A1_TEST_FAULT_TYPE", "none");
+    const int test_fault_start = env_int_value("A1_TEST_FAULT_START_FRAME", 120, 1, 1000000);
+    const int test_fault_duration = env_int_value("A1_TEST_FAULT_DURATION_FRAMES", 180, 1, 1000000);
     std::string last_osd_action;
     bool last_fault_active = false;
     std::string last_fault_reason;
@@ -775,6 +778,11 @@ int main()
     std::cout << "[INFO] output interval = " << output_interval_frames << " frames" << std::endl;
     std::cout << "[INFO] OSD interval    = " << osd_interval_frames << " frames" << std::endl;
     std::cout << "[INFO] capture restart = " << (capture_auto_restart ? "on" : "off") << std::endl;
+    if (test_fault_type != "none") {
+        std::cout << "[TEST] fault injection type=" << test_fault_type
+                  << " start_frame=" << test_fault_start
+                  << " duration_frames=" << test_fault_duration << std::endl;
+    }
     std::cout << "====================================================" << std::endl;
 
     while (!check_exit_flag()) {
@@ -849,6 +857,23 @@ int main()
         const bool inference_ok = detector.Predict(&img_sensor, det_result, 0.20f);
         system_health.inference_failures = inference_ok ? 0 : system_health.inference_failures + 1;
         system_health.UpdateResource(frame_stats, *det_result);
+
+        // Reproducible safety-loop test hook. It is disabled by default and
+        // injects health evidence only; capture, NPU inference and UART remain
+        // operational so protection, voice and automatic recovery are tested
+        // without corrupting the model or exhausting board resources.
+        const bool test_fault_active = test_fault_type != "none" &&
+                                       frame_id >= test_fault_start &&
+                                       frame_id < test_fault_start + test_fault_duration;
+        if (test_fault_active) {
+            if (test_fault_type == "camera") {
+                system_health.data_fault_frames = std::max(system_health.data_fault_frames, 8);
+            } else if (test_fault_type == "inference") {
+                system_health.inference_failures = std::max(system_health.inference_failures, 2);
+            } else if (test_fault_type == "resource") {
+                system_health.resource_fault_frames = std::max(system_health.resource_fault_frames, 20);
+            }
+        }
         system_health.RefreshState();
         if (system_health.inference_failures >= 30) {
             std::cout << "[HEALTH][FATAL] inference recovery exhausted; request supervisor restart" << std::endl;
