@@ -6,6 +6,11 @@
 #include <string>
 #include <unistd.h>
 
+/*
+ * 图像采集层：只负责把 SC132GS 的 Y8 灰度帧稳定送入应用。
+ * 模型使用的双 ROI、384x384 letterbox 和灰度增强属于 YOLOV8GRAY，不能
+ * 放在这里，否则 Aurora 显示坐标、异常检测画面和模型输入会失去统一基准。
+ */
 namespace {
 
 int env_int_value(const char* name, int fallback, int min_value, int max_value)
@@ -45,6 +50,7 @@ std::string env_string_value(const char* name, const std::string& fallback)
 
 void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape)
 {
+    // img_shape 按 [width,height] 保存；SSNE_Y_8 表示每像素 8 bit 单通道。
     img_shape = *in_img_shape;
     format_online = SSNE_Y_8;
     pipeline_open = false;
@@ -53,6 +59,11 @@ void IMAGEPROCESSOR::Initialize(std::array<int, 2>* in_img_shape)
 
 bool IMAGEPROCESSOR::ConfigureAndOpen()
 {
+    /*
+     * online pipeline 的裁剪参数属于传感器输出层。正式配置为 720x1280
+     * 全画面；若 A1_CAPTURE_HEIGHT 或 CROP_Y0 被误改，裁剪外目标永远不会
+     * 进入模型，所以启动时打印覆盖率并对部分裁剪给出显式警告。
+     */
     const uint16_t img_width = static_cast<uint16_t>(img_shape[0]);
     const uint16_t img_height = static_cast<uint16_t>(img_shape[1]);
     const int full_width = env_int_value("A1_FULL_FRAME_WIDTH", 720, 1, 4096);
@@ -114,6 +125,11 @@ bool IMAGEPROCESSOR::ConfigureAndOpen()
 
 bool IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor)
 {
+    /*
+     * GetImageData 直接返回 SSNE tensor，不在主循环复制整帧。连续失败数
+     * 只用于节流底层日志；系统级阈值和恢复动作由 demo_obstacle.cpp 中的
+     * SystemHealth 统一管理。
+     */
     static int consecutive_failures = 0;
 
     if (!pipeline_open) {
@@ -154,6 +170,7 @@ bool IMAGEPROCESSOR::GetImage(ssne_tensor_t* img_sensor)
 
 bool IMAGEPROCESSOR::Restart()
 {
+    // 先关闭旧 pipeline，等待硬件状态释放，再按同一参数重新配置并打开。
     printf("[IMAGEPROCESSOR][WARN] restarting online pipeline after capture failures\n");
     if (pipeline_open) {
         CloseOnlinePipeline(kPipeline0);

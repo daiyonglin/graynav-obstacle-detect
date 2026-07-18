@@ -6,6 +6,10 @@
 #define A1_YOLO_NUM_CLASSES 80
 #endif
 
+/*
+ * 本文件是模型类别与导航语义之间的唯一映射源。新增/替换模型时，应优先在此
+ * 修改类别名、候选阈值和风险权重，而不是在解码器、OSD 或规划器中硬编码。
+ */
 namespace obstacle {
 namespace semantic {
 namespace {
@@ -129,6 +133,7 @@ bool IsSupportedRawClass(int raw_class_id)
 
 int SemanticClassFromRaw(int raw_class_id)
 {
+    // ROD25 原始类别可细分展示，但动作决策统一落入 8 个稳定导航语义。
     if (ModelClassCount() == NUM_SEMANTIC_CLASSES) {
         return IsSupportedRawClass(raw_class_id) ? raw_class_id : GENERIC_OBSTACLE;
     }
@@ -198,10 +203,16 @@ bool IsVehicleSemantic(int semantic_class_id)
 
 float CandidateThreshold(int raw_class_id)
 {
+    // 候选阈值针对召回率设定；真正触发避障还需通过框质量、测距和时序确认。
     const int sem = SemanticClassFromRaw(raw_class_id);
     if (ModelClassCount() == 25) {
-        if (sem == PERSON) return 0.14f;
-        if (sem == CHAIR_SEAT) return 0.18f;
+        // person 的弱响应还需通过 tracker 连续确认，因此候选层优先保证身体/腿部召回。
+        if (sem == PERSON) return 0.10f;
+        if (sem == CHAIR_SEAT) return 0.16f;
+        // ROD25 没有通用 cardboard-box 类；dustbin/electrical_box 是现场箱体的
+        // 最近可用外观类别，低阈值召回后统一按 generic_obstacle 参与避障。
+        if (raw_class_id == 9 || raw_class_id == 22) return 0.18f;
+        if (raw_class_id == 20 || raw_class_id == 24) return 0.20f;
         // Detection recall and navigation risk are separate concerns.  Keep
         // vehicle candidates for tracking, then require geometric evidence in
         // the planner before they can trigger an urgent action.
@@ -217,6 +228,7 @@ float CandidateThreshold(int raw_class_id)
 
 float RiskWeight(int semantic_class_id)
 {
+    // 风险权重参与显示/决策排序，不直接修改神经网络置信度。
     switch (semantic_class_id) {
         case PERSON: return 1.35f;
         case CHAIR_SEAT: return 1.20f;

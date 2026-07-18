@@ -209,6 +209,10 @@ VoiceNotifier::VoiceNotifier()
 
 bool VoiceNotifier::InitializeFromEnv()
 {
+    /*
+     * 运行参数分为三组：动作稳定/重复周期、UART 发送节拍、SYN6288 状态兼容策略。
+     * 默认固定帧和 latest-action mailbox 是已上板验证的生产路径。
+     */
     const std::string mode = getenv_string("A1_OUTPUT_MODE", "both");
     if (mode == "voice") {
         mode_ = Mode::VoiceOnly;
@@ -326,6 +330,7 @@ bool VoiceNotifier::InitializeFromEnv()
 
 bool VoiceNotifier::OpenA1UartApi(int baud)
 {
+    // 先配置 P4 对应引脚复用，再分别设置 TX0/RX0 波特率和无校验格式。
     gpio_ = gpio_init();
     if (gpio_ == nullptr) {
         std::cout << "[VOICE][WARN] gpio_init failed. Is gpio_kmod.ko loaded?" << std::endl;
@@ -407,6 +412,10 @@ bool VoiceNotifier::ConfigureTtyDevice(int baud)
 
 bool VoiceNotifier::SendBytes(const std::vector<uint8_t>& bytes)
 {
+    /*
+     * A1 UART 与当前 SYN6288 载板实测要求逐字节节拍发送。整帧一次写入容易收到
+     * 0x45 或被静默丢弃，因此这里保持持久句柄并在字节间插入微秒级间隔。
+     */
     if (bytes.empty()) {
         return true;
     }
@@ -836,6 +845,7 @@ std::vector<uint8_t> VoiceNotifier::BuildPromptPayload(const std::string& action
 
 std::vector<uint8_t> VoiceNotifier::BuildSyn6288Frame(const std::vector<uint8_t>& payload) const
 {
+    // 协议结构：0xFD + 两字节长度 + 0x01(文本合成) + 参数字节 + GBK 文本 + XOR 校验。
     const size_t payload_len = std::min<size_t>(payload.size(), 200);
 
     const uint16_t data_len = static_cast<uint16_t>(payload_len + 3);
@@ -858,6 +868,7 @@ std::vector<uint8_t> VoiceNotifier::BuildSyn6288Frame(const std::vector<uint8_t>
 
 std::vector<uint8_t> VoiceNotifier::BuildFixedPromptFrame(const std::string& action) const
 {
+    // 生产模式直接返回离线核验过的短词帧，避免板端字符编码转换差异。
     if (action == "stop") {
         return kFixedStopFrame;
     }
@@ -891,6 +902,10 @@ void VoiceNotifier::RunStartupSelfTest()
 
 bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key, std::string* reason)
 {
+    /*
+     * 发送门控同时考虑动作稳定帧数、同动作冷却和最小 UART 间隔。STOP/异常可
+     * 更快响应，但仍不能从另一个数据帧中间插入，防止模块接收半帧后锁死。
+     */
     if (action == last_action_) {
         stable_count_++;
     } else {
@@ -1003,6 +1018,7 @@ void VoiceNotifier::PumpRx()
 
 void VoiceNotifier::HandleStatusByte(uint8_t code)
 {
+    /* SYN6288 回传：0x41 接收成功、0x45 接收失败、0x4A 初始化、0x4E 忙、0x4F 空闲。 */
     const auto now = std::chrono::steady_clock::now();
     last_rx_code_ = code;
     if (code == 0x41) {
@@ -1084,6 +1100,7 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
 
 bool VoiceNotifier::StartProtocolSpeech(int frame_id, const std::string& action, bool preempt)
 {
+    // 发送成功后只标记 in-flight；播放完成时才 CommitSent，保证冷却基于真实事务边界。
     const auto now = std::chrono::steady_clock::now();
     const int gap = static_cast<int>(
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_frame_tx_time_).count());
@@ -1153,6 +1170,10 @@ void VoiceNotifier::RecoverProtocol(const char* reason)
 
 void VoiceNotifier::HandleProtocolTimeouts()
 {
+    /*
+     * 兼容部分载板不稳定回传 ACK 的情况：required_ack 关闭时用短词最大播放时长
+     * 完成事务；真正发送失败才重开 UART，避免频繁复位破坏连续播报。
+     */
     const auto now = std::chrono::steady_clock::now();
     const ModuleState state = module_state_.load();
     if (state == ModuleState::Unknown) {
@@ -1244,6 +1265,10 @@ void VoiceNotifier::HandleProtocolTimeouts()
 
 void VoiceNotifier::WorkerLoop()
 {
+    /*
+     * 工作线程每次读取邮箱最新值。普通动作等待当前短词完成；高优先级动作在
+     * 协议允许时覆盖尚未发送的旧动作，不形成会滞后的 FIFO 语音队列。
+     */
     while (true) {
         {
             std::unique_lock<std::mutex> lock(worker_mutex_);
@@ -1297,6 +1322,7 @@ void VoiceNotifier::Update(int frame_id,
                            const DetectionResult& result,
                            const AvoidanceDecision& decision)
 {
+    // 故障解除后仍保持 fault_hold_ms，防止图像短暂恢复一帧便穿插播报“直行”。
     if (mode_ == Mode::Disabled) {
         return;
     }

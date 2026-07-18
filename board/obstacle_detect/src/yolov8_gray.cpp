@@ -13,8 +13,14 @@
 #define A1_YOLO_INPUT_CHANNELS 3
 #endif
 
+/*
+ * B3 单通道 YOLOv8n-DCE 的板端封装。该文件负责双 ROI 预处理、A1 NPU 调用、
+ * 六个 raw head 的结构校验、DFL 解码、全图坐标反映射和多目标 NMS；它只产生
+ * 单帧检测，不在这里保存轨迹或直接决定语音动作。
+ */
 namespace {
 
+// YOLOv8 DFL 每条边由 16 个离散 bin 表示，因此回归头固定为 4*16=64 通道。
 constexpr int REG_MAX = 16;
 constexpr int REG_CHANNELS = 64;
 
@@ -49,8 +55,10 @@ float getenv_float(const char* name, float fallback)
     return static_cast<float>(std::atof(value));
 }
 
-// Applies a small CPU LUT only when the model input is clearly outside the
-// normal grayscale exposure range. Normal frames remain bit-identical.
+/*
+ * 仅在平均亮度明显偏低且仍保留纹理时启用局部直方图增强；正常帧保持逐字节
+ * 不变，极低方差的遮挡帧也不增强，以免把传感器噪声伪造成目标纹理。
+ */
 bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
 {
     if (!getenv_flag("A1_ADAPTIVE_GRAY", true) || tensor == nullptr) return false;
@@ -60,6 +68,7 @@ bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
     const int height = static_cast<int>(get_height(*tensor));
     if (data == nullptr || size < static_cast<uint32_t>(width * height) ||
         width <= 0 || height <= 0) return false;
+
     uint64_t sum = 0;
     uint64_t sum_sq = 0;
     uint32_t count = 0;
@@ -74,8 +83,13 @@ bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
     const float variance = std::max(0.0f,
         static_cast<float>(sum_sq) / count - mean * mean);
     const float stddev = std::sqrt(variance);
+
     const float dark_mean = getenv_float("A1_ADAPTIVE_GRAY_DARK_MEAN", 75.0f);
     if (mean >= dark_mean || stddev < 5.0f) return false;
+
+    // Four-by-four clipped local histogram equalization preserves facial and
+    // obstacle contours in a dark background. Blending avoids hard tile seams
+    // and keeps the enhanced distribution close to grayscale training data.
     const int tiles_x = 4;
     const int tiles_y = 4;
     const int blend = std::max(20, std::min(80,
@@ -124,6 +138,7 @@ bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
             }
         }
     }
+
     if (getenv_flag("A1_ADAPTIVE_GRAY_DIAG", false) && frame_id % 300 == 0) {
         std::cout << "[YOLOV8GRAY][LIGHT] frame=" << frame_id
                   << " mean=" << mean << " std=" << stddev
@@ -141,9 +156,10 @@ std::string getenv_string(const char* name, const std::string& fallback)
     return std::string(value);
 }
 
-// ONNX head outputs are NCHW, while converted .m1model tensors are exposed
-// through image-like runtime buffers. Most A1 head6 conversions need HWC
-// reads; keep a runtime override for board diagnosis if boxes drift.
+/*
+ * ONNX 导出形状通常以 NCHW 描述，而 A1 运行时把转换后的 head 暴露为图像式
+ * HWC 缓冲。默认按实测 HWC 读取，并保留环境变量覆盖用于转换一致性排查。
+ */
 bool read_model_output_as_hwc()
 {
     static int mode = -1;
@@ -165,13 +181,14 @@ struct DistanceConfig {
     DistanceConfig()
         : fov_h_deg(getenv_float("A1_CAM_FOV_H_DEG", 49.7f)),
           fov_v_deg(getenv_float("A1_CAM_FOV_V_DEG", 78.9f)),
-          camera_height_m(getenv_float("A1_CAM_HEIGHT_M", 0.85f)),
+          camera_height_m(getenv_float("A1_CAM_HEIGHT_M", 0.71f)),
           camera_pitch_down_deg(getenv_float("A1_CAM_PITCH_DOWN_DEG", 15.0f)),
           min_distance_m(getenv_float("A1_DIST_MIN_M", 0.2f)),
           max_distance_m(getenv_float("A1_DIST_MAX_M", 8.0f)) {}
 };
 
 struct BranchView {
+    // 对 ssne_tensor_t 的无拷贝视图；统一保存通道、网格、stride、layout 和数据指针。
     float* data = nullptr;
     int out_idx = -1;
     int w = 0;
@@ -401,10 +418,25 @@ float distance_confidence_for_source(const std::array<float, 4>& box,
     return clampf(confidence, 0.0f, 1.0f);
 }
 
+// ROD25 does not contain a generic table or cardboard-box class. These raw
+// classes are the closest trained indoor rigid-object appearances and may
+// provide generic-obstacle evidence after temporal checks.
+bool is_indoor_rigid_raw_class(int raw_cls)
+{
+    if (obstacle::semantic::ModelClassCount() != 25) return false;
+    return raw_cls == 9 ||   // dustbin / box-like container
+           raw_cls == 17 ||  // bench / table-like furniture
+           raw_cls == 20 ||  // traffic barrel / large container
+           raw_cls == 22 ||  // electrical box / cabinet-like object
+           raw_cls == 23 ||  // chair
+           raw_cls == 24;    // bicycle rack / rigid frame
+}
+
 std::string quality_from_box(const std::array<float, 4>& box,
                              int img_w,
                              int img_h,
                              int display_cls,
+                             int raw_cls,
                              float score)
 {
     const float area_ratio = box_area_ratio(box, img_w, img_h);
@@ -432,16 +464,20 @@ std::string quality_from_box(const std::array<float, 4>& box,
     // Wide, low-detail obstacle boxes often come from shelves, screens, rails,
     // or merged background structures. Keep them available as navigation
     // evidence, but mark them coarse so NMS/tracker prefer finer object boxes.
+    const bool indoor_rigid = is_indoor_rigid_raw_class(raw_cls);
     if (obstacle::semantic::IsObstacleClass(display_cls) &&
         !obstacle::semantic::IsFurnitureLikeSemantic(display_cls) &&
+        !indoor_rigid &&
         score < 0.55f &&
         width_ratio > 0.62f &&
         height_ratio < 0.48f &&
         area_ratio < 0.45f) {
         return "coarse";
     }
+
     if (obstacle::semantic::IsObstacleClass(display_cls) &&
         display_cls != obstacle::semantic::CHAIR_SEAT &&
+        !indoor_rigid &&
         score < 0.48f &&
         width_ratio > 0.72f) {
         return "coarse";
@@ -942,6 +978,10 @@ void YOLOV8GRAY::Initialize(std::string& model_path,
                             std::array<int, 2>* in_img_shape,
                             std::array<int, 2>* in_det_shape)
 {
+    /*
+     * 初始化阶段同时固定三套坐标：传感器全图、当前方形 ROI、384x384 模型输入。
+     * UPPER/LOWER ROI 的 letterbox 参数独立保存，后处理才能精确反变换回 Aurora。
+     */
     img_shape = *in_img_shape;
     det_shape = *in_det_shape;
     output_shape = {
@@ -1054,6 +1094,7 @@ void YOLOV8GRAY::Initialize(std::string& model_path,
 
 bool YOLOV8GRAY::Preprocess(ssne_tensor_t* img_in, ssne_tensor_t* input_tensor)
 {
+    // A1 离线管线一次完成当前 ROI crop、等比例缩放、114 padding 和模型归一化。
     int ret = RunAiPreprocessPipe(pipe_offline_[active_view_], *img_in, *input_tensor);
     if (ret != 0) {
         std::cout << "[YOLOV8GRAY][ERROR] RunAiPreprocessPipe failed, ret=" << ret << std::endl;
@@ -1078,6 +1119,7 @@ bool YOLOV8GRAY::Preprocess(ssne_tensor_t* img_in, ssne_tensor_t* input_tensor)
 
 void YOLOV8GRAY::MapBoxToOriginalImage(std::array<float, 4>& box)
 {
+    // 先去 letterbox padding/scale，再加 ROI 左上角偏移，最后裁剪到传感器全图。
     const LetterboxInfo& lb = lb_info_[active_view_];
     float x1 = (box[0] - static_cast<float>(lb.pad_x)) / lb.scale;
     float y1 = (box[1] - static_cast<float>(lb.pad_y)) / lb.scale;
@@ -1105,6 +1147,11 @@ void YOLOV8GRAY::MapBoxToOriginalImage(std::array<float, 4>& box)
 
 bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
 {
+    /*
+     * 后处理顺序固定为：识别并配对六个 head -> 扫描分类 logit -> 对通过阈值的
+     * anchor 解 DFL -> 几何/语义质量过滤 -> 全图映射 -> MultiTargetNMS。
+     * 任一 head 的通道、stride、dtype 或布局不满足契约即整帧失败，禁止带错位框运行。
+     */
     static int postprocess_frame_count = 0;
     ++postprocess_frame_count;
     const bool debug_post = getenv_flag("A1_DEBUG_POSTPROCESS", false);
@@ -1162,6 +1209,7 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         result->Clear();
         return false;
     }
+
     if (debug_post && (postprocess_frame_count == 1 || postprocess_frame_count % debug_interval == 0)) {
         std::cout << "[YOLOV8GRAY][DEBUG] paired heads:";
         for (size_t i = 0; i < cls_branches.size(); ++i) {
@@ -1211,7 +1259,7 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         }
     }
 
-    // Applies geometry and semantic sanity checks after one anchor was decoded.
+    // 一个 anchor 完成 DFL 后的统一出口：构造语义、反映射，并拒绝饱和横框等伪框。
     const auto append_candidate = [&](int raw_cls,
                                       float score,
                                       const std::array<float, 4>& decoded_box) {
@@ -1320,13 +1368,14 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
 
         item.sector = sector_from_box(item.box, frame_w);
         item.quality = quality_from_box(item.box, frame_w, frame_h,
-                                        item.class_id, item.score);
+                                        item.class_id, raw_cls, item.score);
         if (clips_both_horizontal_borders ||
             (width_ratio > 0.90f && touch >= 2)) {
             item.quality = "coarse";
         }
         const bool unreliable_wide_coarse =
             obstacle::semantic::IsObstacleClass(item.class_id) &&
+            !is_indoor_rigid_raw_class(raw_cls) &&
             wide_flat_midframe && width_ratio > 0.62f &&
             bottom_ratio < 0.82f && score < 0.40f;
         if (unreliable_wide_coarse) {
@@ -1341,8 +1390,10 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         }
     };
 
-    // Scan class logits in-place. DFL is evaluated only for anchors that pass
-    // a class threshold, avoiding more than 190k exponentials on empty frames.
+    /*
+     * 原地扫描分类 tensor，每个 anchor 保留 top-1，并额外保护可能被其他类别压过的
+     * person。只有分类过阈值才计算四边 DFL，显著减少空场景中的指数运算。
+     */
     for (size_t scale = 0; scale < cls_branches.size(); ++scale) {
         const BranchView& cb = cls_branches[scale];
         const BranchView& rb = reg_branches[scale];
@@ -1374,9 +1425,11 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
                 const float best_score = keep_best ? fast_sigmoid(best_logit) : 0.0f;
                 const float person_score = person_cls >= 0
                     ? fast_sigmoid(person_logit) : 0.0f;
+                // ROD25 对被截断的人体响应偏弱。保留相对可信的 person 次优分支，
+                // 后续仍需经过几何过滤和至少两帧轨迹确认，不把弱单帧直接用于规划。
                 const bool keep_person = person_cls >= 0 && person_cls != best_cls &&
                     person_logit >= threshold_logits[person_cls] &&
-                    person_score >= std::max(0.13f, best_score * 0.55f);
+                    person_score >= std::max(0.10f, best_score * 0.45f);
                 if (!keep_best && !keep_person) continue;
 
                 if (debug_post) {
@@ -1475,6 +1528,10 @@ bool YOLOV8GRAY::Predict(ssne_tensor_t* img_in,
                          DetectionResult* result,
                          float conf_threshold)
 {
+    /*
+     * 单帧同步推理入口。每次只选择一个 ROI，依次执行预处理、NPU inference、
+     * 六输出获取和 CPU 后处理，并记录各阶段耗时供 SystemHealth 统计。
+     */
     if (result == nullptr) {
         std::cout << "[YOLOV8GRAY][ERROR] result is nullptr" << std::endl;
         return false;

@@ -30,6 +30,7 @@ OsdDevice::~OsdDevice()
 
 void OsdDevice::Initialize(int width, int height)
 {
+    // 图层与 DMA 在启动时一次创建，运行期间只更新内容，避免逐帧申请连续内存。
     m_width = width;
     m_height = height;
 
@@ -38,12 +39,7 @@ void OsdDevice::Initialize(int width, int height)
     m_osd_handle = osd_open_device();
     osd_init_device(m_osd_handle, OSD_LAYER_SIZE, (char*)m_pcolor_lut);
 
-    // Layer layout:
-    // 0: top danger bar (quadrangle)
-    // 1: action word bitmap (RLE image)
-    // 2: direction/risk bitmap (RLE image)
-    // 3: left/center/right meters (quadrangle)
-    // 4: detection boxes (quadrangle)
+    // 图层约定：0 危险条，1 动作词位图，2 方向/风险位图，3 走廊状态，4 检测框。
     const int quad_dma_size = 0x20000;
     const int image_dma_size = 0x40000;
     for (int layer_index = 0; layer_index < OSD_LAYER_SIZE; ++layer_index) {
@@ -142,6 +138,7 @@ void OsdDevice::Draw(std::vector<OsdQuadRangle>& quad_rangle)
 
 void OsdDevice::Draw(std::vector<OsdQuadRangle>& quad_rangle, int layer_id)
 {
+    // 每次先清理目标矢量层再 flush 新图元，从根源上消除目标移出后的残留框。
     static bool warned_add[OSD_LAYER_SIZE] = {false};
     static bool warned_flush[OSD_LAYER_SIZE] = {false};
 
@@ -207,6 +204,7 @@ void OsdDevice::Draw(std::vector<std::array<float, 4>>& boxes,
 
 bool OsdDevice::DrawTexture(const std::string& filename, int x, int y, int layer_id)
 {
+    // 位图层加载失败后本次运行禁用该层，防止连续失败拖慢主循环并刷屏日志。
     static bool warned_add[OSD_LAYER_SIZE] = {false};
     static bool warned_flush[OSD_LAYER_SIZE] = {false};
 
@@ -266,6 +264,7 @@ void OsdDevice::CleanLayer(int layer_id)
 
 void OsdDevice::GenQrangleBox(std::array<float, 4>& det, int border)
 {
+    // 由 xyxy 框生成内外两个四边形，OSD 用两者之间的环带绘制空心边框。
     std::array<int, 16> box;
 
     box[0] = std::min(m_width, std::max(0, int(det[0] + border)));

@@ -6,9 +6,14 @@
 #include <algorithm>
 #include <cmath>
 
+/*
+ * 跟踪器处理的所有框均为传感器全图坐标。关联、框平滑、类别证据、距离状态
+ * 和轨迹生命期在此集中维护，避免检测、OSD 和避障模块各自保存不一致状态。
+ */
 namespace obstacle {
 namespace {
 
+// 这些阈值控制“何时显示”和“最多保留多少目标”，不改变模型检测阈值。
 const int kMinConfirmedHits = 2;
 const int kMaxStableObjects = 8;
 const float kMatchMinimum = 0.34f;
@@ -113,6 +118,9 @@ ObstacleTracker::Track::Track()
       depth_velocity_mps(0.0f),
       depth_variance(1.0f),
       depth_measurements(0),
+      pending_far_depth_m(-1.0f),
+      pending_far_depth_count(0),
+      range_outlier_skips(0),
       class_evidence(std::max(1, semantic::ModelClassCount()), 0.0f)
 {
 }
@@ -136,6 +144,7 @@ void ObstacleTracker::Initialize(const std::array<int, 2>& image_shape)
 float ObstacleTracker::MatchScore(const Track& track,
                                   const DetectionItem& detection) const
 {
+    // 先用创新门限剔除不可能的跳变，再计算加权关联分数；这一步是抑制漂移的核心。
     const float overlap = utils::IoU(track.item.box, detection.box);
     const float distance = center_distance(track.item.box, detection.box, image_shape_);
     const float shape_score = size_similarity(track.item.box, detection.box);
@@ -162,7 +171,21 @@ bool ObstacleTracker::CanStartTrack(const DetectionItem& detection) const
     if (implausibly_broad_box(detection, image_shape_)) return false;
     if (detection.quality == "coarse") return false;
     if (detection.score >= 0.45f) return true;
-    if (detection.class_id == semantic::PERSON) return detection.score >= 0.16f;
+    if (detection.class_id == semantic::PERSON) return detection.score >= 0.10f;
+    if (semantic::ModelClassCount() == 25) {
+        // Match the decoder thresholds for indoor ROD25 obstacles. Weak tracks
+        // still need repeated hits before output, so one noisy response cannot
+        // immediately trigger navigation.
+        if (detection.raw_class_id == 17 || detection.raw_class_id == 23) {
+            return detection.score >= 0.16f;  // bench / chair
+        }
+        if (detection.raw_class_id == 9 || detection.raw_class_id == 22) {
+            return detection.score >= 0.18f;  // dustbin / electrical box
+        }
+        if (detection.raw_class_id == 20 || detection.raw_class_id == 24) {
+            return detection.score >= 0.20f;  // barrel / rigid rack
+        }
+    }
     return detection.score >= 0.22f;
 }
 
@@ -177,6 +200,7 @@ bool ObstacleTracker::IsVisibleInRoi(const Track& track,
 void ObstacleTracker::UpdateClassEvidence(Track* track,
                                           const DetectionItem& detection)
 {
+    // 指数衰减使旧类别证据逐渐失效；1.2 倍滞回避免相邻帧在两个类别间来回跳变。
     if (track == NULL) return;
     for (size_t i = 0; i < track->class_evidence.size(); ++i) {
         track->class_evidence[i] *= 0.92f;
@@ -212,37 +236,84 @@ void ObstacleTracker::UpdateRangeState(Track* track,
                                        const DetectionItem& detection,
                                        int64_t timestamp_ms)
 {
+    /*
+     * alpha-beta 滤波：先用上一时刻距离和速度预测，再按测量置信度修正。
+     * depth_variance 同步传播，最终得到保守距离和至少三次有效测量后的 TTC。
+     */
     if (track == NULL) return;
     const float dt = track->last_update_ms > 0
         ? clampf((timestamp_ms - track->last_update_ms) / 1000.0f, 0.01f, 0.50f)
         : 0.067f;
     if (detection.distance_m >= 0.0f) {
         const float confidence = clampf(detection.distance_confidence, 0.10f, 0.95f);
+        bool measurement_used = true;
         if (track->depth_measurements == 0 || track->depth_m < 0.0f) {
             track->depth_m = detection.distance_m;
             track->depth_velocity_mps = 0.0f;
             track->depth_variance = std::max(0.04f,
                 detection.distance_sigma_m * detection.distance_sigma_m);
+            track->pending_far_depth_m = -1.0f;
+            track->pending_far_depth_count = 0;
         } else {
             const float predicted = track->depth_m + track->depth_velocity_mps * dt;
             const float residual = detection.distance_m - predicted;
-            const float alpha = 0.25f + 0.50f * confidence;
-            const float beta = 0.06f + 0.18f * confidence;
-            track->depth_m = clampf(predicted + alpha * residual, 0.20f, 8.0f);
-            track->depth_velocity_mps = clampf(
-                track->depth_velocity_mps + beta * residual / dt, -6.0f, 6.0f);
-            const float measurement_variance = std::max(0.04f,
-                detection.distance_sigma_m * detection.distance_sigma_m);
-            track->depth_variance = (1.0f - alpha) *
-                (track->depth_variance + 0.03f * dt) + alpha * measurement_variance;
+            const float far_jump_gate = std::max(0.55f, 0.35f * std::max(0.5f, predicted));
+            const bool suspicious_far_jump = residual > far_jump_gate &&
+                detection.distance_source != "nearfield_cap";
+            if (suspicious_far_jump) {
+                const bool agrees_with_pending = track->pending_far_depth_count > 0 &&
+                    std::fabs(detection.distance_m - track->pending_far_depth_m) <=
+                    std::max(0.35f, 0.20f * track->pending_far_depth_m);
+                if (agrees_with_pending) {
+                    ++track->pending_far_depth_count;
+                    track->pending_far_depth_m = 0.5f *
+                        (track->pending_far_depth_m + detection.distance_m);
+                } else {
+                    track->pending_far_depth_m = detection.distance_m;
+                    track->pending_far_depth_count = 1;
+                }
+                // 单帧突然跳远通常来自上半身框底部变化。先保持预测值；只有
+                // 连续两次远距离一致才认为目标确实远离并接受新测量。
+                if (track->pending_far_depth_count < 2) {
+                    measurement_used = false;
+                    ++track->range_outlier_skips;
+                    track->depth_m = clampf(predicted, 0.20f, 8.0f);
+                    track->depth_velocity_mps *= 0.90f;
+                    track->depth_variance = std::min(4.0f,
+                        track->depth_variance + 0.05f + 0.02f * dt);
+                }
+            } else {
+                track->pending_far_depth_m = -1.0f;
+                track->pending_far_depth_count = 0;
+            }
+
+            if (measurement_used) {
+                const float accepted_distance = track->pending_far_depth_count >= 2
+                    ? track->pending_far_depth_m : detection.distance_m;
+                const float accepted_residual = accepted_distance - predicted;
+                const float alpha = 0.25f + 0.50f * confidence;
+                const float beta = 0.06f + 0.18f * confidence;
+                track->depth_m = clampf(predicted + alpha * accepted_residual, 0.20f, 8.0f);
+                track->depth_velocity_mps = clampf(
+                    track->depth_velocity_mps + beta * accepted_residual / dt, -6.0f, 6.0f);
+                const float measurement_variance = std::max(0.04f,
+                    detection.distance_sigma_m * detection.distance_sigma_m);
+                track->depth_variance = (1.0f - alpha) *
+                    (track->depth_variance + 0.03f * dt) + alpha * measurement_variance;
+                track->pending_far_depth_m = -1.0f;
+                track->pending_far_depth_count = 0;
+            }
         }
-        ++track->depth_measurements;
+        if (measurement_used) ++track->depth_measurements;
         track->item.distance_m = track->depth_m;
         track->item.distance_sigma_m = std::sqrt(std::max(0.01f, track->depth_variance));
         track->item.safe_distance_m = clampf(
             track->depth_m - track->item.distance_sigma_m, 0.20f, 8.0f);
-        track->item.distance_confidence = detection.distance_confidence;
-        track->item.distance_source = detection.distance_source;
+        track->item.distance_confidence = measurement_used
+            ? detection.distance_confidence
+            : std::max(0.15f, detection.distance_confidence * 0.60f);
+        track->item.distance_source = measurement_used
+            ? detection.distance_source : "temporal_hold_far_outlier";
         track->item.range_measurements = track->depth_measurements;
         track->item.approach_mps = std::max(0.0f, -track->depth_velocity_mps);
         track->item.ttc_s = track->depth_measurements >= 3 &&
@@ -285,6 +356,7 @@ void ObstacleTracker::UpdateTrack(Track* track,
                                   int frame_id,
                                   int64_t timestamp_ms)
 {
+    // 运动越快，旧框权重越小；高置信新检测也会更快拉回真实位置，兼顾稳定与低延迟。
     if (track == NULL) return;
     const float shift = center_distance(track->item.box, detection.box, image_shape_);
     float old_weight = shift < 0.015f ? 0.65f : (shift < 0.06f ? 0.35f : 0.15f);
@@ -315,6 +387,10 @@ void ObstacleTracker::AgeUnmatchedTracks(const std::vector<int>& matched_tracks,
                                          int frame_id,
                                          int64_t timestamp_ms)
 {
+    /*
+     * 只有轨迹中心落在当前 ROI 内时，本帧未匹配才计为真正丢失；另一 ROI 中的
+     * 轨迹仅短暂保留。这是交替 UPPER/LOWER 推理不会让框隔帧消失的关键。
+     */
     for (size_t i = 0; i < tracks_.size(); ++i) {
         Track& track = tracks_[i];
         track.matched_current_frame = false;
@@ -339,8 +415,9 @@ void ObstacleTracker::AgeUnmatchedTracks(const std::vector<int>& matched_tracks,
 }
 
 void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
-                                          int64_t timestamp_ms)
+                                           int64_t timestamp_ms)
 {
+    // 对外只发布已确认且当前可见的轨迹，并按导航优先级截断为有限数量。
     stable_result_.Clear();
     stable_result_.raw_candidate_count = raw_result.raw_candidate_count;
     stable_result_.post_nms_count = raw_result.post_nms_count;
@@ -372,6 +449,10 @@ void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
 
 void ObstacleTracker::Update(const DetectionResult& raw_result, int frame_id)
 {
+    /*
+     * 每帧建立全部 track-detection 候选边并全局降序选择，避免按输入顺序贪心
+     * 导致多人场景交换 ID。关联完成后依次更新、老化、发布和规划。
+     */
     const int64_t timestamp_ms = raw_result.timestamp_ms > 0
         ? raw_result.timestamp_ms : static_cast<int64_t>(frame_id) * 67;
     DetectionResult ranged = raw_result;

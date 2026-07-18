@@ -2,11 +2,11 @@
 
 # project(ssne_ai_demo)
 
-# # 瀵洖鍙嗙捄顖氱窞闁板秶鐤嗛弬鍥︽
+# # 引入路径配置文件
 # include(cmake_config/Paths.cmake)
 
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O2")
-# # 閺嶇绺鹃敍姘鳖洣閻⑺婤I閸欐ɑ娲块幓鎰仛
+# # 核心：禁用ABI变更提示
 # add_compile_options(-Wno-psabi)
 
 # # add_executable(ssne_ai_demo ${PROJECT_SOURCE_DIR}/online_ped_osd_thread.cpp)
@@ -14,17 +14,19 @@
 # add_executable(ssne_ai_demo ${PROJECT_SOURCE_DIR}/demo_obstacle.cpp)
 # # add_executable(ssne_ai_demo ${PROJECT_SOURCE_DIR}/test_isp_debug.cpp)
 
-# # 濞ｈ濮炴径瀛樻瀮娴犲墎娲拌ぐ?# include_directories(${M1_SDK_INC_DIR})
+# # 添加头文件目录
+# include_directories(${M1_SDK_INC_DIR})
 # include_directories(${M1_SDK_INC_DIR}/smartsoc)
 
-# # 鐎规矮绠熺拫鍐暏閻╊喖缍嶉弶銉︾爱
+# # 定义调用目录来源
 # set(SRC_DIR "src")
 # set(TARGET $ENV{BASE_DIR}/target)
 # include_directories(${CMAKE_SOURCE_DIR}/include)
 # message([<mode>] "message to display" ${TARGET})
 
 
-# # 濞ｈ濮瀞ource閺傚洣娆㈡径閫涚瑓閻ㄥ嫭澧嶉張濉﹑p閺傚洣娆?# file(GLOB SRC_FILES "${CMAKE_SOURCE_DIR}/${SRC_DIR}/*.cpp")
+# # 添加source文件夹下的所有cpp文件
+# file(GLOB SRC_FILES "${CMAKE_SOURCE_DIR}/${SRC_DIR}/*.cpp")
 # target_sources(ssne_ai_demo PRIVATE ${SRC_FILES})
 
 # target_link_libraries(${PROJECT_NAME} 

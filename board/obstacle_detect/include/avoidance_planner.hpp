@@ -8,9 +8,13 @@
 namespace obstacle {
 
 /**
- * Produces a conservative navigation action from tracked, ranged obstacles.
- * Turns are emitted only after both ROI views have recently observed the
- * scene and the selected side corridor has verified clearance.
+ * @brief 将稳定目标投影到左、中、右通行走廊并生成保守的导盲动作。
+ *
+ * 规划器只消费 tracker 输出，不直接读取神经网络结果。它使用安全距离、TTC、
+ * 目标横向位置和质量更新三条走廊；只有上下两个 ROI 均在近期完成观测且候选
+ * 侧向走廊有足够安全余量时才输出 LEFT/RIGHT。侧方未知时宁可 STOP/SLOW，
+ * 不给出未经验证的绕行方向。StabilizeAction 负责风险升级立即生效、风险降低
+ * 延迟确认和左右反转滞回。
  */
 class AvoidancePlanner {
 public:
@@ -20,6 +24,7 @@ public:
     AvoidanceDecision Update(const DetectionResult& result, int view_id, int64_t timestamp_ms);
 
 public:
+    /** 一条地面通行走廊的最近障碍、净空距离、最小 TTC 和观测完备性。 */
     struct Corridor {
         ZoneStatus zone;
         float clearance;

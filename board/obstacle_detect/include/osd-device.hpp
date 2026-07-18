@@ -29,6 +29,13 @@ typedef struct {
     int color;
 }OsdQuadRangle;
 
+/**
+ * @brief A1 OSD 硬件抽象层。
+ *
+ * 五个硬件图层在初始化时一次分配 DMA buffer：动作/风险文字使用 RLE 位图层，
+ * 检测框和状态条使用矢量四边形层。上层 VISUALIZER 只提交逻辑图元，不直接
+ * 操作 OSD 句柄、DMA 或颜色查找表。
+ */
 class OsdDevice {
 public:
     OsdDevice();

@@ -5,6 +5,13 @@
 namespace obstacle {
 namespace semantic {
 
+/**
+ * @brief 板端避障语义层。
+ *
+ * 模型保留 ROD25 的 25 个原始类别以维持训练/导出一致性；决策层再把这些类别
+ * 映射为 8 类导航语义。这样既能在日志中追溯 raw_label，又能用统一风险权重、
+ * 显示名称和阈值处理功能相近的障碍物。
+ */
 enum SemanticClass {
     PERSON = 0,
     CHAIR_SEAT = 1,
@@ -17,7 +24,7 @@ enum SemanticClass {
     NUM_SEMANTIC_CLASSES = 8
 };
 
-int ModelClassCount();
+int ModelClassCount();  // 当前部署模型分类头通道数，必须与 m1model 一致。
 bool IsSupportedRawClass(int raw_class_id);
 int SemanticClassFromRaw(int raw_class_id);
 bool IsObstacleClass(int semantic_class_id);
@@ -33,4 +40,3 @@ std::string RawLabel(int raw_class_id);
 
 }  // namespace semantic
 }  // namespace obstacle
-

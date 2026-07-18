@@ -17,12 +17,15 @@
 namespace obstacle {
 
 /**
- * Sends navigation decisions to the external SYN6288 speech module.
+ * @brief A1 到 SYN6288 的异步导盲语音控制器。
  *
- * The class owns the A1-side UART connection, converts stable obstacle
- * decisions into one-word action prompts, wraps them in the SYN6288 binary
- * command frame, and rate-limits repeated announcements so speech does not
- * lag behind the current avoidance decision.
+ * 主推理线程调用 Update() 时只覆盖“最新动作邮箱”，不会等待 UART 或语音播放。
+ * WorkerLoop 独立完成固定语音帧选择、优先级抢占、重复节流、逐字节发送和状态
+ * 回收。队列始终只保存最新动作，因此盲人不会听到已经过期的避障指令。
+ *
+ * 当前成功部署路径使用 UART0：A1 D0/TX -> 电平转换 -> SYN6288 RX，SYN6288 TX
+ * -> 电平转换 -> A1 D2/RX，并共地。固定帧分别对应直行、减速、停下、左转、
+ * 右转和异常；system_fault 具有最高优先级且在故障锁存期间持续重复。
  */
 class VoiceNotifier {
 public:
@@ -48,22 +51,22 @@ public:
 
     VoiceNotifier();
 
-    // Reads runtime environment switches and opens the selected UART backend.
+    /** 读取 A1_VOICE_* 参数，配置 GPIO 复用和 9600 8N1 UART，并启动工作线程。 */
     bool InitializeFromEnv();
 
-    // Converts the latest stable avoidance decision into a rate-limited speech frame.
+    /** 将 planner 最新动作写入邮箱；该函数必须保持非阻塞。 */
     void Update(int frame_id,
                 const DetectionResult& result,
                 const AvoidanceDecision& decision);
 
-    // Releases UART/GPIO resources owned by the notifier.
+    /** 停止工作线程并释放 UART/GPIO 句柄。 */
     void Release();
 
     bool Enabled() const { return mode_ != Mode::Disabled; }
     bool WantsOsd() const { return mode_ != Mode::VoiceOnly; }
 
 private:
-    // Opens the official A1 UART_TX0/RX0 API path and configures PIN0/PIN2 mux.
+    /** 使用官方 A1 API 打开 UART_TX0/RX0，并把 PIN0/PIN2 切换到 UART 复用功能。 */
     bool OpenA1UartApi(int baud);
 
     // Opens a Linux tty device path used as a fallback/debug UART backend.
@@ -72,7 +75,7 @@ private:
     // Configures an already-open tty as 8N1 raw UART.
     bool ConfigureTtyDevice(int baud);
 
-    // Sends one complete SYN6288 frame through the active backend.
+    /** 按配置的字节间隔发送完整 SYN6288 帧，避免模块 FIFO/时序拒收。 */
     bool SendBytes(const std::vector<uint8_t>& bytes);
 
     // Reopens the UART backend before a speech transaction if configured.
@@ -119,7 +122,7 @@ private:
     // multiple UART commands after boot.
     void RunStartupSelfTest();
 
-    // Performs potentially slow UART transactions outside the inference loop.
+    /** 语音状态机主循环：收状态、处理超时、选择最新动作并启动一次原子事务。 */
     void WorkerLoop();
 
     // Continuously drains and parses all status bytes currently in the RX FIFO.
@@ -128,7 +131,7 @@ private:
     // Advances the SYN6288 transaction state from one protocol status byte.
     void HandleStatusByte(uint8_t code);
 
-    // Starts or preempts one atomic speech transaction from the latest action.
+    /** 建立一次原子语音事务；提交后由 ACK/空闲码或兼容定时器判定播放完成。 */
     bool StartProtocolSpeech(int frame_id, const std::string& action, bool preempt);
 
     // Handles ACK/playback timeouts, one retry, status query and resynchronization.

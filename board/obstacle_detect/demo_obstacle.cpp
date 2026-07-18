@@ -29,6 +29,12 @@
 #include "include/voice_notifier.hpp"
 #endif
 
+/*
+ * obstacle_detect 主程序只负责编排模块，不重复实现算法：
+ * IMAGEPROCESSOR 取全图 -> YOLOV8GRAY 单帧检测 -> ObstacleTracker 时序稳定/测距/
+ * 规划 -> VISUALIZER 和 VoiceNotifier 并行输出。SystemHealth 可在任一环节覆盖正常
+ * 决策为 system_fault，从而统一触发保护停下、OSD 告警和“异常”语音。
+ */
 constexpr bool kOutputJsonLines = false;
 constexpr bool kOutputHumanSummary = true;
 constexpr bool kOutputSerialDiagnostics = false;
@@ -97,6 +103,14 @@ struct LightStats {
           state("unknown"), sample_hash(2166136261u) {}
 };
 
+/**
+ * @brief 三类异常的统一锁存与恢复状态机。
+ *
+ * camera/data：连续取帧失败、遮挡/过曝/近乎纯色、画面冻结；
+ * inference：NPU 调用或 head 校验连续失败；
+ * resource：低 FPS、高 P95、低内存或候选爆炸。
+ * 故障一旦锁存，必须连续 30 帧完全健康才恢复，避免遮挡边缘短暂露光时误报 CLEAR。
+ */
 struct SystemHealth {
     int capture_failures;
     int inference_failures;
@@ -188,6 +202,7 @@ struct SystemHealth {
 
     AvoidanceDecision SafeDecision() const
     {
+        // system_fault 是跨模块约定的最高优先级动作，语音层会映射为“异常”。
         AvoidanceDecision decision;
         decision.action = "system_fault";
         decision.prompt = "reason=system_health " + reason;
@@ -246,6 +261,7 @@ struct SystemHealth {
     }
 };
 
+/** 维护最近 120 个帧周期，输出平均 FPS、P95 延迟和帧间波动。 */
 class RuntimeMeter {
 public:
     RuntimeMeter() : initialized_(false), fps_avg_(0.0f) { intervals_ms_.reserve(120); }
@@ -696,6 +712,10 @@ void print_human_packet(int frame_id,
 
 int main()
 {
+    /*
+     * 启动阶段从环境变量读取可调参数并依次初始化 SSNE、采集、模型、跟踪、OSD、
+     * 语音。所有对象在主循环外构造，避免逐帧重复申请硬件和模型资源。
+     */
     int full_width = env_int_value("A1_FULL_FRAME_WIDTH", 720, 1, 4096);
     int full_height = env_int_value("A1_FULL_FRAME_HEIGHT", 1280, 1, 4096);
     int capture_width = env_int_value("A1_CAPTURE_WIDTH", 720, 1, full_width);
@@ -786,6 +806,11 @@ int main()
     std::cout << "====================================================" << std::endl;
 
     while (!check_exit_flag()) {
+        /*
+         * 一次循环对应一帧：采集和数据健康检查 -> 模型推理 -> tracker 内部测距与
+         * 规划 -> 异常决策覆盖 -> OSD/串口/语音输出 -> 性能统计。语音 Update 只写
+         * 最新动作邮箱，实际 UART 发送在独立线程，因此不会阻塞 NPU 主循环。
+         */
         const std::chrono::steady_clock::time_point loop_start = std::chrono::steady_clock::now();
         frame_id++;
         frame_stats = runtime_meter.Tick();
@@ -858,10 +883,10 @@ int main()
         system_health.inference_failures = inference_ok ? 0 : system_health.inference_failures + 1;
         system_health.UpdateResource(frame_stats, *det_result);
 
-        // Reproducible safety-loop test hook. It is disabled by default and
-        // injects health evidence only; capture, NPU inference and UART remain
-        // operational so protection, voice and automatic recovery are tested
-        // without corrupting the model or exhausting board resources.
+        /*
+         * 可复现异常注入钩子，默认关闭。它只修改健康证据，不破坏模型文件或耗尽
+         * 真实资源，因此能安全验证 OSD、语音保护和自动恢复闭环。
+         */
         const bool test_fault_active = test_fault_type != "none" &&
                                        frame_id >= test_fault_start &&
                                        frame_id < test_fault_start + test_fault_duration;

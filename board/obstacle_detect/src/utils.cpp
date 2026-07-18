@@ -5,6 +5,10 @@
 #include <fstream>
 #include <iostream>
 
+/*
+ * 通用后处理与 OSD 实现。这里不负责产生避障动作，只负责检测结果排序、
+ * 多目标保护式去重，以及把 tracker/planner 的最终状态绘制到 Aurora 图层。
+ */
 namespace {
 
 float navigation_rank(const DetectionItem& item)
@@ -105,7 +109,8 @@ void NMS(DetectionResult* result, float iou_threshold, int top_k)
 
             const DetectionItem& other = result->items[j];
 
-            // 閻滄澘婀?class_id 瀹歌尙绮￠弰顖涙付缂佸牊妯夌粈铏硅閸掝偓绱?            // 0 -> person
+            // 现在 class_id 已经是最终显示类别：
+            // 0 -> person
             // 1 -> obstacle
             if (cur.raw_class_id != other.raw_class_id) continue;
 
@@ -272,6 +277,10 @@ bool should_suppress_for_multi_nms(const DetectionItem& cur,
 
 void MultiTargetNMS(DetectionResult* result, float iou_threshold, int top_k)
 {
+    /*
+     * 与普通 NMS 的区别：先按导航价值排序，再根据类别、中心、面积和方位判断
+     * 是否为同一实体；宽大 coarse 框只能被当作兜底，不能压掉内部可靠小框。
+     */
     std::sort(result->items.begin(), result->items.end(),
               [](const DetectionItem& a, const DetectionItem& b) {
                   const float ap = nms_priority_for_multi_target(a);
@@ -315,6 +324,7 @@ void MultiTargetNMS(DetectionResult* result, float iou_threshold, int top_k)
 
 void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape)
 {
+    // OSD 使用传感器全图尺寸，因此双 ROI 的结果必须先完成全图坐标反映射。
     osd_device.Initialize(in_img_shape[0], in_img_shape[1]);
     last_action_asset_.clear();
     last_info_asset_.clear();
@@ -636,6 +646,10 @@ void VISUALIZER::Draw(const DetectionResult& result)
 
 void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& decision)
 {
+    /*
+     * 动态框层每次刷新；动作和辅助信息纹理仅在内容变化时替换。这样既消除
+     * 图层残留，又避免每帧重载文字纹理造成显示延迟。
+     */
     std::vector<sst::device::osd::OsdQuadRangle> box_quads;
     box_quads.reserve(result.items.size());
 

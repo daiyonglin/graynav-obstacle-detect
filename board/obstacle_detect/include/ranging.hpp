@@ -7,9 +7,12 @@
 namespace obstacle {
 
 /**
- * Converts a full-frame detection box into conservative monocular range
- * evidence.  It fuses ground-plane geometry, class size priors and a
- * near-field upper bound while retaining uncertainty for navigation.
+ * @brief 将全图检测框转换为带不确定度的保守单目距离证据。
+ *
+ * 模块并行构造三类互补证据：框底部射线与地面的交点距离、类别真实尺寸先验、
+ * 以及贴近画面底部的大目标所给出的近场距离上界。地面法与尺寸法一致时按
+ * 逆方差融合；冲突时保留更可信来源并增大方差。最终向规划器提供
+ * safe_distance = mean - sigma，而不是过于乐观的均值。
  */
 class RangingEstimator {
 public:
@@ -19,6 +22,7 @@ public:
     void Estimate(DetectionItem* item) const;
 
 private:
+    /** 一个高斯近似测量：mean 为距离均值，sigma 为标准差，valid 表示证据可用。 */
     struct EstimateValue {
         float mean;
         float sigma;

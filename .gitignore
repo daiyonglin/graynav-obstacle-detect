@@ -36,7 +36,7 @@ data/
 *.m1model
 
 # Keep the current board deployment model tracked explicitly.
-!board/obstacle_detect/app_assets/models/yolov8n_head6.m1model
+!board/obstacle_detect/app_assets/models/graynav_rod25_gray1_dce_b3_head6.m1model
 
 # SDK/build outputs
 output/

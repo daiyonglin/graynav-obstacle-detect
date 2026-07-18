@@ -9,6 +9,12 @@
 namespace obstacle {
 namespace {
 
+/*
+ * 避障规划层只消费跟踪稳定且完成测距的目标。它不修改检测框，而是将
+ * 地面横向位置划入左/中/右走廊，计算各走廊最近保守距离和最小 TTC，
+ * 再输出唯一动作，供 OSD、串口和语音共同使用。
+ */
+
 int action_severity(const std::string& action)
 {
     if (action == "system_fault") return 5;
@@ -68,6 +74,7 @@ void AvoidancePlanner::Initialize(const std::array<int, 2>& image_shape)
 
 bool AvoidancePlanner::IsActionHazard(const DetectionItem& item) const
 {
+    // road 不作为障碍；建筑/标志等场景结构必须有可靠近场几何证据才干预。
     if (item.raw_class_id == 7 || item.raw_label == "road") return false;
     const bool scene_structure = item.raw_class_id == 1 || item.raw_class_id == 5 ||
                                  item.raw_class_id == 6 || item.raw_class_id == 12 ||
@@ -82,6 +89,7 @@ bool AvoidancePlanner::IsActionHazard(const DetectionItem& item) const
 
 void AvoidancePlanner::AddToCorridor(Corridor* corridor, const DetectionItem& item) const
 {
+    // 每条走廊只保留最危险目标摘要，同时累计最小 clearance 与最小 TTC。
     if (corridor == NULL) return;
     const float distance = item.safe_distance_m >= 0.0f
         ? item.safe_distance_m
@@ -97,6 +105,11 @@ void AvoidancePlanner::AddToCorridor(Corridor* corridor, const DetectionItem& it
 
 std::string AvoidancePlanner::StabilizeAction(const std::string& desired, int64_t now_ms)
 {
+    /*
+     * 动作滞回规则：风险升级可快速生效，STOP 立即生效；普通动作需连续
+     * 两次确认；左右反转等待 300ms；STOP 解除等待 500ms；CLEAR 需稳定
+     * 700ms。该状态机抑制检测抖动造成的语音左右反复切换。
+     */
     if (stable_since_ms_ == 0) stable_since_ms_ = now_ms;
     if (desired == stable_action_) {
         pending_action_ = desired;
@@ -136,6 +149,10 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
                                             int view_id,
                                             int64_t timestamp_ms)
 {
+    /*
+     * 双 ROI 必须在 500ms 内都被观测，侧方走廊才标记 verified。只有中央
+     * 被阻挡且某一侧已验证安全时才建议转向；侧方未知时保守 STOP/SLOW。
+     */
     if (view_id >= 0 && view_id < 2) last_view_ms_[view_id] = timestamp_ms;
     const bool both_views_recent =
         last_view_ms_[0] > 0 && last_view_ms_[1] > 0 &&

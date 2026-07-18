@@ -14,38 +14,42 @@
 #include "semantic_config.hpp"
 
 /**
- * @brief 閸楁洑閲滃Λ鈧ù瀣攱缂佹挻鐏? *
- * box: [xmin, ymin, xmax, ymax]閿涘苯娼楅弽鍥╅兇缂佺喍绔存稉琛♀偓婊冨斧閸ユ儳娼楅弽鍥ｂ偓? * score: 閸掑棛琚純顔讳繆鎼? * class_id: COCO 缁鍩?id
- * label: 娴滆櫣琚崣顖濐嚢閺嶅洨顒? */
+ * @brief 板端各模块共享的单目标数据结构。
+ *
+ * 数据从 YOLO 后处理开始建立，随后依次被语义映射、跟踪器、测距器和
+ * 避障规划器补充。`box` 始终使用完整 720x1280 Aurora 画面的坐标系，
+ * 因此上、下双 ROI 的结果在离开检测器前必须先反 letterbox、再加 ROI
+ * 原点。这样跟踪、测距和 OSD 不需要理解模型输入坐标。
+ */
 enum DisplayClass {
     DISPLAY_CLASS_PERSON = obstacle::semantic::PERSON,
     DISPLAY_CLASS_OBSTACLE = obstacle::semantic::GENERIC_OBSTACLE
 };
 
 struct DetectionItem {
-    std::array<float, 4> box;
-    float score;
-    int class_id;        // Obstacle semantic class id, see semantic_config.hpp.
-    int raw_class_id;    // Original model class id.
-    std::string label;   // Stable semantic label for user-facing output.
-    std::string semantic_class;
-    std::string raw_label;
-    float risk_weight;
-    std::string sector;  // left, center, right, left_center, center_right, wide.
-    float distance_m;
-    float safe_distance_m;
-    float distance_sigma_m;
-    float lateral_m;
-    std::string distance_source;  // ground, size, fused, unknown.
-    float distance_confidence;
-    std::string risk_level;  // near, warning, far, unknown.
-    std::string quality;  // good, low, coarse.
-    int track_id;
-    int age;
-    int missed;
-    float approach_mps;
-    float ttc_s;
-    int range_measurements;
+    std::array<float, 4> box;  // [xmin,ymin,xmax,ymax]，完整传感器画面坐标。
+    float score;               // sigmoid 后的模型分类置信度。
+    int class_id;              // 导航语义类别，定义见 semantic_config.hpp。
+    int raw_class_id;          // ROD25 检测头的原始类别编号。
+    std::string label;         // 对外显示的稳定语义名称。
+    std::string semantic_class;// 与 label 同域，供 JSON/串口接口使用。
+    std::string raw_label;     // ROD25 原始类别名，便于诊断误分类。
+    float risk_weight;         // 类别风险权重，参与候选排序和规划。
+    std::string sector;        // left/center/right/交叠区/wide。
+    float distance_m;          // 融合后的期望距离；负值表示无可靠米级结果。
+    float safe_distance_m;     // mean-sigma 的保守距离，避障决策优先使用它。
+    float distance_sigma_m;    // 距离标准差，描述几何与尺寸先验不确定度。
+    float lateral_m;           // 相机坐标系横向位置，左负右正。
+    std::string distance_source; // ground/size/fused/nearfield/unknown。
+    float distance_confidence; // 0~1 的测距可信度。
+    std::string risk_level;    // urgent/near/warning/far/unknown。
+    std::string quality;       // good/low/coarse；coarse 不输出伪精确距离。
+    int track_id;              // 多目标跟踪器分配的稳定编号。
+    int age;                   // 轨迹生命周期帧数。
+    int missed;                // 当前可见 ROI 内连续未匹配次数。
+    float approach_mps;        // 朝向相机的径向速度，非接近时为 0。
+    float ttc_s;               // 碰撞时间；证据不足时为负值。
+    int range_measurements;    // 该轨迹累计的可靠测距次数。
 
     DetectionItem()
         : box{0.f, 0.f, 0.f, 0.f},
@@ -73,6 +77,7 @@ struct DetectionItem {
           range_measurements(0) {}
 };
 
+/** @brief 左、中、右单条通行走廊的最近风险摘要。 */
 struct ZoneStatus {
     std::string dir;
     bool occupied;
@@ -92,6 +97,12 @@ struct ZoneStatus {
           risk_level("unknown") {}
 };
 
+/**
+ * @brief 避障规划器的最终输出。
+ *
+ * `action` 只允许 clear/slow/stop/turn_left/turn_right/system_fault，
+ * OSD、串口和语音都消费同一个动作，避免不同输出端给出冲突建议。
+ */
 struct AvoidanceDecision {
     ZoneStatus left;
     ZoneStatus center;
@@ -111,7 +122,12 @@ struct AvoidanceDecision {
 };
 
 /**
- * @brief 娑撯偓鐢勵梾濞村绮ㄩ弸? */
+ * @brief 一次 NPU 推理或一次稳定跟踪输出的目标集合。
+ *
+ * `raw_candidate_count`、`post_nms_count` 和 `coarse_drop_count` 用于判断
+ * 后处理是否异常爆炸；`view_id/roi` 用于双 ROI 跟踪时判断目标当前是否
+ * 应当可见，防止奇偶帧切换造成误删或残留框。
+ */
 struct DetectionResult {
     std::vector<DetectionItem> items;
     int raw_candidate_count;
@@ -154,8 +170,7 @@ struct DetectionResult {
     }
 };
 
-/**
- * @brief letterbox 娣団剝浼? */
+/** @brief ROI 等比例缩放到模型输入时的 scale 与 padding。 */
 struct LetterboxInfo {
     int src_w;
     int src_h;
@@ -171,7 +186,7 @@ struct LetterboxInfo {
           scale(1.0f), pad_x(0), pad_y(0) {}
 };
 
-/** Per-frame detector stage timings used by competition performance logs. */
+/** @brief 单帧检测各阶段耗时，用于 FPS、P95 和端到端延迟统计。 */
 struct DetectorTiming {
     float preprocess_ms;
     float inference_ms;
@@ -182,10 +197,12 @@ struct DetectorTiming {
 };
 
 /**
- * @brief 閸ユ儳鍎氶懢宄板絿濡€虫健
+ * @brief 图像获取模块
  *
- * 缁楊兛绔撮悧鍫ｄ捍鐠愶綇绱? * 1. 娴?sensor 閼惧嘲褰囬弫鏉戠畽閸樼喎顫愰悘鏉垮閸? * 2. 娑撳秴浠?ROI 鐟佷礁澹€
- * 3. 娑撳秴浠?resize / normalize
+ * 职责：
+ * 1. 配置 A1 online pipeline，从 SC132GS 获取 Y8 单通道完整画面；
+ * 2. 仅负责传感器级裁剪和输出格式，不做模型 ROI、resize 或 normalize；
+ * 3. 取帧失败时支持关闭并重新打开 pipeline，供健康管理自动恢复。
  */
 class IMAGEPROCESSOR {
 public:
@@ -205,15 +222,26 @@ private:
 
 
 /**
- * @brief YOLOv8 head6 闂呮粎顣插Λ鈧ù瀣珤
+ * @brief YOLOv8 head6 障碍检测器
  *
- * 鏉堟挸鍙嗛敍? *   閸樼喎顫愰弫鏉戠畽閻忔澘瀹抽崶? *
- * 閸愬懘鍎村ù浣衡柤閿? *   1. AI preprocess pipe:
- *      - 閸忋劌娴?crop閿涘牆鍙剧€圭偛姘ㄩ弰顖欑瑝鐟佷緤绱? *      - letterbox 閸?384x384
- *      - normalize閿涘牏鏁?SetNormalize 娴?.m1model 鐠囪褰囬敍? *   2. NPU 閹恒劎鎮婇敍? *      - yolov8n_head6.m1model閿涘矁绶崙?6 娑?raw branch
- *   3. CPU 閸氬骸顦╅悶鍡窗
- *      - 閼奉亜濮╃拠鍡楀焼鏉堟挸鍤崚鍡樻暜妞ゅ搫绨? *      - 閼奉亜濮╅崷?CHW/HWC 娑撱倗顫掔拠璇插絿閺傜懓绱℃稉顓⑩偓澶嬪閺囨潙鎮庨悶鍡欐畱娑撯偓缁? *      - sigmoid + DFL + bbox decode + NMS
- *      - 閸?letterbox 閺勭姴鐨犻崚鏉垮斧閸ユ儳娼楅弽? */
+ * 输入：
+ *   SC132GS 原始整幅灰度图，当前模型编译为真实 1 通道输入。
+ *
+ * 内部流程：
+ *   1. AI preprocess pipe:
+ *      - 奇偶帧选择上/下重叠 ROI；
+ *      - 等比例 letterbox 到 384x384；
+ *      - 需要时执行自适应灰度 LUT；
+ *      - normalize 参数由 .m1model 的输入量化配置提供。
+ *   2. NPU 推理：
+ *      - B3 Gray1-DCE m1model，输出 6 个 raw branch。
+ *   3. CPU 后处理：
+ *      - 自动识别输出分支顺序
+ *      - 校验 3 个 25 通道分类头和 3 个 64 通道 DFL 回归头；
+ *      - 依据 runtime layout 以 HWC/CHW 正确读取量化输出；
+ *      - top-1 分类、sigmoid、DFL、anchor 解码和多目标 NMS；
+ *      - 过滤饱和横框/粗框并映射回完整 Aurora 坐标。
+ */
 class YOLOV8GRAY {
 public:
     std::string ModelName() const { return "yolov8_gray_head6"; }
