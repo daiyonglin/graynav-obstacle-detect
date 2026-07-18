@@ -34,6 +34,16 @@ bool IsSmallObjectSemantic(int semantic_class_id);
 bool IsVehicleSemantic(int semantic_class_id);
 float CandidateThreshold(int raw_class_id);
 float RiskWeight(int semantic_class_id);
+
+// 全链路共享的避障阈值。所有值都可由同名 A1_* 环境变量覆盖，确保测距、
+// tracker、规划器和串口显示不会各自使用互相矛盾的距离边界。
+float UrgentDistanceM();
+float NearDistanceM();
+float WarningDistanceM();
+float StopTtcSeconds();
+float SideClearDistanceM();
+float TurnClearanceMarginM();
+
 std::string SemanticLabel(int semantic_class_id);
 std::string SemanticShortLabel(int semantic_class_id);
 std::string RawLabel(int raw_class_id);

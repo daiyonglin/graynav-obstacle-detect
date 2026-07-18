@@ -48,6 +48,9 @@ private:
         float pending_far_depth_m;
         int pending_far_depth_count;
         int range_outlier_skips;
+        std::array<float, 5> inverse_depth_history;
+        int inverse_depth_count;
+        int inverse_depth_index;
         std::vector<float> class_evidence;
 
         Track();
@@ -61,6 +64,7 @@ private:
     };
 
     float MatchScore(const Track& track, const DetectionItem& detection) const;
+    bool IsPersonPartBridge(const Track& track, const DetectionItem& detection) const;
     bool CanStartTrack(const DetectionItem& detection) const;
     bool IsVisibleInRoi(const Track& track, const std::array<int, 4>& roi) const;
     void StartTrack(const DetectionItem& detection, int frame_id, int64_t timestamp_ms);

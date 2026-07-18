@@ -1,6 +1,7 @@
 #include "../include/semantic_config.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 
 #ifndef A1_YOLO_NUM_CLASSES
 #define A1_YOLO_NUM_CLASSES 80
@@ -113,6 +114,13 @@ bool any_of(int value, const int* values, int count)
     return false;
 }
 
+float env_float(const char* name, float fallback)
+{
+    const char* value = std::getenv(name);
+    return (value == NULL || value[0] == '\0')
+        ? fallback : static_cast<float>(std::atof(value));
+}
+
 }  // namespace
 
 int ModelClassCount()
@@ -207,7 +215,7 @@ float CandidateThreshold(int raw_class_id)
     const int sem = SemanticClassFromRaw(raw_class_id);
     if (ModelClassCount() == 25) {
         // person 的弱响应还需通过 tracker 连续确认，因此候选层优先保证身体/腿部召回。
-        if (sem == PERSON) return 0.10f;
+        if (sem == PERSON) return 0.08f;
         if (sem == CHAIR_SEAT) return 0.16f;
         // ROD25 没有通用 cardboard-box 类；dustbin/electrical_box 是现场箱体的
         // 最近可用外观类别，低阈值召回后统一按 generic_obstacle 参与避障。
@@ -239,6 +247,42 @@ float RiskWeight(int semantic_class_id)
         case VEHICLE_BICYCLE: return 1.30f;
         default: return 1.00f;
     }
+}
+
+float UrgentDistanceM()
+{
+    static const float value = env_float("A1_RANGE_URGENT_M", 0.85f);
+    return value;
+}
+
+float NearDistanceM()
+{
+    static const float value = env_float("A1_RANGE_NEAR_M", 1.25f);
+    return std::max(value, UrgentDistanceM() + 0.10f);
+}
+
+float WarningDistanceM()
+{
+    static const float value = env_float("A1_RANGE_WARNING_M", 2.20f);
+    return std::max(value, NearDistanceM() + 0.20f);
+}
+
+float StopTtcSeconds()
+{
+    static const float value = env_float("A1_TTC_STOP_S", 1.40f);
+    return std::max(0.50f, value);
+}
+
+float SideClearDistanceM()
+{
+    static const float value = env_float("A1_SIDE_CLEAR_M", 1.45f);
+    return std::max(value, NearDistanceM());
+}
+
+float TurnClearanceMarginM()
+{
+    static const float value = env_float("A1_TURN_MARGIN_M", 0.25f);
+    return std::max(0.10f, value);
 }
 
 std::string SemanticLabel(int semantic_class_id)

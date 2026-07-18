@@ -1429,7 +1429,7 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
                 // 后续仍需经过几何过滤和至少两帧轨迹确认，不把弱单帧直接用于规划。
                 const bool keep_person = person_cls >= 0 && person_cls != best_cls &&
                     person_logit >= threshold_logits[person_cls] &&
-                    person_score >= std::max(0.10f, best_score * 0.45f);
+                    person_score >= std::max(0.08f, best_score * 0.30f);
                 if (!keep_best && !keep_person) continue;
 
                 if (debug_post) {

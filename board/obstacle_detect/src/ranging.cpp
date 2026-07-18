@@ -51,9 +51,9 @@ int border_touches(const DetectionItem& item, int width, int height)
 std::string risk_from_safe_distance(float safe_distance)
 {
     if (safe_distance < 0.0f) return "unknown";
-    if (safe_distance < 0.80f) return "urgent";
-    if (safe_distance < 1.05f) return "near";
-    if (safe_distance < 2.00f) return "warning";
+    if (safe_distance < semantic::UrgentDistanceM()) return "urgent";
+    if (safe_distance < semantic::NearDistanceM()) return "near";
+    if (safe_distance < semantic::WarningDistanceM()) return "warning";
     return "far";
 }
 
@@ -65,6 +65,7 @@ RangingEstimator::RangingEstimator()
       fov_v_deg_(78.9f),
       camera_height_m_(0.71f),
       camera_pitch_deg_(15.0f),
+      ground_contact_offset_ratio_(0.012f),
       min_distance_m_(0.20f),
       max_distance_m_(8.0f),
       fx_(1.0f),
@@ -80,6 +81,7 @@ void RangingEstimator::Initialize(const std::array<int, 2>& image_shape)
     fov_v_deg_ = env_float("A1_CAM_FOV_V_DEG", 78.9f);
     camera_height_m_ = env_float("A1_CAM_HEIGHT_M", 0.71f);
     camera_pitch_deg_ = env_float("A1_CAM_PITCH_DOWN_DEG", 15.0f);
+    ground_contact_offset_ratio_ = env_float("A1_GROUND_CONTACT_OFFSET_RATIO", 0.012f);
     min_distance_m_ = env_float("A1_DIST_MIN_M", 0.20f);
     max_distance_m_ = env_float("A1_DIST_MAX_M", 8.0f);
 
@@ -99,9 +101,12 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
      */
     EstimateValue out;
     const float foot_x = 0.5f * (item.box[0] + item.box[2]);
-    const float foot_y = clampf(item.box[3], 0.0f, static_cast<float>(image_shape_[1] - 1));
-    const float bottom_ratio = foot_y /
-        std::max(1.0f, static_cast<float>(image_shape_[1]));
+    // YOLO 回归框通常在真实接地点下方留有少量 padding。按框高减去一个受限
+    // 偏移，比直接使用 y2 对近场更稳定，同时不会对小型远场框施加过大修正。
+    const float contact_offset = clampf(
+        ground_contact_offset_ratio_ * box_height(item), 1.0f, 8.0f);
+    const float foot_y = clampf(item.box[3] - contact_offset, 0.0f,
+                                static_cast<float>(image_shape_[1] - 1));
     const float cx = 0.5f * image_shape_[0];
     const float cy = 0.5f * image_shape_[1];
     const float ray_down = std::atan((foot_y - cy) / std::max(1.0f, fy_)) +
@@ -124,10 +129,25 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
     }
 
     out.mean = z;
-    const float geometry_penalty = std::fabs(bottom_ratio - 0.72f);
-    const float touch_penalty = 0.10f * border_touches(item, image_shape_[0], image_shape_[1]);
-    out.sigma = clampf(0.10f + 0.16f * z + geometry_penalty + touch_penalty,
-                       0.12f, 1.60f);
+    /*
+     * 由 z=h/tan(theta) 对底边像素 v 求导，把框底定位误差传播到距离方差。
+     * 远场 theta 很小，|dz/dv| 会自然增大，避免再把远距离显示成虚假高精度。
+     */
+    const float q = (foot_y - cy) / std::max(1.0f, fy_);
+    const float dtheta_dv = 1.0f /
+        (std::max(1.0f, fy_) * (1.0f + q * q));
+    const float sin_theta = std::max(0.02f, std::sin(ray_down));
+    const float dz_dtheta = camera_height_m_ / (sin_theta * sin_theta);
+    const int touches = border_touches(item, image_shape_[0], image_shape_[1]);
+    float pixel_sigma = 2.0f + 7.0f * (1.0f - clampf(item.score, 0.0f, 1.0f));
+    if (item.quality == "low") pixel_sigma += 2.0f;
+    pixel_sigma += 1.5f * touches;
+    const float projection_sigma = std::fabs(dz_dtheta * dtheta_dv) * pixel_sigma;
+    const float model_sigma = 0.06f + 0.05f * z;
+    out.sigma = std::sqrt(projection_sigma * projection_sigma +
+                          model_sigma * model_sigma);
+    if (z > 3.0f) out.sigma = std::max(out.sigma, 0.18f * z);
+    out.sigma = clampf(out.sigma, 0.10f, 2.50f);
     out.valid = true;
     if (lateral_m != NULL) {
         *lateral_m = (foot_x - cx) * z / std::max(1.0f, fx_);

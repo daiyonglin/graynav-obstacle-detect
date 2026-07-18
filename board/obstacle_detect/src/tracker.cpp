@@ -76,11 +76,11 @@ std::string sector_from_box(const std::array<float, 4>& box, int width)
 
 std::string risk_from_safe(float safe_distance, float ttc)
 {
-    if (ttc > 0.0f && ttc < 1.5f) return "urgent";
+    if (ttc > 0.0f && ttc < semantic::StopTtcSeconds()) return "urgent";
     if (safe_distance < 0.0f) return "unknown";
-    if (safe_distance < 0.80f) return "urgent";
-    if (safe_distance < 1.05f) return "near";
-    if (safe_distance < 2.00f) return "warning";
+    if (safe_distance < semantic::UrgentDistanceM()) return "urgent";
+    if (safe_distance < semantic::NearDistanceM()) return "near";
+    if (safe_distance < semantic::WarningDistanceM()) return "warning";
     return "far";
 }
 
@@ -121,6 +121,9 @@ ObstacleTracker::Track::Track()
       pending_far_depth_m(-1.0f),
       pending_far_depth_count(0),
       range_outlier_skips(0),
+      inverse_depth_history{0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+      inverse_depth_count(0),
+      inverse_depth_index(0),
       class_evidence(std::max(1, semantic::ModelClassCount()), 0.0f)
 {
 }
@@ -150,20 +153,55 @@ float ObstacleTracker::MatchScore(const Track& track,
     const float shape_score = size_similarity(track.item.box, detection.box);
     // Reject abrupt position/scale innovations before smoothing. Without this
     // gate, a single false box can drag a stable track across the image.
-    if ((overlap < 0.02f && distance > 0.14f) ||
+    const bool person_part_bridge = IsPersonPartBridge(track, detection);
+    if (!person_part_bridge && ((overlap < 0.02f && distance > 0.14f) ||
         (distance > 0.10f && overlap < 0.20f) ||
         (shape_score < 0.38f && overlap < 0.30f) ||
-        (track.item.quality != "coarse" && detection.quality == "coarse" && overlap < 0.55f)) {
+        (track.item.quality != "coarse" && detection.quality == "coarse" && overlap < 0.55f))) {
         return 0.0f;
     }
     const float center_score = clampf(1.0f - distance / 0.28f, 0.0f, 1.0f);
     float class_score = track.item.class_id == detection.class_id ? 1.0f : 0.45f;
-    if ((track.item.class_id == semantic::PERSON) !=
+    if (person_part_bridge) {
+        class_score = 0.60f;
+    } else if ((track.item.class_id == semantic::PERSON) !=
         (detection.class_id == semantic::PERSON)) {
         class_score = overlap > 0.60f ? 0.35f : 0.05f;
     }
-    return 0.52f * overlap + 0.28f * center_score +
-           0.12f * shape_score + 0.08f * class_score;
+    const float score = 0.52f * overlap + 0.28f * center_score +
+                        0.12f * shape_score + 0.08f * class_score;
+    // 局部肢体与原全身框的纵向 IoU 可能很低；桥接条件已经验证横向连续性，
+    // 因此给予刚超过关联门槛的下限，让其能够维持原 person 轨迹。
+    return person_part_bridge ? std::max(score, 0.35f) : score;
+}
+
+bool ObstacleTracker::IsPersonPartBridge(const Track& track,
+                                         const DetectionItem& detection) const
+{
+    /*
+     * 人体从全身变成腿部/手部可见时，模型可能暂时输出其他实体障碍类别。
+     * 只有已有 person 轨迹、候选非 coarse、横向位置连续且空间邻近时才桥接；
+     * 该规则不能从零创造人体，只负责维持已有人的局部可见轨迹。
+     */
+    if (track.item.class_id != semantic::PERSON ||
+        detection.class_id == semantic::PERSON ||
+        detection.quality == "coarse" || detection.score < 0.12f) {
+        return false;
+    }
+    const float tcx = 0.5f * (track.item.box[0] + track.item.box[2]);
+    const float tcy = 0.5f * (track.item.box[1] + track.item.box[3]);
+    const float dcx = 0.5f * (detection.box[0] + detection.box[2]);
+    const float dcy = 0.5f * (detection.box[1] + detection.box[3]);
+    const float dx = std::fabs(tcx - dcx) /
+        std::max(1.0f, static_cast<float>(image_shape_[0]));
+    const float dy = std::fabs(tcy - dcy) /
+        std::max(1.0f, static_cast<float>(image_shape_[1]));
+    const float horizontal_overlap = std::max(0.0f,
+        std::min(track.item.box[2], detection.box[2]) -
+        std::max(track.item.box[0], detection.box[0]));
+    const float overlap_ratio = horizontal_overlap /
+        std::max(1.0f, std::min(box_width(track.item.box), box_width(detection.box)));
+    return dx < 0.10f && dy < 0.24f && overlap_ratio > 0.30f;
 }
 
 bool ObstacleTracker::CanStartTrack(const DetectionItem& detection) const
@@ -171,7 +209,7 @@ bool ObstacleTracker::CanStartTrack(const DetectionItem& detection) const
     if (implausibly_broad_box(detection, image_shape_)) return false;
     if (detection.quality == "coarse") return false;
     if (detection.score >= 0.45f) return true;
-    if (detection.class_id == semantic::PERSON) return detection.score >= 0.10f;
+    if (detection.class_id == semantic::PERSON) return detection.score >= 0.08f;
     if (semantic::ModelClassCount() == 25) {
         // Match the decoder thresholds for indoor ROD25 obstacles. Weak tracks
         // still need repeated hits before output, so one noisy response cannot
@@ -245,10 +283,26 @@ void ObstacleTracker::UpdateRangeState(Track* track,
         ? clampf((timestamp_ms - track->last_update_ms) / 1000.0f, 0.01f, 0.50f)
         : 0.067f;
     if (detection.distance_m >= 0.0f) {
+        float measured_distance = detection.distance_m;
+        const float inverse_depth = 1.0f / std::max(0.20f, measured_distance);
+        track->inverse_depth_history[track->inverse_depth_index] = inverse_depth;
+        track->inverse_depth_index = (track->inverse_depth_index + 1) %
+            static_cast<int>(track->inverse_depth_history.size());
+        track->inverse_depth_count = std::min(
+            track->inverse_depth_count + 1,
+            static_cast<int>(track->inverse_depth_history.size()));
+        // 远场在深度 z 上高度非线性，而 inverse-depth 与像素位置更接近线性。
+        // 使用最近 3~5 次逆深度中值抑制框底一两个像素的偶发抖动。
+        if (measured_distance > 2.0f && track->inverse_depth_count >= 3) {
+            std::array<float, 5> sorted = track->inverse_depth_history;
+            std::sort(sorted.begin(), sorted.begin() + track->inverse_depth_count);
+            const float median_inverse = sorted[track->inverse_depth_count / 2];
+            measured_distance = 1.0f / std::max(0.02f, median_inverse);
+        }
         const float confidence = clampf(detection.distance_confidence, 0.10f, 0.95f);
         bool measurement_used = true;
         if (track->depth_measurements == 0 || track->depth_m < 0.0f) {
-            track->depth_m = detection.distance_m;
+            track->depth_m = measured_distance;
             track->depth_velocity_mps = 0.0f;
             track->depth_variance = std::max(0.04f,
                 detection.distance_sigma_m * detection.distance_sigma_m);
@@ -256,20 +310,20 @@ void ObstacleTracker::UpdateRangeState(Track* track,
             track->pending_far_depth_count = 0;
         } else {
             const float predicted = track->depth_m + track->depth_velocity_mps * dt;
-            const float residual = detection.distance_m - predicted;
+            const float residual = measured_distance - predicted;
             const float far_jump_gate = std::max(0.55f, 0.35f * std::max(0.5f, predicted));
             const bool suspicious_far_jump = residual > far_jump_gate &&
                 detection.distance_source != "nearfield_cap";
             if (suspicious_far_jump) {
                 const bool agrees_with_pending = track->pending_far_depth_count > 0 &&
-                    std::fabs(detection.distance_m - track->pending_far_depth_m) <=
+                    std::fabs(measured_distance - track->pending_far_depth_m) <=
                     std::max(0.35f, 0.20f * track->pending_far_depth_m);
                 if (agrees_with_pending) {
                     ++track->pending_far_depth_count;
                     track->pending_far_depth_m = 0.5f *
-                        (track->pending_far_depth_m + detection.distance_m);
+                        (track->pending_far_depth_m + measured_distance);
                 } else {
-                    track->pending_far_depth_m = detection.distance_m;
+                    track->pending_far_depth_m = measured_distance;
                     track->pending_far_depth_count = 1;
                 }
                 // 单帧突然跳远通常来自上半身框底部变化。先保持预测值；只有
@@ -289,7 +343,7 @@ void ObstacleTracker::UpdateRangeState(Track* track,
 
             if (measurement_used) {
                 const float accepted_distance = track->pending_far_depth_count >= 2
-                    ? track->pending_far_depth_m : detection.distance_m;
+                    ? track->pending_far_depth_m : measured_distance;
                 const float accepted_residual = accepted_distance - predicted;
                 const float alpha = 0.25f + 0.50f * confidence;
                 const float beta = 0.06f + 0.18f * confidence;
@@ -358,6 +412,16 @@ void ObstacleTracker::UpdateTrack(Track* track,
 {
     // 运动越快，旧框权重越小；高置信新检测也会更快拉回真实位置，兼顾稳定与低延迟。
     if (track == NULL) return;
+    DetectionItem effective_detection = detection;
+    if (IsPersonPartBridge(*track, detection)) {
+        effective_detection.raw_class_id = 3;
+        effective_detection.raw_label = semantic::RawLabel(3);
+        effective_detection.class_id = semantic::PERSON;
+        effective_detection.label = semantic::SemanticLabel(semantic::PERSON);
+        effective_detection.semantic_class = effective_detection.label;
+        effective_detection.risk_weight = semantic::RiskWeight(semantic::PERSON);
+        ranging_.Estimate(&effective_detection);
+    }
     const float shift = center_distance(track->item.box, detection.box, image_shape_);
     float old_weight = shift < 0.015f ? 0.65f : (shift < 0.06f ? 0.35f : 0.15f);
     if (detection.score > 0.70f) old_weight *= 0.65f;
@@ -374,8 +438,8 @@ void ObstacleTracker::UpdateTrack(Track* track,
     track->last_frame = frame_id;
     track->last_seen_ms = timestamp_ms;
     track->matched_current_frame = true;
-    UpdateClassEvidence(track, detection);
-    UpdateRangeState(track, detection, timestamp_ms);
+    UpdateClassEvidence(track, effective_detection);
+    UpdateRangeState(track, effective_detection, timestamp_ms);
     track->last_update_ms = timestamp_ms;
     track->item.track_id = track->id;
     track->item.age = track->age;
@@ -436,6 +500,8 @@ void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
         // cost only about 60 ms with alternating views and remove most phantom
         // boxes produced by one quantized head fluctuation.
         if (track.hits < kMinConfirmedHits) continue;
+        if (track.item.class_id == semantic::PERSON &&
+            track.item.score < 0.11f && track.hits < 3) continue;
         DetectionItem item = track.item;
         if (!track.matched_current_frame) item.score *= 0.90f;
         stable_result_.items.push_back(item);

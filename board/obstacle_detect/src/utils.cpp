@@ -475,8 +475,8 @@ int action_level(const std::string& action)
 int distance_level(float distance_m)
 {
     if (distance_m < 0.0f) return 0;
-    if (distance_m < 1.0f) return 3;
-    if (distance_m < 2.0f) return 2;
+    if (distance_m < obstacle::semantic::NearDistanceM()) return 3;
+    if (distance_m < obstacle::semantic::WarningDistanceM()) return 2;
     return 1;
 }
 
@@ -583,11 +583,13 @@ int zone_level(const ZoneStatus& zone)
 {
     if (!zone.occupied) return 0;
     if (zone.risk_level == "urgent" || zone.risk_level == "near" ||
-        (zone.distance_m >= 0.0f && zone.distance_m < 1.0f)) {
+        (zone.distance_m >= 0.0f &&
+         zone.distance_m < obstacle::semantic::NearDistanceM())) {
         return 3;
     }
     if (zone.risk_level == "warning" ||
-        (zone.distance_m >= 0.0f && zone.distance_m < 2.0f)) {
+        (zone.distance_m >= 0.0f &&
+         zone.distance_m < obstacle::semantic::WarningDistanceM())) {
         return 2;
     }
     return 1;
@@ -620,8 +622,8 @@ std::string dir_text(const std::string& dir)
 std::string risk_text(float distance_m)
 {
     if (distance_m < 0.0f) return "UNK";
-    if (distance_m < 1.0f) return "NEAR";
-    if (distance_m < 2.0f) return "WARN";
+    if (distance_m < obstacle::semantic::NearDistanceM()) return "NEAR";
+    if (distance_m < obstacle::semantic::WarningDistanceM()) return "WARN";
     return "FAR";
 }
 

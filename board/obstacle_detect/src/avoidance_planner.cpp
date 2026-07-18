@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <sstream>
 
 namespace obstacle {
@@ -39,14 +40,16 @@ bool near_or_urgent(const AvoidancePlanner::Corridor& corridor)
     return corridor.zone.occupied &&
            (corridor.zone.risk_level == "urgent" ||
             corridor.zone.risk_level == "near" ||
-            corridor.clearance < 1.05f ||
-            (corridor.min_ttc > 0.0f && corridor.min_ttc < 1.5f));
+             corridor.clearance < semantic::NearDistanceM() ||
+             (corridor.min_ttc > 0.0f &&
+              corridor.min_ttc < semantic::StopTtcSeconds()));
 }
 
 bool warning(const AvoidancePlanner::Corridor& corridor)
 {
     return corridor.zone.occupied &&
-           (corridor.zone.risk_level == "warning" || corridor.clearance < 2.0f);
+           (corridor.zone.risk_level == "warning" ||
+            corridor.clearance < semantic::WarningDistanceM());
 }
 
 }  // namespace
@@ -70,6 +73,13 @@ void AvoidancePlanner::Initialize(const std::array<int, 2>& image_shape)
     pending_action_ = "clear";
     pending_count_ = 0;
     stable_since_ms_ = pending_since_ms_ = 0;
+    std::cout << "[NAV][THRESHOLDS] urgent=" << semantic::UrgentDistanceM()
+              << "m near=" << semantic::NearDistanceM()
+              << "m warning=" << semantic::WarningDistanceM()
+              << "m ttc_stop=" << semantic::StopTtcSeconds()
+              << "s side_clear=" << semantic::SideClearDistanceM()
+              << "m turn_margin=" << semantic::TurnClearanceMarginM()
+              << "m" << std::endl;
 }
 
 bool AvoidancePlanner::IsActionHazard(const DetectionItem& item) const
@@ -219,19 +229,22 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     std::string desired = "clear";
     std::string reason = "clear";
 
-    const bool center_ttc_urgent = center.min_ttc > 0.0f && center.min_ttc < 1.5f;
-    const bool left_clear = left.verified && !left_near && left.clearance > 1.35f;
-    const bool right_clear = right.verified && !right_near && right.clearance > 1.35f;
+    const bool center_ttc_urgent = center.min_ttc > 0.0f &&
+                                   center.min_ttc < semantic::StopTtcSeconds();
+    const bool left_clear = left.verified && !left_near &&
+                            left.clearance > semantic::SideClearDistanceM();
+    const bool right_clear = right.verified && !right_near &&
+                             right.clearance > semantic::SideClearDistanceM();
     if (wide_urgent || center_ttc_urgent || (center_near && !left_clear && !right_clear)) {
         desired = "stop";
         reason = wide_urgent ? "wide_near" : "center_blocked_no_verified_side";
     } else if (center_near || left_near || right_near) {
         if ((center_near || right_near) && left_clear &&
-            left.clearance > right.clearance + 0.25f) {
+            left.clearance > right.clearance + semantic::TurnClearanceMarginM()) {
             desired = "turn_left";
             reason = "left_corridor_verified";
         } else if ((center_near || left_near) && right_clear &&
-                   right.clearance > left.clearance + 0.25f) {
+                   right.clearance > left.clearance + semantic::TurnClearanceMarginM()) {
             desired = "turn_right";
             reason = "right_corridor_verified";
         } else {
