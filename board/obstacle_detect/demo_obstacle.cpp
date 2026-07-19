@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cctype>
 #include <atomic>
@@ -72,6 +74,16 @@ int env_int_value(const char* name, int default_value, int min_value, int max_va
     return static_cast<int>(parsed);
 }
 
+float env_float_value(const char* name, float default_value, float min_value, float max_value)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') return default_value;
+    char* end = nullptr;
+    const float parsed = std::strtof(value, &end);
+    if (end == value) return default_value;
+    return std::max(min_value, std::min(parsed, max_value));
+}
+
 std::string env_string_value(const char* name, const std::string& default_value)
 {
     const char* value = std::getenv(name);
@@ -95,11 +107,22 @@ struct LightStats {
     float stddev;
     float dark_ratio;
     float bright_ratio;
+    float dynamic_range;
+    float edge_ratio;
+    float center_mean;
+    float center_stddev;
+    float center_dynamic_range;
+    float center_edge_ratio;
+    int cover_score;
+    bool cover_candidate;
     std::string state;
     uint32_t sample_hash;
 
     LightStats()
         : mean(0.0f), stddev(0.0f), dark_ratio(0.0f), bright_ratio(0.0f),
+          dynamic_range(0.0f), edge_ratio(0.0f), center_mean(0.0f),
+          center_stddev(0.0f), center_dynamic_range(0.0f), center_edge_ratio(0.0f),
+          cover_score(0), cover_candidate(false),
           state("unknown"), sample_hash(2166136261u) {}
 };
 
@@ -109,7 +132,9 @@ struct LightStats {
  * camera/data：连续取帧失败、遮挡/过曝/近乎纯色、画面冻结；
  * inference：NPU 调用或 head 校验连续失败；
  * resource：低 FPS、高 P95、低内存或候选爆炸。
- * 故障一旦锁存，必须连续 30 帧完全健康才恢复，避免遮挡边缘短暂露光时误报 CLEAR。
+ * 故障一旦锁存，必须连续一段可配置的健康帧才恢复，避免遮挡边缘短暂露光时
+ * 误报 CLEAR。遮挡触发和恢复帧数分别由 A1_COVER_TRIGGER_FRAMES、
+ * A1_COVER_RECOVERY_FRAMES 控制。
  */
 struct SystemHealth {
     int capture_failures;
@@ -121,6 +146,10 @@ struct SystemHealth {
     int low_memory_frames;
     int resource_checks;
     int healthy_recovery_frames;
+    int cover_trigger_frames;
+    int cover_recovery_frames;
+    int last_cover_score;
+    bool last_cover_candidate;
     bool fault_latched;
     int memory_available_kb;
     uint32_t last_image_hash;
@@ -137,6 +166,10 @@ struct SystemHealth {
           low_memory_frames(0),
           resource_checks(0),
           healthy_recovery_frames(0),
+          cover_trigger_frames(env_int_value("A1_COVER_TRIGGER_FRAMES", 3, 2, 30)),
+          cover_recovery_frames(env_int_value("A1_COVER_RECOVERY_FRAMES", 18, 8, 90)),
+          last_cover_score(0),
+          last_cover_candidate(false),
           fault_latched(false),
           memory_available_kb(-1),
           last_image_hash(0),
@@ -145,18 +178,15 @@ struct SystemHealth {
 
     void UpdateData(const LightStats& light)
     {
-        // A covered sensor can retain a small bright edge, so requiring both
-        // 97% dark pixels and very low variance misses real covers. Use strong
-        // saturation/mean evidence while keeping ordinary dim scenes degraded
-        // rather than failed.
-        const bool dark_cover = light.mean < 38.0f && light.dark_ratio > 0.82f &&
-                                light.stddev < 10.0f;
-        const bool bright_cover = light.mean > 230.0f && light.bright_ratio > 0.88f;
-        const bool flat_frame = light.stddev > 0.0f && light.stddev < 2.5f;
-        const bool bad = dark_cover || bright_cover || flat_frame;
-        // Use a leaky accumulator so a single bright edge in an otherwise
-        // covered image cannot immediately erase the sensor-fault evidence.
-        data_fault_frames = bad ? data_fault_frames + 1 : std::max(0, data_fault_frames - 1);
+        // cover_candidate 综合全图和中心区域的纹理、梯度及动态范围。它可以识别
+        // 手掌贴近镜头时“非纯黑但大面积失焦”的遮挡，而不仅依赖暗像素比例。
+        last_cover_score = light.cover_score;
+        last_cover_candidate = light.cover_candidate;
+        // 计数封顶，避免长时间遮挡后需要同样长时间才能恢复；故障锁存仍由
+        // cover_recovery_frames 保证解除遮挡后经过稳定健康观测才恢复导航。
+        data_fault_frames = light.cover_candidate
+            ? std::min(cover_trigger_frames + 4, data_fault_frames + 1)
+            : std::max(0, data_fault_frames - 2);
         if (last_image_hash != 0 && light.sample_hash == last_image_hash) {
             ++frozen_frames;
         } else {
@@ -193,7 +223,7 @@ struct SystemHealth {
         return fault_latched ||
                capture_failures >= 3 ||
                inference_failures >= 2 ||
-               data_fault_frames >= 8 ||
+               data_fault_frames >= cover_trigger_frames ||
                frozen_frames >= 15 ||
                resource_fault_frames >= 20 ||
                low_memory_frames >= 3 ||
@@ -212,7 +242,7 @@ struct SystemHealth {
     void RefreshState()
     {
         const bool raw_fault = capture_failures >= 3 || inference_failures >= 2 ||
-                               data_fault_frames >= 8 || frozen_frames >= 15 ||
+                               data_fault_frames >= cover_trigger_frames || frozen_frames >= 15 ||
                                resource_fault_frames >= 20 || low_memory_frames >= 3 ||
                                candidate_burst_frames >= 5;
         if (raw_fault) {
@@ -227,7 +257,7 @@ struct SystemHealth {
             // A covered lens can briefly expose a bright edge and produce a
             // few nominal frames. Require sustained healthy imagery before
             // allowing CLEAR/navigation speech again.
-            if (healthy_recovery_frames >= 30) {
+            if (healthy_recovery_frames >= cover_recovery_frames) {
                 fault_latched = false;
                 healthy_recovery_frames = 0;
             }
@@ -242,7 +272,7 @@ struct SystemHealth {
         } else if (frozen_frames >= 15) {
             state = "sensor";
             reason = "frozen_frame";
-        } else if (data_fault_frames >= 8) {
+        } else if (data_fault_frames >= cover_trigger_frames) {
             state = "sensor";
             reason = "bad_image";
         } else if (resource_fault_frames >= 20) {
@@ -324,8 +354,21 @@ LightStats analyze_light_stats(ssne_tensor_t* img)
     int count = 0;
     int dark = 0;
     int bright = 0;
+    int edge_count = 0;
+    int edge_samples = 0;
+    int center_count = 0;
+    int center_edge_count = 0;
+    int center_edge_samples = 0;
     double sum = 0.0;
     double sum_sq = 0.0;
+    double center_sum = 0.0;
+    double center_sum_sq = 0.0;
+    std::array<int, 256> histogram = {};
+    std::array<int, 256> center_histogram = {};
+    const int center_x0 = static_cast<int>(0.18f * w);
+    const int center_x1 = static_cast<int>(0.82f * w);
+    const int center_y0 = static_cast<int>(0.15f * h);
+    const int center_y1 = static_cast<int>(0.85f * h);
 
     for (int y = 0; y < h; y += step) {
         for (int x = 0; x < w; x += step) {
@@ -334,8 +377,26 @@ LightStats analyze_light_stats(ssne_tensor_t* img)
             stats.sample_hash *= 16777619u;
             sum += v;
             sum_sq += static_cast<double>(v) * static_cast<double>(v);
+            histogram[static_cast<size_t>(v)]++;
             if (v < 35) dark++;
             if (v > 220) bright++;
+            int gradient = 0;
+            if (x + step < w) gradient += std::abs(v - static_cast<int>(data[y * w + x + step]));
+            if (y + step < h) gradient += std::abs(v - static_cast<int>(data[(y + step) * w + x]));
+            if (x + step < w || y + step < h) {
+                edge_count += gradient >= 28 ? 1 : 0;
+                edge_samples++;
+            }
+            if (x >= center_x0 && x < center_x1 && y >= center_y0 && y < center_y1) {
+                center_sum += v;
+                center_sum_sq += static_cast<double>(v) * static_cast<double>(v);
+                center_histogram[static_cast<size_t>(v)]++;
+                center_count++;
+                if (x + step < w || y + step < h) {
+                    center_edge_count += gradient >= 24 ? 1 : 0;
+                    center_edge_samples++;
+                }
+            }
             count++;
         }
     }
@@ -349,8 +410,66 @@ LightStats analyze_light_stats(ssne_tensor_t* img)
     stats.stddev = static_cast<float>(std::sqrt(variance));
     stats.dark_ratio = static_cast<float>(dark) / static_cast<float>(count);
     stats.bright_ratio = static_cast<float>(bright) / static_cast<float>(count);
+    stats.edge_ratio = edge_samples > 0
+        ? static_cast<float>(edge_count) / static_cast<float>(edge_samples) : 0.0f;
 
-    if (stats.stddev < 18.0f) {
+    const auto percentile = [](const std::array<int, 256>& hist, int total, float q) {
+        if (total <= 0) return 0;
+        const int target = std::max(1, static_cast<int>(std::ceil(q * total)));
+        int accumulated = 0;
+        for (int i = 0; i < 256; ++i) {
+            accumulated += hist[static_cast<size_t>(i)];
+            if (accumulated >= target) return i;
+        }
+        return 255;
+    };
+    stats.dynamic_range = static_cast<float>(
+        percentile(histogram, count, 0.95f) - percentile(histogram, count, 0.05f));
+
+    if (center_count > 0) {
+        stats.center_mean = static_cast<float>(center_sum / center_count);
+        const double center_variance = std::max(
+            0.0, center_sum_sq / center_count -
+            static_cast<double>(stats.center_mean) * stats.center_mean);
+        stats.center_stddev = static_cast<float>(std::sqrt(center_variance));
+        stats.center_dynamic_range = static_cast<float>(
+            percentile(center_histogram, center_count, 0.95f) -
+            percentile(center_histogram, center_count, 0.05f));
+        stats.center_edge_ratio = center_edge_samples > 0
+            ? static_cast<float>(center_edge_count) /
+              static_cast<float>(center_edge_samples) : 0.0f;
+    }
+
+    // 多证据遮挡评分：全图低纹理、中心低纹理和灰度分布压缩分别计分；
+    // 大面积暗/亮饱和额外计分。这样手掌、衣物等非纯黑遮挡也能被识别。
+    int cover_score = 0;
+    cover_score += stats.stddev < 10.0f ? 2 : (stats.stddev < 18.0f ? 1 : 0);
+    cover_score += stats.dynamic_range < 35.0f ? 2 : (stats.dynamic_range < 60.0f ? 1 : 0);
+    cover_score += stats.edge_ratio < 0.015f ? 2 : (stats.edge_ratio < 0.035f ? 1 : 0);
+    cover_score += stats.center_stddev < 14.0f ? 2 : (stats.center_stddev < 22.0f ? 1 : 0);
+    cover_score += stats.center_dynamic_range < 42.0f ? 2 :
+                   (stats.center_dynamic_range < 70.0f ? 1 : 0);
+    cover_score += stats.center_edge_ratio < 0.020f ? 2 :
+                   (stats.center_edge_ratio < 0.045f ? 1 : 0);
+    if (stats.dark_ratio > 0.65f || stats.bright_ratio > 0.65f) cover_score += 2;
+
+    const bool hard_dark_cover = stats.mean < 55.0f && stats.dark_ratio > 0.65f &&
+                                 stats.stddev < 20.0f;
+    const bool hard_bright_cover = stats.mean > 215.0f && stats.bright_ratio > 0.70f &&
+                                   stats.stddev < 20.0f;
+    const bool hard_flat_frame = stats.stddev > 0.0f && stats.stddev < 5.0f;
+    const bool center_occluded = stats.center_stddev < 14.0f &&
+                                 stats.center_dynamic_range < 48.0f &&
+                                 stats.center_edge_ratio < 0.025f;
+    static const int score_threshold =
+        env_int_value("A1_COVER_SCORE_THRESHOLD", 5, 3, 12);
+    stats.cover_score = cover_score;
+    stats.cover_candidate = hard_dark_cover || hard_bright_cover || hard_flat_frame ||
+                            center_occluded || cover_score >= score_threshold;
+
+    if (stats.cover_candidate) {
+        stats.state = "covered";
+    } else if (stats.stddev < 18.0f) {
         stats.state = "low_contrast";
     } else if (stats.mean < 55.0f || stats.dark_ratio > 0.45f) {
         stats.state = "dark";
@@ -610,6 +729,8 @@ void print_fault_packet(int frame_id,
         oss << " capture_fail=" << health.capture_failures
             << " infer_fail=" << health.inference_failures
             << " bad_image=" << health.data_fault_frames
+            << " cover_score=" << health.last_cover_score
+            << " cover_candidate=" << (health.last_cover_candidate ? 1 : 0)
             << " frozen=" << health.frozen_frames
             << " slow=" << health.resource_fault_frames
             << " low_mem=" << health.low_memory_frames
@@ -798,6 +919,11 @@ int main()
     std::cout << "[INFO] output interval = " << output_interval_frames << " frames" << std::endl;
     std::cout << "[INFO] OSD interval    = " << osd_interval_frames << " frames" << std::endl;
     std::cout << "[INFO] capture restart = " << (capture_auto_restart ? "on" : "off") << std::endl;
+    std::cout << "[INFO] cover detector  = score>="
+              << env_int_value("A1_COVER_SCORE_THRESHOLD", 5, 3, 12)
+              << " trigger=" << system_health.cover_trigger_frames
+              << " recovery=" << system_health.cover_recovery_frames
+              << " frames" << std::endl;
     if (test_fault_type != "none") {
         std::cout << "[TEST] fault injection type=" << test_fault_type
                   << " start_frame=" << test_fault_start
@@ -866,8 +992,8 @@ int main()
         if (output_serial_diagnostics &&
             ((frame_id == 1 || frame_id % perf_interval_frames == 0) ||
              system_health.data_fault_frames == 1 ||
-             system_health.data_fault_frames == 8 ||
-             (system_health.data_fault_frames > 8 &&
+             system_health.data_fault_frames == system_health.cover_trigger_frames ||
+             (system_health.data_fault_frames > system_health.cover_trigger_frames &&
               system_health.data_fault_frames % 30 == 0))) {
             std::cout << "[HEALTH][DATA] frame=" << frame_id
                       << " state=" << light_stats.state
@@ -875,6 +1001,13 @@ int main()
                       << " std=" << light_stats.stddev
                       << " dark=" << light_stats.dark_ratio
                       << " bright=" << light_stats.bright_ratio
+                      << " range=" << light_stats.dynamic_range
+                      << " edge=" << light_stats.edge_ratio
+                      << " center_std=" << light_stats.center_stddev
+                      << " center_range=" << light_stats.center_dynamic_range
+                      << " center_edge=" << light_stats.center_edge_ratio
+                      << " cover_score=" << light_stats.cover_score
+                      << " cover_candidate=" << (light_stats.cover_candidate ? 1 : 0)
                       << " bad_frames=" << system_health.data_fault_frames
                       << " frozen_frames=" << system_health.frozen_frames
                       << std::endl;
@@ -892,7 +1025,8 @@ int main()
                                        frame_id < test_fault_start + test_fault_duration;
         if (test_fault_active) {
             if (test_fault_type == "camera") {
-                system_health.data_fault_frames = std::max(system_health.data_fault_frames, 8);
+                system_health.data_fault_frames = std::max(
+                    system_health.data_fault_frames, system_health.cover_trigger_frames);
             } else if (test_fault_type == "inference") {
                 system_health.inference_failures = std::max(system_health.inference_failures, 2);
             } else if (test_fault_type == "resource") {
