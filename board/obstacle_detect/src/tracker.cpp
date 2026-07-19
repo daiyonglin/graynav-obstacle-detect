@@ -68,9 +68,10 @@ std::string sector_from_box(const std::array<float, 4>& box, int width)
 {
     const float cx = 0.5f * (box[0] + box[2]);
     const float bw = box_width(box);
-    if (bw / std::max(1.0f, static_cast<float>(width)) > 0.75f) return "wide";
-    if (cx < 0.35f * width) return "left";
-    if (cx > 0.65f * width) return "right";
+    const float frame_width = std::max(1.0f, static_cast<float>(width));
+    if (bw / frame_width > semantic::WideBoxRatio()) return "wide";
+    if (cx < semantic::SectorLeftBoundaryRatio() * frame_width) return "left";
+    if (cx > semantic::SectorRightBoundaryRatio() * frame_width) return "right";
     return "center";
 }
 

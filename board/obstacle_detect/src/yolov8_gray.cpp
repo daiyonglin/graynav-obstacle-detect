@@ -1,4 +1,5 @@
 #include "../include/utils.hpp"
+#include "../include/semantic_config.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -315,28 +316,17 @@ std::string top_class_counts_text(const std::vector<int>& counts, int limit)
 
 std::string sector_from_box(const std::array<float, 4>& box, int img_w)
 {
-    const float left_bound = 0.35f * static_cast<float>(img_w);
-    const float right_bound = 0.65f * static_cast<float>(img_w);
+    const float frame_width = std::max(1.0f, static_cast<float>(img_w));
+    const float left_bound = obstacle::semantic::SectorLeftBoundaryRatio() * frame_width;
+    const float right_bound = obstacle::semantic::SectorRightBoundaryRatio() * frame_width;
     const float width = std::max(1.0f, box[2] - box[0]);
-
-    if (width / std::max(1.0f, static_cast<float>(img_w)) > 0.75f) {
-        return "wide";
-    }
-
-    const float left_overlap = std::max(0.0f, std::min(box[2], left_bound) - std::max(box[0], 0.0f)) / width;
-    const float center_overlap = std::max(0.0f, std::min(box[2], right_bound) - std::max(box[0], left_bound)) / width;
-    const float right_overlap = std::max(0.0f, std::min(box[2], static_cast<float>(img_w)) - std::max(box[0], right_bound)) / width;
-
-    if (left_overlap >= 0.20f && center_overlap >= 0.20f && right_overlap >= 0.20f) {
-        return "wide";
-    }
-    if (center_overlap >= 0.50f) {
-        return "center";
-    }
-    if (center_overlap >= 0.25f && left_overlap >= 0.25f) return "left_center";
-    if (center_overlap >= 0.25f && right_overlap >= 0.25f) return "center_right";
-
     const float cx = 0.5f * (box[0] + box[2]);
+
+    // 近乎占满全幅的框才作为 wide。窄视场中的普通大目标按框中心划入侧区，
+    // 避免侧方人体或椅子被错误升级为覆盖整条通路的中心障碍。
+    if (width / frame_width > obstacle::semantic::WideBoxRatio()) {
+        return "wide";
+    }
     if (cx < left_bound) return "left";
     if (cx > right_bound) return "right";
     return "center";

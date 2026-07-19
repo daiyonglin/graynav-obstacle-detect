@@ -192,21 +192,14 @@ float center_x_for_multi_nms(const DetectionItem& item)
 std::string sector_for_multi_nms(const DetectionItem& item)
 {
     const float w = 720.0f;
-    const float left_bound = 0.35f * w;
-    const float right_bound = 0.65f * w;
+    const float left_bound = obstacle::semantic::SectorLeftBoundaryRatio() * w;
+    const float right_bound = obstacle::semantic::SectorRightBoundaryRatio() * w;
     const float box_w = std::max(1.0f, item.box[2] - item.box[0]);
-    const float left_overlap =
-        std::max(0.0f, std::min(item.box[2], left_bound) - std::max(item.box[0], 0.0f)) / box_w;
-    const float center_overlap =
-        std::max(0.0f, std::min(item.box[2], right_bound) - std::max(item.box[0], left_bound)) / box_w;
-    const float right_overlap =
-        std::max(0.0f, std::min(item.box[2], w) - std::max(item.box[0], right_bound)) / box_w;
-
-    if (left_overlap >= 0.20f && center_overlap >= 0.20f && right_overlap >= 0.20f) return "wide";
-    if (center_overlap >= 0.50f) return "center";
-    if (center_overlap >= 0.25f && left_overlap >= 0.25f) return "left_center";
-    if (center_overlap >= 0.25f && right_overlap >= 0.25f) return "center_right";
-    return (left_overlap >= right_overlap) ? "left" : "right";
+    const float cx = center_x_for_multi_nms(item);
+    if (box_w / w > obstacle::semantic::WideBoxRatio()) return "wide";
+    if (cx < left_bound) return "left";
+    if (cx > right_bound) return "right";
+    return "center";
 }
 
 bool should_suppress_for_multi_nms(const DetectionItem& cur,

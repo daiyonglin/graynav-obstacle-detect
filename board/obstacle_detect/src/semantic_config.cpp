@@ -285,6 +285,30 @@ float TurnClearanceMarginM()
     return std::max(0.10f, value);
 }
 
+float SectorLeftBoundaryRatio()
+{
+    static const float value = env_float("A1_SECTOR_LEFT_BOUND", 0.42f);
+    return std::max(0.20f, std::min(value, 0.48f));
+}
+
+float SectorRightBoundaryRatio()
+{
+    static const float value = env_float("A1_SECTOR_RIGHT_BOUND", 0.58f);
+    return std::max(0.52f, std::min(value, 0.80f));
+}
+
+float WideBoxRatio()
+{
+    static const float value = env_float("A1_WIDE_BOX_RATIO", 0.88f);
+    return std::max(0.75f, std::min(value, 0.98f));
+}
+
+float CenterCorridorHalfWidthM()
+{
+    static const float value = env_float("A1_CENTER_HALF_WIDTH_M", 0.22f);
+    return std::max(0.12f, std::min(value, 0.45f));
+}
+
 std::string SemanticLabel(int semantic_class_id)
 {
     if (semantic_class_id >= 0 && semantic_class_id < NUM_SEMANTIC_CLASSES) {

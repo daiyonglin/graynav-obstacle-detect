@@ -164,6 +164,8 @@ private:
     int fault_hold_ms_;
     int switch_min_ms_;
     int tx_gap_ms_;
+    int stop_followup_hold_ms_;
+    int turn_followup_hold_ms_;
     bool pre_stop_;
     bool ack_enabled_;
     bool require_ack_;

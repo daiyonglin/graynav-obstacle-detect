@@ -44,6 +44,12 @@ float StopTtcSeconds();
 float SideClearDistanceM();
 float TurnClearanceMarginM();
 
+// 窄视场相机的画面分区与地面走廊边界。四项参数均支持 A1_* 环境变量覆盖。
+float SectorLeftBoundaryRatio();
+float SectorRightBoundaryRatio();
+float WideBoxRatio();
+float CenterCorridorHalfWidthM();
+
 std::string SemanticLabel(int semantic_class_id);
 std::string SemanticShortLabel(int semantic_class_id);
 std::string RawLabel(int raw_class_id);

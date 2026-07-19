@@ -150,6 +150,8 @@ VoiceNotifier::VoiceNotifier()
       fault_hold_ms_(2500),
       switch_min_ms_(0),
       tx_gap_ms_(800),
+      stop_followup_hold_ms_(2500),
+      turn_followup_hold_ms_(1500),
       pre_stop_(false),
       ack_enabled_(true),
       require_ack_(true),
@@ -233,6 +235,10 @@ bool VoiceNotifier::InitializeFromEnv()
     fault_hold_ms_ = std::max(1000, getenv_int("A1_VOICE_FAULT_HOLD_MS", 2500));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 800));
+    stop_followup_hold_ms_ = std::max(
+        1500, getenv_int("A1_VOICE_STOP_FOLLOWUP_HOLD_MS", 2500));
+    turn_followup_hold_ms_ = std::max(
+        800, getenv_int("A1_VOICE_TURN_FOLLOWUP_HOLD_MS", 1500));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
     ack_enabled_ = getenv_bool("A1_VOICE_ACK", true);
     require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", true);
@@ -289,6 +295,8 @@ bool VoiceNotifier::InitializeFromEnv()
               << " fault_hold_ms=" << fault_hold_ms_
               << " switch_min_ms=" << switch_min_ms_
               << " tx_gap_ms=" << tx_gap_ms_
+              << " stop_followup_hold_ms=" << stop_followup_hold_ms_
+              << " turn_followup_hold_ms=" << turn_followup_hold_ms_
               << " pre_stop=" << (pre_stop_ ? 1 : 0)
               << " ack=" << (ack_enabled_ ? 1 : 0)
               << " require_ack=" << (require_ack_ ? 1 : 0)
@@ -1312,6 +1320,23 @@ void VoiceNotifier::WorkerLoop()
         const int since_complete = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sent_time_).count());
         const bool changed = action != last_key_;
+        if (changed) {
+            int followup_hold_ms = 0;
+            if (last_key_ == "stop") {
+                followup_hold_ms = stop_followup_hold_ms_;
+            } else if (last_key_ == "turn_left" || last_key_ == "turn_right") {
+                followup_hold_ms = turn_followup_hold_ms_;
+            }
+
+            // 播报完成后为使用者保留执行动作的时间。风险升级不等待：异常总是
+            // 立即覆盖，STOP 也可立即覆盖转向；降低风险或反向转向才受保持门控。
+            const bool safety_upgrade =
+                action == "system_fault" ||
+                (action == "stop" && ActionPriority(action) > ActionPriority(last_key_));
+            if (!safety_upgrade && since_complete < followup_hold_ms) {
+                continue;
+            }
+        }
         if (changed || since_complete >= RepeatIntervalMs(action)) {
             StartProtocolSpeech(frame_id, action, false);
         }

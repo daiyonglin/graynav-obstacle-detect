@@ -79,6 +79,10 @@ void AvoidancePlanner::Initialize(const std::array<int, 2>& image_shape)
               << "m ttc_stop=" << semantic::StopTtcSeconds()
               << "s side_clear=" << semantic::SideClearDistanceM()
               << "m turn_margin=" << semantic::TurnClearanceMarginM()
+              << "m sector=" << semantic::SectorLeftBoundaryRatio()
+              << "/" << semantic::SectorRightBoundaryRatio()
+              << " wide=" << semantic::WideBoxRatio()
+              << " center_half=" << semantic::CenterCorridorHalfWidthM()
               << "m" << std::endl;
 }
 
@@ -160,8 +164,8 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
                                             int64_t timestamp_ms)
 {
     /*
-     * 双 ROI 必须在 500ms 内都被观测，侧方走廊才标记 verified。只有中央
-     * 被阻挡且某一侧已验证安全时才建议转向；侧方未知时保守 STOP/SLOW。
+     * 双 ROI 的近期观测用于判断中央阻塞时哪一侧确实可通行。单纯侧方障碍
+     * 则直接给出反方向转向建议，不再等待另一 ROI 完成安全确认。
      */
     if (view_id >= 0 && view_id < 2) last_view_ms_[view_id] = timestamp_ms;
     const bool both_views_recent =
@@ -212,9 +216,10 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             continue;
         }
 
-        if (item.lateral_m < -0.35f || item.sector == "left") {
+        const float center_half_width = semantic::CenterCorridorHalfWidthM();
+        if (item.lateral_m < -center_half_width || item.sector == "left") {
             AddToCorridor(&left, item);
-        } else if (item.lateral_m > 0.35f || item.sector == "right") {
+        } else if (item.lateral_m > center_half_width || item.sector == "right") {
             AddToCorridor(&right, item);
         } else {
             AddToCorridor(&center, item);
@@ -226,6 +231,9 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     const bool left_near = near_or_urgent(left);
     const bool center_near = near_or_urgent(center);
     const bool right_near = near_or_urgent(right);
+    const bool left_warning = warning(left);
+    const bool center_warning = warning(center);
+    const bool right_warning = warning(right);
     std::string desired = "clear";
     std::string reason = "clear";
 
@@ -239,7 +247,15 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         desired = "stop";
         reason = wide_urgent ? "wide_near" : "center_blocked_no_verified_side";
     } else if (center_near || left_near || right_near) {
-        if ((center_near || right_near) && left_clear &&
+        // 单纯侧方近障不再等待双 ROI 将另一侧标记为 verified：右侧障碍直接
+        // 提示左转，左侧障碍直接提示右转。中央阻塞时仍要求候选走廊已确认安全。
+        if (right_near && !center_near && !left_near) {
+            desired = "turn_left";
+            reason = "right_obstacle_direct_avoid";
+        } else if (left_near && !center_near && !right_near) {
+            desired = "turn_right";
+            reason = "left_obstacle_direct_avoid";
+        } else if ((center_near || right_near) && left_clear &&
             left.clearance > right.clearance + semantic::TurnClearanceMarginM()) {
             desired = "turn_left";
             reason = "left_corridor_verified";
@@ -251,9 +267,17 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             desired = center_near ? "stop" : "slow";
             reason = center_near ? "center_near" : "side_near";
         }
-    } else if (warning(center) || warning(left) || warning(right) || uncertain_hazard) {
-        desired = "slow";
-        reason = uncertain_hazard ? "uncertain_obstacle" : "warning_range";
+    } else if (center_warning || left_warning || right_warning || uncertain_hazard) {
+        if (right_warning && !center_warning && !left_warning) {
+            desired = "turn_left";
+            reason = "right_warning_direct_avoid";
+        } else if (left_warning && !center_warning && !right_warning) {
+            desired = "turn_right";
+            reason = "left_warning_direct_avoid";
+        } else {
+            desired = "slow";
+            reason = uncertain_hazard ? "uncertain_obstacle" : "warning_range";
+        }
     }
 
     AvoidanceDecision decision;
