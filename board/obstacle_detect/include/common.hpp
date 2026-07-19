@@ -134,7 +134,7 @@ struct DetectionResult {
     int post_nms_count;
     int coarse_drop_count;
     int view_id;
-    std::array<int, 4> roi;  // x1, y1, x2, y2 in full-frame coordinates.
+    std::array<int, 4> roi;  // 当前推理 ROI 的全图坐标 [x1,y1,x2,y2]。
     int64_t timestamp_ms;
 
     DetectionResult()
@@ -285,13 +285,18 @@ private:
     std::vector<std::string> class_names_;
 
 private:
+    /** 从模型类别契约建立原始标签表。 */
     void BuildClassNames();
 
+    /** 选择当前 ROI，并完成 crop、letterbox、normalize 和可选暗光增强。 */
     bool Preprocess(ssne_tensor_t* img_in, ssne_tensor_t* input_tensor);
 
+    /** 校验并解码 6 个 raw head，输出已经反映射到全图坐标的检测结果。 */
     bool Postprocess(DetectionResult* result, float conf_threshold);
 
+    /** 将 384 模型坐标去 padding/scale 后加 ROI 原点，恢复为 Aurora 坐标。 */
     void MapBoxToOriginalImage(std::array<float, 4>& box);
 
+    /** 返回 ROD25 原始类别名；越界编号返回 unknown。 */
     std::string ClassIdToLabel(int class_id) const;
 };

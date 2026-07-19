@@ -1,4 +1,6 @@
-
+# ===== 输出模式与 SYN6288 UART 传输 =====
+# 生产路径为 a1_uart + 固定 GBK 帧。ACK/主动 busy 查询默认关闭，是因为当前
+# 载板回传不稳定；被动 RX 只用于统计，不作为持续播报的硬前提。
 export A1_OUTPUT_MODE="${A1_OUTPUT_MODE:-both}"
 export A1_VOICE_BACKEND="${A1_VOICE_BACKEND:-a1_uart}"
 export A1_VOICE_BAUD="${A1_VOICE_BAUD:-9600}"
@@ -36,6 +38,8 @@ export A1_VOICE_RETRY="${A1_VOICE_RETRY:-0}"
 export A1_VOICE_WAIT_IDLE_MS="${A1_VOICE_WAIT_IDLE_MS:-1200}"
 export A1_VOICE_TEST_ON_START="${A1_VOICE_TEST_ON_START:-0}"
 export A1_VOICE_SELFTEST="${A1_VOICE_SELFTEST:-0}"
+
+# ===== 后处理、串口摘要与异常恢复 =====
 export A1_DEBUG_POSTPROCESS="${A1_DEBUG_POSTPROCESS:-0}"
 export A1_DEBUG_POSTPROCESS_INTERVAL="${A1_DEBUG_POSTPROCESS_INTERVAL:-60}"
 export A1_OUTPUT_SERIAL_DIAG="${A1_OUTPUT_SERIAL_DIAG:-0}"
@@ -44,6 +48,10 @@ export A1_CAPTURE_AUTO_RESTART="${A1_CAPTURE_AUTO_RESTART:-1}"
 export A1_COVER_SCORE_THRESHOLD="${A1_COVER_SCORE_THRESHOLD:-5}"
 export A1_COVER_TRIGGER_FRAMES="${A1_COVER_TRIGGER_FRAMES:-3}"
 export A1_COVER_RECOVERY_FRAMES="${A1_COVER_RECOVERY_FRAMES:-18}"
+
+# ===== SC132GS 全画面采集与交替双 ROI =====
+# online pipeline 保留完整 720x1280；模型在 CPU/NPU 预处理阶段交替观察
+# y=0..720 与 y=560..1280，两视图重叠 160 像素且每帧仍只推理一次。
 export A1_FULL_FRAME_WIDTH="${A1_FULL_FRAME_WIDTH:-720}"
 export A1_FULL_FRAME_HEIGHT="${A1_FULL_FRAME_HEIGHT:-1280}"
 export A1_CAPTURE_WIDTH="${A1_CAPTURE_WIDTH:-720}"
@@ -53,11 +61,15 @@ export A1_CAPTURE_CROP_Y0="${A1_CAPTURE_CROP_Y0:-0}"
 export A1_DUAL_ROI="${A1_DUAL_ROI:-1}"
 export A1_ROI_UPPER_Y="${A1_ROI_UPPER_Y:-0}"
 export A1_ROI_LOWER_Y="${A1_ROI_LOWER_Y:-560}"
+
+# ===== head6 候选、NMS、OSD 和性能统计 =====
 export A1_NMS_TOP_K="${A1_NMS_TOP_K:-300}"
 export A1_NMS_KEEP_TOP_K="${A1_NMS_KEEP_TOP_K:-40}"
 export A1_OSD_INTERVAL_FRAMES="${A1_OSD_INTERVAL_FRAMES:-2}"
 export A1_PERF_INTERVAL_FRAMES="${A1_PERF_INTERVAL_FRAMES:-60}"
 export A1_SENSOR_FPS="${A1_SENSOR_FPS:-90}"
+
+# ===== 相机安装参数、测距不确定度与三走廊规划 =====
 export A1_CAM_FOV_H_DEG="${A1_CAM_FOV_H_DEG:-49.7}"
 export A1_CAM_FOV_V_DEG="${A1_CAM_FOV_V_DEG:-78.9}"
 export A1_CAM_HEIGHT_M="${A1_CAM_HEIGHT_M:-0.71}"
@@ -73,6 +85,8 @@ export A1_SECTOR_LEFT_BOUND="${A1_SECTOR_LEFT_BOUND:-0.42}"
 export A1_SECTOR_RIGHT_BOUND="${A1_SECTOR_RIGHT_BOUND:-0.58}"
 export A1_WIDE_BOX_RATIO="${A1_WIDE_BOX_RATIO:-0.88}"
 export A1_CENTER_HALF_WIDTH_M="${A1_CENTER_HALF_WIDTH_M:-0.22}"
+
+# ===== 仅在暗光且仍有纹理时启用的局部灰度增强 =====
 export A1_ADAPTIVE_GRAY="${A1_ADAPTIVE_GRAY:-1}"
 export A1_ADAPTIVE_GRAY_DARK_MEAN="${A1_ADAPTIVE_GRAY_DARK_MEAN:-75}"
 export A1_ADAPTIVE_GRAY_BLEND="${A1_ADAPTIVE_GRAY_BLEND:-60}"
@@ -80,6 +94,8 @@ export A1_ADAPTIVE_GRAY_BRIGHT_MEAN="${A1_ADAPTIVE_GRAY_BRIGHT_MEAN:-195}"
 export A1_ADAPTIVE_GRAY_DIAG="${A1_ADAPTIVE_GRAY_DIAG:-1}"
 
 chmod +x ./ssne_ai_demo
+# ===== 进程监督 =====
+# 正常退出不重启；采集/推理持续故障以非零码退出后，最多退避重启五次。
 restart_count=0
 while true; do
     ./ssne_ai_demo

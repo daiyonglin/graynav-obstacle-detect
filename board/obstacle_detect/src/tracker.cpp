@@ -152,8 +152,8 @@ float ObstacleTracker::MatchScore(const Track& track,
     const float overlap = utils::IoU(track.item.box, detection.box);
     const float distance = center_distance(track.item.box, detection.box, image_shape_);
     const float shape_score = size_similarity(track.item.box, detection.box);
-    // Reject abrupt position/scale innovations before smoothing. Without this
-    // gate, a single false box can drag a stable track across the image.
+    // 平滑前先拒绝位置或尺度突变。否则单帧伪框会把稳定轨迹拉到画面另一处，
+    // 在 Aurora 上表现为检测框漂移或凭空横移。
     const bool person_part_bridge = IsPersonPartBridge(track, detection);
     if (!person_part_bridge && ((overlap < 0.02f && distance > 0.14f) ||
         (distance > 0.10f && overlap < 0.20f) ||
@@ -212,9 +212,8 @@ bool ObstacleTracker::CanStartTrack(const DetectionItem& detection) const
     if (detection.score >= 0.45f) return true;
     if (detection.class_id == semantic::PERSON) return detection.score >= 0.08f;
     if (semantic::ModelClassCount() == 25) {
-        // Match the decoder thresholds for indoor ROD25 obstacles. Weak tracks
-        // still need repeated hits before output, so one noisy response cannot
-        // immediately trigger navigation.
+        // 与室内 ROD25 解码阈值衔接。弱候选仍需连续命中才允许输出，
+        // 因此一次量化噪声不会立即生成轨迹并触发避障。
         if (detection.raw_class_id == 17 || detection.raw_class_id == 23) {
             return detection.score >= 0.16f;  // bench / chair
         }
@@ -497,9 +496,8 @@ void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
         const bool inactive_view_hold = !track.visible_in_current_roi &&
                                         timestamp_ms - track.last_seen_ms <= 250;
         if (!track.matched_current_frame && !inactive_view_hold) continue;
-        // Never draw a one-frame proposal. Two observations from the same ROI
-        // cost only about 60 ms with alternating views and remove most phantom
-        // boxes produced by one quantized head fluctuation.
+        // 不绘制仅出现一帧的候选。双 ROI 交替时，同一 ROI 的两次观测间隔很短，
+        // 等待第二次命中可过滤大部分由量化 head 瞬时波动产生的幽灵框。
         if (track.hits < kMinConfirmedHits) continue;
         if (track.item.class_id == semantic::PERSON &&
             track.item.score < 0.11f && track.hits < 3) continue;

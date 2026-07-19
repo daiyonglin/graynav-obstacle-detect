@@ -63,19 +63,29 @@ private:
         float score;
     };
 
+    /** 计算轨迹与检测的 IoU、中心、尺度和类别综合关联分数，并拒绝突变。 */
     float MatchScore(const Track& track, const DetectionItem& detection) const;
+    /** 判断局部肢体/躯干候选是否可维持一条已经存在的 person 轨迹。 */
     bool IsPersonPartBridge(const Track& track, const DetectionItem& detection) const;
+    /** 应用类别专用阈值和几何质量门限，决定候选能否创建新轨迹。 */
     bool CanStartTrack(const DetectionItem& detection) const;
+    /** 当前轨迹中心是否位于本帧推理 ROI，用于区分真正丢失与未观测。 */
     bool IsVisibleInRoi(const Track& track, const std::array<int, 4>& roi) const;
+    /** 以当前测距和类别证据初始化一条尚未确认的新轨迹。 */
     void StartTrack(const DetectionItem& detection, int frame_id, int64_t timestamp_ms);
+    /** 更新已匹配轨迹的框、分数、类别、距离、速度和生命周期。 */
     void UpdateTrack(Track* track, const DetectionItem& detection,
                      int frame_id, int64_t timestamp_ms);
+    /** 对 25 类证据做衰减累积和 1.2 倍切换滞回。 */
     void UpdateClassEvidence(Track* track, const DetectionItem& detection);
+    /** 以真实时间差更新距离/径向速度，并计算可靠 TTC。 */
     void UpdateRangeState(Track* track, const DetectionItem& detection, int64_t timestamp_ms);
+    /** 只老化当前 ROI 可见却未匹配的轨迹，并删除超时目标。 */
     void AgeUnmatchedTracks(const std::vector<int>& matched_tracks,
                             const std::array<int, 4>& roi,
                             int frame_id,
                             int64_t timestamp_ms);
+    /** 发布通过连续命中和可见性检查的稳定目标，供规划和显示使用。 */
     void RebuildStableResult(const DetectionResult& raw_result, int64_t timestamp_ms);
 
     std::array<int, 2> image_shape_;

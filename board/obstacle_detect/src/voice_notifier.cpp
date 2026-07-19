@@ -24,8 +24,8 @@ const std::vector<uint8_t> kSyn6288Query = {0xFD, 0x00, 0x02, 0x21, 0xDE};
 const uint8_t kPromptPrefix[] = {0x5B, 0x76, 0x38, 0x5D, 0x5B, 0x74, 0x35, 0x5D};
 const uint8_t kPromptClear[] = {0xD6, 0xB1, 0xD0, 0xD0};
 const uint8_t kPromptSlow[] = {0xBC, 0xF5, 0xCB, 0xD9};
-// A single-character emergency prompt finishes quickly and cannot be
-// continuously restarted by repeated STOP decisions.
+// “停下”的 GBK 两字节序列。使用完整短词而非单字“停”，事务完成和动作保持
+// 由工作线程控制，不能通过缩短文本来掩盖重复发送或半帧问题。
 const uint8_t kPromptStop[] = {0xCD, 0xA3, 0xCF, 0xC2};
 const uint8_t kPromptLeft[] = {0xD7, 0xF3, 0xD7, 0xAA};
 const uint8_t kPromptRight[] = {0xD3, 0xD2, 0xD7, 0xAA};
@@ -38,7 +38,7 @@ const std::vector<uint8_t> kFixedLeftFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD7
 const std::vector<uint8_t> kFixedRightFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD3, 0xD2, 0xD7, 0xAA, 0x86};
 const std::vector<uint8_t> kFixedFaultFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD2, 0xEC, 0xB3, 0xA3, 0xD4};
 
-// Reads a string environment variable with an explicit fallback.
+// 读取字符串运行参数；默认值与 scripts/run.sh 保持一致。
 std::string getenv_string(const char* name, const std::string& fallback)
 {
     const char* value = std::getenv(name);
@@ -48,7 +48,7 @@ std::string getenv_string(const char* name, const std::string& fallback)
     return std::string(value);
 }
 
-// Reads an integer environment variable with an explicit fallback.
+// 读取整数运行参数；具体安全下限在 InitializeFromEnv 中统一收紧。
 int getenv_int(const char* name, int fallback)
 {
     const char* value = std::getenv(name);
@@ -58,7 +58,7 @@ int getenv_int(const char* name, int fallback)
     return std::atoi(value);
 }
 
-// Reads a boolean environment variable using common true-like first characters.
+// 兼容 1/y/Y/t/T 的布尔运行参数。
 bool getenv_bool(const char* name, bool fallback)
 {
     const char* value = std::getenv(name);
@@ -69,7 +69,7 @@ bool getenv_bool(const char* name, bool fallback)
            value[0] == 't' || value[0] == 'T';
 }
 
-// Maps user-specified tty baud values to Linux termios constants.
+// tty 调试后端的波特率映射；生产路径使用 A1 官方 UART API。
 speed_t baud_to_termios(int baud)
 {
     switch (baud) {
@@ -321,11 +321,11 @@ bool VoiceNotifier::InitializeFromEnv()
                   << std::endl;
     }
 
-    // RX is never discarded in production. The protocol worker continuously
-    // consumes 0x41/0x45/0x4A/0x4E/0x4F after it starts.
+    // 生产模式不主动丢弃 RX；工作线程启动后持续消费 0x41/0x45/0x4A/0x4E/0x4F，
+    // 防止旧状态字节滞留并污染后续语音事务。
     protocol_started_time_ = std::chrono::steady_clock::now();
-    // Status-query replies are not reliable on every SYN6288 carrier board.
-    // Start ready to speak and use RX status as optional confirmation.
+    // 不同 SYN6288 载板的状态查询回传并不完全一致，因此初始按可发送处理，
+    // RX 状态只作为辅助确认，不能成为阻塞持续播报的唯一条件。
     module_state_ = ModuleState::Idle;
     last_sent_time_ = std::chrono::steady_clock::now();
 
@@ -345,7 +345,7 @@ bool VoiceNotifier::OpenA1UartApi(int baud)
         return false;
     }
 
-    // Official A1 UART API uses UART_TX0/RX0; configure PIN0/PIN2 to that mux.
+    // A1 官方 UART API 使用 UART_TX0/RX0，将 PIN0/PIN2 配置到对应复用功能。
     if (gpio_set_alternate(gpio_, GPIO_PIN_0, GPIO_AF_INPUT_NONE, GPIO_AF_OUTPUT_UART_TX0) != GPIO_SUCCESS) {
         std::cout << "[VOICE][WARN] gpio_set_alternate TX0 failed." << std::endl;
         return false;
@@ -430,10 +430,8 @@ bool VoiceNotifier::SendBytes(const std::vector<uint8_t>& bytes)
 
     if (backend_ == Backend::A1UartApi) {
         if (uart_ == nullptr) return false;
-        // This A1 UART driver/module combination has been verified with
-        // byte-paced writes. A whole-frame API call is acknowledged as 0x45
-        // by the attached SYN6288 board, so preserve the module's required
-        // inter-byte timing while keeping the UART handle persistent.
+        // 当前 A1 UART 驱动与 SYN6288 组合已验证必须按字节节拍发送。整帧一次写入
+        // 会使模块返回 0x45，因此保持 UART 句柄常开，并在字节间插入规定延时。
         const size_t chunk_size = byte_gap_us_ > 0 ? 1 : kA1UartFifoBytes;
         for (size_t offset = 0; offset < bytes.size(); offset += chunk_size) {
             const size_t chunk = std::min(chunk_size, bytes.size() - offset);
@@ -554,9 +552,8 @@ bool VoiceNotifier::QueryBusyState(uint8_t* value)
     if (value == nullptr) return false;
     *value = 0;
 
-    // The module may have already emitted an asynchronous 0x4F after the
-    // previous phrase. Consume only meaningful state bytes; ACK bytes and
-    // electrical noise must not be mistaken for a busy/idle answer.
+    // 上一句结束后模块可能已异步返回 0x4F。这里只消费有效状态字节，
+    // ACK 或线路噪声不得被误判为本次查询的忙/闲结果。
     const auto scan_state = [this, value](int timeout_ms) {
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::milliseconds(timeout_ms);
@@ -707,9 +704,8 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
     std::string pre_detail;
     last_tx_detail_ = "not_sent";
     if (interrupt_current) {
-        // A rejected optional cancel frame must never suppress the actual
-        // navigation instruction. Directly send the newest action unless
-        // pre-stop is explicitly enabled for a verified module revision.
+        // 可选取消帧被拒绝时绝不能抑制真正的导航指令。除非已验证的模块版本
+        // 显式启用 pre-stop，否则直接发送最新动作帧。
         if (pre_stop_) {
             const bool stop_ok = SendBytes(kSyn6288Stop);
             usleep(static_cast<useconds_t>(recover_wait_ms_) * 1000);
@@ -798,9 +794,8 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
         }
         const std::string failed_detail = last_tx_detail_;
         if (attempt < retry_count_) {
-            // A 0x45 means the speech frame itself must be resent. Sending a
-            // stop frame here can also be rejected and previously left the
-            // module permanently silent.
+            // 0x45 表示语音帧接收失败，应重发原语音帧；此处再发停止帧也可能被拒绝，
+            // 并曾导致模块保持静默，因此不在失败恢复路径插入额外停止命令。
             usleep(last_rx_code_ == 0x45 ? 120000 : 180000);
             previous_failure = failed_detail + ",direct_resend";
         }
@@ -926,9 +921,8 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sent_time_).count());
     const bool changed_action = key != last_key_;
     const bool risk_upgrade = changed_action && action != "clear";
-    // Keep the UART frame outside the preceding two-character phrase. Safety
-    // actions use a shorter bound, but are not injected mid-frame: SYN6288
-    // otherwise accepts the UART write at the driver while discarding speech.
+    // 新 UART 帧必须避开前一句短语的事务窗口。高优先级安全动作可缩短等待，
+    // 但不能从帧中间插入，否则驱动层虽写入成功，SYN6288 仍可能丢弃语音。
     const bool safety_action = action == "stop" || action == "system_fault";
     int minimum_gap_ms = safety_action ? std::min(tx_gap_ms_, 600) : tx_gap_ms_;
     if ((last_key_ == "stop" || last_key_ == "system_fault") && action != last_key_) {
@@ -1070,14 +1064,13 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
     if (code == 0x4F) {
         ++rx_idle_count_;
         status_query_pending_ = false;
-        // In paced compatibility mode RX completion bytes can belong to the
-        // previous phrase. Use the deterministic phrase timer so a late 0x4F
-        // cannot truncate a newly selected safety prompt.
+        // 节拍兼容模式下，RX 完成字节可能属于上一句。用确定性短语计时器界定事务，
+        // 防止迟到的 0x4F 提前结束刚选中的安全提示。
         if (!require_ack_) return;
         if (tx_in_flight_) {
             if (module_state_.load() != ModuleState::Speaking) {
-                // A preempted phrase may report IDLE before the replacement
-                // frame reports 0x41. It must not complete the new transaction.
+                // 被抢占短语可能先返回 IDLE，而替代帧尚未返回 0x41；
+                // 这个旧 IDLE 不能被当作新事务完成。
                 if (diagnostic_) {
                     std::cout << "[VOICE][WARN] stale_idle_while_waiting_ack seq="
                               << transaction_seq_.load() << std::endl;
@@ -1132,8 +1125,8 @@ bool VoiceNotifier::StartProtocolSpeech(int frame_id, const std::string& action,
     status_query_pending_ = false;
     transaction_tx_time_ = last_frame_tx_time_;
     transaction_accept_time_ = last_frame_tx_time_;
-    // ACK is advisory in compatibility mode. The module may omit 0x41/0x4F,
-    // therefore playback is completed by either RX idle or a phrase timer.
+    // 兼容模式中 ACK 只作辅助；模块可能不返回 0x41/0x4F，因此播放事务由
+    // RX 空闲或短语计时器任一条件完成，保证无回传时仍能持续前进。
     module_state_ = require_ack_ ? ModuleState::WaitAccept : ModuleState::Speaking;
     ++transaction_seq_;
     ++tx_count_;
@@ -1236,9 +1229,8 @@ void VoiceNotifier::HandleProtocolTimeouts()
     if (state == ModuleState::Speaking && tx_in_flight_) {
         const int age = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_tx_time_).count());
-        // Short navigation prompts complete in well under this bound. This
-        // fallback guarantees forward progress when status RX is absent or
-        // the carrier board reports spurious 0x45 bytes.
+        // 导航短词会在该上限内完成。即使 RX 状态缺失或载板偶发 0x45，
+        // 超时兜底也会结束当前事务，避免发送状态永久卡死。
         const int timed_completion_ms = transaction_frame_.size() <= 8 ? 650 : 900;
         if (!require_ack_ && age >= timed_completion_ms) {
             ++rx_completed_count_;

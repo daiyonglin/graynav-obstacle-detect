@@ -243,9 +243,8 @@ float RangingEstimator::NearFieldUpperBound(const DetectionItem& item) const
     const bool clips_both_horizontal_borders =
         item.box[0] <= 3.0f &&
         item.box[2] >= static_cast<float>(image_shape_[0] - 4);
-    // A broad box clipped by both image borders has no trustworthy physical
-    // width. Do not convert this regression artifact into a precise 0.45 m
-    // emergency measurement.
+    // 同时贴住左右边界的宽框没有可信物理宽度，通常是回归饱和伪框。
+    // 此类框只作为风险线索，不把它强行转换成 0.45m 的精确紧急距离。
     if (clips_both_horizontal_borders || wr > 0.90f || item.quality == "coarse") {
         return -1.0f;
     }

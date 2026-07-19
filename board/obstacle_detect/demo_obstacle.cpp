@@ -254,9 +254,8 @@ struct SystemHealth {
                                         resource_fault_frames == 0 && low_memory_frames == 0 &&
                                         candidate_burst_frames == 0;
             healthy_recovery_frames = recovery_clean ? healthy_recovery_frames + 1 : 0;
-            // A covered lens can briefly expose a bright edge and produce a
-            // few nominal frames. Require sustained healthy imagery before
-            // allowing CLEAR/navigation speech again.
+            // 手移开镜头的瞬间可能只露出一道亮边，使单帧统计暂时恢复正常。
+            // 因此必须连续获得足够多健康帧后，才解除故障并重新允许正常导航播报。
             if (healthy_recovery_frames >= cover_recovery_frames) {
                 fault_latched = false;
                 healthy_recovery_frames = 0;
@@ -666,8 +665,7 @@ std::string action_display_text(const std::string& action)
     return to_upper_text(action);
 }
 
-// Converts the planner action into separate speed and steering suggestions so
-// the UART summary can be read directly during a demonstration.
+// 将规划器动作拆成“速度建议”和“方向建议”，使演示串口无需解释内部枚举即可阅读。
 void action_guidance_text(const std::string& action,
                           std::string& speed,
                           std::string& direction)
@@ -690,7 +688,7 @@ void action_guidance_text(const std::string& action,
     }
 }
 
-// Produces stable public-facing names for the three scored fault categories.
+// 将内部健康状态映射为稳定的三类公开异常名称，直接对应赛题异常处理评分项。
 std::string fault_type_text(const SystemHealth& health)
 {
     if (health.state == "sensor") return "CAMERA_DATA";
@@ -711,8 +709,8 @@ std::string fault_reason_text(const std::string& reason)
     return to_upper_text(reason);
 }
 
-// Prints one concise fault record. Detailed counters remain available through
-// A1_OUTPUT_SERIAL_DIAG=1, while normal demonstrations see only this summary.
+// 输出一条简洁故障记录；详细计数仅在 A1_OUTPUT_SERIAL_DIAG=1 时打印，
+// 正常演示界面只保留故障类型、保护动作、语音和恢复策略等关键信息。
 void print_fault_packet(int frame_id,
                         const SystemHealth& health,
                         bool output_serial_diagnostics)

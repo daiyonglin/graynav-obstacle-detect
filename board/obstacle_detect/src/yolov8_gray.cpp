@@ -88,9 +88,8 @@ bool apply_adaptive_gray_lut(ssne_tensor_t* tensor, int frame_id)
     const float dark_mean = getenv_float("A1_ADAPTIVE_GRAY_DARK_MEAN", 75.0f);
     if (mean >= dark_mean || stddev < 5.0f) return false;
 
-    // Four-by-four clipped local histogram equalization preserves facial and
-    // obstacle contours in a dark background. Blending avoids hard tile seams
-    // and keeps the enhanced distribution close to grayscale training data.
+    // 4x4 分块的裁剪局部直方图均衡用于恢复暗背景中的人体和障碍轮廓；
+    // 再与原灰度图混合，避免分块接缝并限制分布偏移，保持接近训练灰度域。
     const int tiles_x = 4;
     const int tiles_y = 4;
     const int blend = std::max(20, std::min(80,
@@ -408,9 +407,8 @@ float distance_confidence_for_source(const std::array<float, 4>& box,
     return clampf(confidence, 0.0f, 1.0f);
 }
 
-// ROD25 does not contain a generic table or cardboard-box class. These raw
-// classes are the closest trained indoor rigid-object appearances and may
-// provide generic-obstacle evidence after temporal checks.
+// ROD25 没有独立的桌子或纸箱类别。以下原始类与室内刚性障碍外观最接近，
+// 只有通过时序稳定和几何质量检查后，才允许作为 generic_obstacle 证据。
 bool is_indoor_rigid_raw_class(int raw_cls)
 {
     if (obstacle::semantic::ModelClassCount() != 25) return false;
@@ -434,9 +432,8 @@ std::string quality_from_box(const std::array<float, 4>& box,
     const float height_ratio = box_height_ratio(box, img_h);
     const int touch = count_touch_borders(box, img_w, img_h);
 
-    // A box clipped to both horizontal image borders is not a reliable object
-    // extent. Quantized DFL outliers commonly saturate this way and otherwise
-    // become a high-confidence, full-width false obstacle.
+    // 同时贴住左右边界的框不能代表可靠目标范围。量化后的 DFL 异常值常以
+    // 这种方式饱和，若不拦截会形成高置信度、全幅宽的伪障碍框。
     const bool clips_both_horizontal_borders =
         box[0] <= 3.0f && box[2] >= static_cast<float>(img_w - 4);
     if (clips_both_horizontal_borders ||
@@ -451,9 +448,8 @@ std::string quality_from_box(const std::array<float, 4>& box,
         return "coarse";
     }
 
-    // Wide, low-detail obstacle boxes often come from shelves, screens, rails,
-    // or merged background structures. Keep them available as navigation
-    // evidence, but mark them coarse so NMS/tracker prefer finer object boxes.
+    // 宽且细节不足的框常来自货架、屏幕、栏杆或合并背景结构。它们仍可作为
+    // 导航风险线索，但必须标为 coarse，使 NMS 和跟踪优先选择细粒度目标框。
     const bool indoor_rigid = is_indoor_rigid_raw_class(raw_cls);
     if (obstacle::semantic::IsObstacleClass(display_cls) &&
         !obstacle::semantic::IsFurnitureLikeSemantic(display_cls) &&
@@ -576,8 +572,7 @@ bool reject_size_distance_for_box(const std::array<float, 4>& box,
 
     (void)raw_class_id;
 
-    // A partial target that touches borders or covers most of the image is not
-    // a clean size-prior observation; keep it as a nearfield/risk cue instead.
+    // 贴边或覆盖大部分画面的局部目标不满足尺寸先验假设，只保留为近场/风险线索。
     if (area_ratio > 0.45f || width_ratio > 0.82f || height_ratio > 0.82f ||
         touch >= 2 || bottom_ratio > 0.92f) {
         return true;
@@ -676,7 +671,7 @@ inline float read_branch_value(const BranchView& b, int c, int y, int x)
     return b.data[c * b.h * b.w + y * b.w + x];
 }
 
-// Decodes one DFL side only after the anchor passed the class threshold.
+// 仅对已通过分类阈值的 anchor 解码一条 DFL 边，避免为全部网格执行 softmax。
 float decode_dfl_side(const BranchView& branch, int side, int y, int x)
 {
     float max_logit = -FLT_MAX;
@@ -1328,8 +1323,8 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
         const bool wide_flat_midframe =
             width_ratio > 0.42f && height_ratio < 0.55f &&
             bottom_ratio < 0.88f && width_ratio > height_ratio * 1.05f;
-        // Do not reject ordinary person boxes based on indoor aspect ratio.
-        // Only remove extremely weak, wide background responses.
+        // 不按室内人体框的长宽比过滤普通 person，只剔除极弱且异常宽的背景响应，
+        // 以保留腿部、躯干等不完整人体观测。
         if (item.class_id == DISPLAY_PERSON && score < 0.35f &&
             width_ratio > 0.65f && wide_flat_midframe) {
             return;

@@ -200,8 +200,8 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
 
         const bool wide = item.sector == "wide";
         if (wide) {
-            // Coarse wide detections are retained as uncertainty evidence but
-            // cannot block all corridors or trigger STOP by themselves.
+            // 粗粒度宽框仅作为“不确定风险”保留，不能单独封死全部走廊，
+            // 也不能在缺少近场可靠证据时直接触发 STOP。
             if (item.quality == "coarse" || item.distance_confidence < 0.25f) {
                 uncertain_hazard = true;
                 continue;

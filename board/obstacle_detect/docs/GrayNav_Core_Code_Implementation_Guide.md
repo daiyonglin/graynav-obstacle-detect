@@ -40,6 +40,28 @@ smart_software/src/app_demo/obstacle_detect/ssne_ai_demo
 | `scripts/run.sh` | 板端默认参数、进程监督重启 | 环境变量和 supervisor 循环 |
 | `scripts/run_voice_both.sh` | OSD+语音模式及 UART 接线说明 | 语音运行参数 |
 
+### 2.1 建议阅读顺序与调用边界
+
+理解代码时不要从单个算法文件孤立阅读，建议按实际调用顺序展开：
+
+1. 从 `CMakeLists.txt` 确认本次烧录使用的模型、类别数、输入通道和语音开关；
+2. 阅读 `scripts/run.sh`，确认运行参数覆盖了哪些 C++ 默认值；
+3. 进入 `demo_obstacle.cpp::main()`，观察各模块的初始化、每帧调用顺序和异常覆盖关系；
+4. 沿 `IMAGEPROCESSOR -> YOLOV8GRAY -> ObstacleTracker` 阅读图像、推理和时序处理；
+5. 注意 `ObstacleTracker::Update()` 内部继续调用 `RangingEstimator` 和 `AvoidancePlanner`；
+6. 最后阅读 `VISUALIZER` 与 `VoiceNotifier`，两者只消费最终结果，不重新做检测或规划。
+
+模块之间的数据所有权约定如下：
+
+| 阶段 | 输入 | 输出 | 不允许做的事 |
+|---|---|---|---|
+| 采集 | SC132GS | 完整 Y8 tensor | 不在采集端固定裁掉上下视野 |
+| 检测 | 完整 Y8 tensor | 全图坐标 `DetectionResult` | 不保留上一帧 raw tensor 充当新结果 |
+| 跟踪 | 当前 ROI 检测 | 稳定轨迹 | 不凭空创造模型完全没有响应的类别 |
+| 测距 | 当前目标框与类别 | 带方差的距离证据 | 不把 coarse 横框输出为精确米数 |
+| 规划 | 稳定目标和保守距离 | 唯一 `AvoidanceDecision` | 不直接控制 UART 或 OSD 硬件 |
+| 输出 | 最终决策 | OSD、串口、语音 | 不分别重新推导另一套动作 |
+
 ## 3. 全系统共享数据结构
 
 ### 3.1 `DetectionItem`
@@ -286,12 +308,14 @@ score = 0.52*IoU + 0.28*center_score + 0.12*size_similarity + 0.08*class_score
 
 ### 8.4 轨迹创建和删除
 
-- 一般目标分数至少 0.22；person 可放宽到 0.16；
+- 一般目标分数至少 0.22；person 可放宽到 0.08；
+- bench/chair 可放宽到 0.16，dustbin/electrical box 为 0.18，barrel/rack 为 0.20；
 - coarse 或不合理宽框不能创建轨迹；
 - 低置信轨迹至少命中 2 次才发布；
-- 高置信目标可更快显示；
+- person 低于 0.11 时至少命中 3 次才发布；
 - 仅当前 ROI 覆盖的轨迹未匹配时才增加 `missed`；
-- 目标在当前可见 ROI 中消失后迅速删除；另一个 ROI 内仅短暂保留且不绘制旧框。
+- 当前可见 ROI 内连续丢失超过 1 次即删除，或最后观测超过 700ms 删除；
+- 非当前 ROI 的轨迹最多短暂保留约 250ms，保留期间不允许形成长期残留框。
 
 ## 9. 单目测距实现
 
@@ -368,20 +392,22 @@ TTC = safe_distance / approach_speed
 
 目标按 `lateral_m` 和 `sector` 分配到 left/center/right。每条走廊保存最近保守距离和最小 TTC。可靠 wide 目标同时影响三条走廊；coarse/低置信 wide 目标只增加不确定性，不允许单独触发全域 STOP。
 
-上下两个 ROI 必须在最近 500ms 内均被观察，侧向走廊才标记 `verified`。这是为了避免只看上半帧就错误宣称地面侧方安全。
+上下两个 ROI 在最近 500ms 内均被观察时，三条走廊标记为 `verified`。该标志只用于“中央受阻后选择哪一侧安全走廊”；若障碍明确位于单独一侧，系统会立即给出向相反方向转向的建议，不等待双 ROI 验证。
 
 ### 10.2 动作规则
 
 | 条件 | 动作 |
 |---|---|
-| 可靠 wide 近障、中心 TTC<1.5s、中心近障且两侧均未验证安全 | `stop` |
-| 中心/右侧受阻，左侧已验证且净空明显更大 | `turn_left` |
-| 中心/左侧受阻，右侧已验证且净空明显更大 | `turn_right` |
-| 侧边近障、任一走廊 warning、低质量不确定障碍 | `slow` |
+| 可靠 wide 近障、中心 TTC 过短、中心近障且无已验证可绕行侧 | `stop` |
+| 仅右侧近障/警告 | 立即 `turn_left` |
+| 仅左侧近障/警告 | 立即 `turn_right` |
+| 中心或右侧受阻，左侧已验证且净空明显更大 | `turn_left` |
+| 中心或左侧受阻，右侧已验证且净空明显更大 | `turn_right` |
+| 多侧风险、低质量不确定障碍或只有 warning 且方向不明确 | `slow` |
 | 连续确认无可靠风险 | `clear` |
 | 任一系统健康故障 | 主循环覆盖为 `system_fault` |
 
-侧方安全要求净空大于 1.35m，且比另一侧至少多 0.25m。侧方不确定时不能输出转向，只能减速或停下。
+中央受阻后的候选侧方走廊要求净空大于 `1.45m`，且比另一侧至少多 `0.25m`。这一严格条件不限制“单独侧方障碍直接反向转向”的快速规则。
 
 ### 10.3 动作滞回
 
@@ -402,10 +428,10 @@ TTC = safe_distance / approach_speed
 
 | 层 | 类型 | 内容 |
 |---:|---|---|
-| 0 | quadrangle | 顶部风险条/保留层 |
+| 0 | quadrangle | 已停用的旧风险条，当前保持为空 |
 | 1 | RLE image | STOP/SLOW/LEFT/RIGHT/CLEAR |
 | 2 | RLE image | C_NEAR、L_WARN、WIDE_NEAR 等辅助信息 |
-| 3 | quadrangle | 三走廊状态/保留层 |
+| 3 | quadrangle | 预留层，当前保持为空 |
 | 4 | quadrangle | 最多 6 个检测框 |
 
 检测框层每次绘制前清空，因此目标消失不会留下旧框。动作和信息纹理只在资源名变化时刷新，以降低 OSD DMA 操作。若某个纹理层加载失败，本次运行禁用该层，避免每帧失败拖慢检测。
@@ -471,7 +497,7 @@ FD | length_hi | length_lo | 01 | parameter | GBK payload | XOR checksum
 
 ### 13.1 摄像头/数据异常
 
-检测证据：连续取帧失败、黑色遮挡、强过曝、极低方差纯色、多帧采样哈希不变。达到门限后锁存 `state=sensor`，正常决策被替换为 `system_fault`。恢复要求连续 30 帧全部健康。
+检测证据：连续取帧失败、黑色遮挡、强过曝、极低方差纯色、多帧采样哈希不变，以及由全图/中心区域动态范围、纹理和边缘联合得到的遮挡分数。默认连续 3 帧达到遮挡分数门限后锁存 `state=sensor`，正常决策被替换为 `system_fault`；恢复要求连续 18 帧全部健康。对应参数为 `A1_COVER_SCORE_THRESHOLD`、`A1_COVER_TRIGGER_FRAMES` 和 `A1_COVER_RECOVERY_FRAMES`。
 
 ### 13.2 推理异常
 
@@ -590,7 +616,134 @@ flowchart TD
 4. 只有 planner 产生正常动作，只有 SystemHealth 可覆盖为 `system_fault`；
 5. OSD、串口和语音不得各自重新计算动作；
 6. coarse 框不得输出伪精确距离或单独触发全域 STOP；
-7. 未验证侧方安全时不得输出 LEFT/RIGHT；
+7. 中央阻塞时只有已验证侧方走廊可用于选择 LEFT/RIGHT；单独侧方障碍可立即提示向反方向转向；
 8. UART 发送不得在推理主线程执行；
 9. 历史模型不得被 CMake 安装进最终镜像；
 10. 更换 m1model 后必须重新验证输入通道、类别数、head shape/layout 和 Python/C++ 解码一致性。
+
+## 18. 逐文件关键函数说明
+
+本节用于从函数层面定位实现。行号会随修改变化，因此以“文件 + 符号名”为稳定索引。
+
+### 18.1 `demo_obstacle.cpp`：系统编排和安全闭环
+
+| 符号 | 输入/状态 | 实现职责 |
+|---|---|---|
+| `env_flag_enabled/env_int_value/env_float_value/env_string_value` | 环境变量 | 读取运行参数并实施上下界保护，防止脚本错误值破坏算法 |
+| `analyze_light_stats` | 完整 Y8 tensor | 以步长采样计算均值、方差、暗/亮比例、分位动态范围、边缘比例、中心区域统计和帧哈希 |
+| `SystemHealth::UpdateData` | `LightStats` | 累计遮挡和冻结证据；遮挡计数封顶，恢复计数独立 |
+| `SystemHealth::UpdateResource` | FPS/P95/候选数 | 检测低帧率、低内存和候选爆炸 |
+| `SystemHealth::RefreshState` | 所有异常计数 | 锁存故障、连续健康恢复，并生成 `sensor/ai/resource` 与具体原因 |
+| `SystemHealth::SafeDecision` | 当前故障 | 生成最高优先级 `system_fault`，不允许普通 planner 覆盖 |
+| `print_human_packet` | 稳定结果和最终决策 | 输出速度、方向、障碍物、距离、风险五个可读字段 |
+| `print_fault_packet` | `SystemHealth` | 输出故障类型、原因、STOP 保护、异常语音和自动恢复策略 |
+| `main` | 全系统 | 初始化、逐帧编排、异常覆盖、输出、释放和退出码管理 |
+
+`main()` 中最重要的顺序约束是：必须先得到健康状态，再决定是否把 planner 结果覆盖为 `system_fault`；OSD、串口和语音都在覆盖之后消费同一个 `health_decision`。如果把语音更新提前，遮挡期间就可能继续播报“直行”。
+
+### 18.2 `pipeline_image.cpp`：传感器完整帧
+
+| 符号 | 关键行为 |
+|---|---|
+| `IMAGEPROCESSOR::ConfigureAndOpen` | 配置输入宽高、裁剪起点、Y8 格式、online pipeline 和可选首帧 dump |
+| `IMAGEPROCESSOR::GetImage` | 从 pipeline 取得当前 sensor tensor，并检查宽、高和数据有效性 |
+| `IMAGEPROCESSOR::Restart` | 关闭并重新建立 pipeline，供连续采集失败时自动恢复 |
+| `IMAGEPROCESSOR::Release` | 成对释放图像和 pipeline 资源 |
+
+采集模块输出的是完整 `720x1280` 画面。模型的 UPPER/LOWER 选择只能发生在 `YOLOV8GRAY::Preprocess()`，否则 Aurora 坐标、遮挡检测和双 ROI 跟踪都会失去共同参考系。
+
+### 18.3 `yolov8_gray.cpp`：模型前后处理
+
+| 符号 | 关键行为 |
+|---|---|
+| `YOLOV8GRAY::Initialize` | 加载 m1model、读取归一化参数、创建 1 通道输入 tensor、建立双 ROI、校验编译契约 |
+| `apply_adaptive_gray_lut` | 只在暗光且仍有纹理时执行 4x4 局部均衡和受限混合 |
+| `YOLOV8GRAY::Preprocess` | 选择 ROI，执行 crop、letterbox、114 padding、模型 normalize 和可选增强 |
+| `make_branch_view` | 将 A1 输出 tensor 包装为无拷贝 HWC/CHW 访问视图 |
+| `pair_head_branches` | 按网格和通道自动配对 25 类 head 与 64 通道 DFL head |
+| `validate_paired_heads` | 强制验证 48/24/12 网格、stride 8/16/32、元素数和布局 |
+| `decode_dfl_side` | 对单边 16 个 bin 做稳定 softmax 和期望解码 |
+| `YOLOV8GRAY::MapBoxToOriginalImage` | 去 padding、除 scale、加 ROI 原点并裁剪到全图 |
+| `YOLOV8GRAY::Postprocess` | 分类预筛、按需 DFL、语义映射、几何审计、NMS 和粗框抑制 |
+| `YOLOV8GRAY::Predict` | 交替视图，依次调用预处理、NPU、取 6 输出和后处理，并记录各阶段耗时 |
+
+检测器内仍保留少量距离辅助函数，用于候选质量和串口诊断；最终进入规划的距离会在 `ObstacleTracker::Update()` 中由独立 `RangingEstimator::Estimate()` 重新计算。调整正式测距算法时应修改 `ranging.cpp`，不能只改检测器中的辅助估算。
+
+### 18.4 `semantic_config.cpp`：类别唯一真源
+
+该文件保存三类内容：
+
+1. 25 个 head 通道对应的 ROD25 原始标签顺序；
+2. 原始类到 8 个导航语义的映射和 `road` 屏蔽规则；
+3. 候选阈值、风险权重、距离阈值、走廊边界和宽框比例的运行参数入口。
+
+`RawLabel()` 用于诊断模型原始输出；`SemanticLabel()` 用于导航显示；两者不能混用。比如室内模型错误输出 car 时，可保留 `raw=car` 供排查，同时将动作层按 `vehicle/bicycle` 或通用实体风险处理，而不是伪造模型识别结果。
+
+### 18.5 `utils.cpp` 与 `osd-device.cpp`：NMS 和 Aurora 输出
+
+`MultiTargetNMS()` 先按风险、距离、质量和置信度排序，再调用 `should_suppress_for_multi_nms()` 判断是否同一实体。其特殊规则保护横向分离目标和粗框内部的小框，解决“多人/多椅子被一个大横框吞掉”的问题。
+
+`VISUALIZER::Draw()` 只从稳定结果选择最多 6 个框；每次刷新先清空 layer 4，再画本帧框。动作与风险文字通过 `.ssbmp` 资源加载到 layer 1/2。`OsdDevice` 负责 LUT、DMA、RLE 图像层和 quadrangle 层的实际 A1 API 调用，上层不直接操作硬件句柄。
+
+### 18.6 `tracker.cpp`：从瞬时框到稳定目标
+
+`ObstacleTracker::Update()` 是后处理的时序入口，顺序固定为：
+
+```text
+当前检测测距
+  -> 枚举全部 track-detection 关联边
+  -> 按 MatchScore 全局降序做一对一匹配
+  -> 更新已匹配轨迹
+  -> 老化当前 ROI 中未匹配轨迹
+  -> 为剩余合格检测创建新轨迹
+  -> 发布稳定结果
+  -> 调用 AvoidancePlanner
+```
+
+`IsPersonPartBridge()` 仅在已有 person 轨迹时，将空间连续的腿部、手部或躯干候选作为维持证据；它不能在模型完全没有人体响应时创建 person。`UpdateRangeState()` 对距离和径向速度做真实时间步长滤波，并在远场使用逆深度中值抑制单帧跳远。`RebuildStableResult()` 决定哪些轨迹真正允许绘制和规划，是控制伪框与残留框的最后一道门。
+
+### 18.7 `ranging.cpp`：带不确定度的单目测距
+
+| 符号 | 输出证据 |
+|---|---|
+| `GroundEstimate` | 地面交点均值、由像素误差传播得到的 sigma、横向位置 |
+| `SizeEstimate` | 类别尺寸或局部人体宽度先验的均值和 sigma |
+| `NearFieldUpperBound` | 近场距离上界，不是精确测量 |
+| `Estimate` | 证据一致性检查、逆方差融合、保守距离和风险等级 |
+
+正式规划使用 `safe_distance_m = mean - sigma`。因此同样的均值下，框底不可靠、远场俯角小或类别尺寸变化大的目标会得到更小的保守距离或更低置信度，系统不会把不确定测量包装成虚假的高精度米数。
+
+### 18.8 `avoidance_planner.cpp`：唯一正常动作产生器
+
+`IsActionHazard()` 先屏蔽 road，并要求 building、traffic sign、pole、tree、electrical box 等场景结构具有近场几何证据。`AddToCorridor()` 将每条走廊压缩成最近距离、最小 TTC 和主风险目标。`Update()` 生成期望动作，`StabilizeAction()` 再完成风险升级、方向反转和风险解除的时间滞回。
+
+普通动作只能由此模块产生。任何检测、测距、OSD 或语音代码都不得自行把某个类别直接翻译为 LEFT/RIGHT/STOP，否则现场调参会出现多套互相冲突的策略。
+
+### 18.9 `voice_notifier.cpp`：非阻塞持续播报
+
+| 符号 | 职责 |
+|---|---|
+| `InitializeFromEnv` | 读取模式、波特率、节拍、重复周期和保持时间，打开 UART 并启动工作线程 |
+| `BuildFixedPromptFrame` | 为六个已验证短词返回固定 SYN6288 帧 |
+| `Update` | 将最新动作写入单槽邮箱；故障解除后实施 fault hold，STOP/转向后实施 follow-up hold |
+| `WorkerLoop` | 持续处理邮箱、发送事务、被动 RX 和超时，不阻塞主线程 |
+| `ShouldSend` | 判断动作变化、重复冷却和保持门控后是否应发送 |
+| `StartProtocolSpeech` | 建立一次 in-flight 语音事务并发送固定帧 |
+| `HandleProtocolTimeouts` | 在回传缺失或异常时用短语时长结束事务，保证状态机继续前进 |
+| `RecoverProtocol/ReopenBackend` | 仅在真实 UART 发送故障时关闭并重开后端 |
+| `Release` | 通知线程退出、join 工作线程并关闭 UART |
+
+当前生产配置不依赖 BUSY GPIO，也不把 ACK 作为持续播报的硬门槛。发送使用持久 UART 句柄和逐字节节拍，邮箱只保存最新动作，避免盲人听到已经过期的转向指令。
+
+## 19. 修改参数时的定位原则
+
+1. 目标根本未进入模型：检查完整帧、双 ROI、letterbox 和暗光输入，不先调 NMS；
+2. raw head 有目标但没有候选：检查 `semantic_config.cpp` 候选阈值和 head layout；
+3. 候选有但 NMS 后消失：检查 `MultiTargetNMS()` 与 saturated/coarse 过滤；
+4. NMS 后有但 Aurora 不显示：检查 tracker 命中次数、当前 ROI 可见性和 OSD layer 4；
+5. 框稳定但距离错误：检查相机高度/俯仰/FOV、ground/size 证据和 `distance_source`；
+6. 距离正确但动作错误：只检查 corridor 分类、阈值和 planner 滞回；
+7. 串口动作正确但语音错误：只检查 `VoiceNotifier` 邮箱、保持时间、固定帧和 UART 事务；
+8. 异常期间仍播正常动作：检查 `SystemHealth` 覆盖是否发生在三种输出之前。
+
+这种分层定位方式能避免通过降低检测阈值来修复测距，或通过语音冷却掩盖规划抖动。每次调整应同时记录 raw 类别、稳定 track、距离来源、planner reason 和最终 action，才能判断问题真正属于哪一层。

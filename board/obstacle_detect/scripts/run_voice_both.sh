@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# 语音与 OSD 联合演示入口。参数含义与 run.sh 完全一致；本脚本仅显式选择 both
+# 模式，确保检测主链路、Aurora 叠加和 SYN6288 行动播报同时工作。
+
 chmod +x ./ssne_ai_demo
 
 # Default hardware route for the official A1 UART API:

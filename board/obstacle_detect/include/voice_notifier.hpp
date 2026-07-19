@@ -69,82 +69,81 @@ private:
     /** 使用官方 A1 API 打开 UART_TX0/RX0，并把 PIN0/PIN2 切换到 UART 复用功能。 */
     bool OpenA1UartApi(int baud);
 
-    // Opens a Linux tty device path used as a fallback/debug UART backend.
+    /** 打开 Linux tty 设备，作为 UART1/USB 串口调试时的备用后端。 */
     bool OpenTtyDevice(const std::string& device, int baud);
 
-    // Configures an already-open tty as 8N1 raw UART.
+    /** 将已打开 tty 配置为 raw、8 data bits、1 stop bit、无校验和无流控。 */
     bool ConfigureTtyDevice(int baud);
 
     /** 按配置的字节间隔发送完整 SYN6288 帧，避免模块 FIFO/时序拒收。 */
     bool SendBytes(const std::vector<uint8_t>& bytes);
 
-    // Reopens the UART backend before a speech transaction if configured.
+    /** 发送失败后的受控后端重开；正常每条语音不重复初始化 UART。 */
     bool ReopenBackend();
 
-    // Reads and discards pending SYN6288 status bytes before a new transaction.
+    /** 调试/ACK 路径发送新事务前清理残留回传字节。 */
     void DrainRx(int timeout_ms);
 
-    // Reads one SYN6288 response byte from UART_TX0/RX0 or tty fallback.
+    /** 从 A1 UART RX0 或 tty 后端读取一个 SYN6288 状态字节。 */
     bool ReadResponseByte(uint8_t* value, int timeout_ms);
 
-    // Sends a SYN6288 frame and records receive/ACK status for diagnostics.
+    /** 发送完整帧并在启用 ACK 时解析 0x41/0x45，记录事务诊断状态。 */
     bool SendFrameWithStatus(const std::vector<uint8_t>& bytes, const char* tag);
 
-    // Queries SYN6288 busy/idle state with FD 00 02 21 DE.
+    /** 发送 FD 00 02 21 DE 状态查询帧，读取 0x4E 忙或 0x4F 空闲。 */
     bool QueryBusyState(uint8_t* value);
 
-    // Polls the software UART status channel until the SYN6288 reports idle.
+    /** 纯 UART 软件轮询空闲状态；生产兼容模式关闭主动查询。 */
     bool WaitUntilIdle(int timeout_ms, bool allow_unknown);
 
-    // Sends a short action prompt, optionally interrupting any previous speech.
+    /** 选择固定短词帧并发送；interrupt_current 仅表示安全动作优先级。 */
     bool SendPrompt(const std::string& action, bool interrupt_current);
 
-    // Applies action-change, stability, and cooldown gates before speech.
+    /** 旧兼容路径的稳定帧、动作变化和冷却门控。 */
     bool ShouldSend(const std::string& action, const std::string& key, std::string* reason);
 
-    // Commits cooldown state only after a frame has been accepted or blind-sent.
+    /** 语音事务完成后提交最后动作与完成时刻，后续冷却从这里开始计时。 */
     void CommitSent(const std::string& action, const std::string& key);
 
-    // Builds a frame-independent key so repeated identical states can be suppressed.
+    /** 将决策动作规范化成邮箱键，重复状态以同一键执行周期播报。 */
     std::string BuildVoiceKey(const DetectionResult& result,
                               const AvoidanceDecision& decision) const;
 
-    // Maps an avoidance action to the GBK payload used by the SYN6288 examples.
+    /** 把 clear/slow/stop/left/right/fault 映射为对应中文 GBK 负载。 */
     std::vector<uint8_t> BuildPromptPayload(const std::string& action) const;
 
-    // Encodes a GBK prompt into the SYN6288 binary command frame.
+    /** 按 FD+长度+命令+参数+GBK+XOR 生成 SYN6288 文本合成帧。 */
     std::vector<uint8_t> BuildSyn6288Frame(const std::vector<uint8_t>& payload) const;
 
-    // Returns a precomputed SYN6288 frame for the five short navigation prompts.
+    /** 返回离线核验的六种固定帧：直行、减速、停下、左转、右转、异常。 */
     std::vector<uint8_t> BuildFixedPromptFrame(const std::string& action) const;
 
-    // Plays a deterministic sequence to verify that the voice module accepts
-    // multiple UART commands after boot.
+    /** 启动自检依次发送五个导航词，用于脱离检测链路验证连续串口通信。 */
     void RunStartupSelfTest();
 
     /** 语音状态机主循环：收状态、处理超时、选择最新动作并启动一次原子事务。 */
     void WorkerLoop();
 
-    // Continuously drains and parses all status bytes currently in the RX FIFO.
+    /** 非阻塞排空 RX FIFO，并逐字节推进 SYN6288 事务状态机。 */
     void PumpRx();
 
-    // Advances the SYN6288 transaction state from one protocol status byte.
+    /** 解析 0x41/0x45/0x4A/0x4E/0x4F，并完成、重试或恢复当前事务。 */
     void HandleStatusByte(uint8_t code);
 
     /** 建立一次原子语音事务；提交后由 ACK/空闲码或兼容定时器判定播放完成。 */
     bool StartProtocolSpeech(int frame_id, const std::string& action, bool preempt);
 
-    // Handles ACK/playback timeouts, one retry, status query and resynchronization.
+    /** 处理 ACK/播放超时、兼容定时完成和必要的 UART 重同步。 */
     void HandleProtocolTimeouts();
 
-    // Reopens UART only after a complete protocol transaction has failed.
+    /** 仅在完整事务失败后关闭并重开 UART，避免正常播报期间反复复位硬件。 */
     void RecoverProtocol(const char* reason);
 
-    // Returns action priority and post-completion repeat interval.
+    /** 返回动作优先级与完成后的周期重复间隔。 */
     int ActionPriority(const std::string& action) const;
     int RepeatIntervalMs(const std::string& action) const;
 
-    // Closes whichever UART/GPIO backend was opened.
+    /** 关闭 tty 或 A1 UART/GPIO 句柄，并清空残留状态字节。 */
     void CloseBackend();
 
 private:

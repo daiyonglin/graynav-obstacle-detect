@@ -41,18 +41,35 @@ public:
     OsdDevice();
     ~OsdDevice();
 
+    /** 打开 OSD 设备，加载颜色 LUT，并为五个固定图层一次性分配 DMA。 */
     void Initialize(int width, int height);
+
+    /** 销毁所有图层和 DMA buffer，随后关闭 OSD 设备句柄。 */
     void Release();
 
+    /** 兼容接口：向默认矢量层提交一组矩形；空集合会清空全部图层。 */
     void Draw(std::vector<OsdQuadRangle> &quad_rangle);
+
+    /** 将 xyxy 框转换为硬件四边形并刷新指定矢量层。 */
     void Draw(std::vector<std::array<float, 4>>& boxes, int border, int layer_id, fdevice::QUADRANGLETYPE type, fdevice::ALPHATYPE alpha, int color);
+
+    /** 清空指定层后提交结构化四边形，是检测框层的主要刷新入口。 */
     void Draw(std::vector<OsdQuadRangle> &quad_rangle, int layer_id);
+
+    /** 在 RLE 图像层显示预生成 .ssbmp 动作/风险文字。 */
     bool DrawTexture(const std::string& filename, int x, int y, int layer_id);
+
+    /** 清空单个图层，不影响 Aurora 原始灰度画面和其他 OSD 层。 */
     void CleanLayer(int layer_id);
 
 private:
+    /** 读取 A1 OSD 颜色查找表，供设备初始化时注册。 */
     int LoadLutFile(const char* filename);
+
+    /** 根据检测框生成内外两组顶点，二者间环带形成空心边框。 */
     void GenQrangleBox(std::array<float, 4>& det, int border);
+
+    /** 区分 RLE 纹理层和 quadrangle 矢量层，禁止混用硬件接口。 */
     bool IsImageLayer(int layer_id) const;
 
 private:

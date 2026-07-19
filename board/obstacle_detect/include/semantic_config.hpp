@@ -24,15 +24,28 @@ enum SemanticClass {
     NUM_SEMANTIC_CLASSES = 8
 };
 
-int ModelClassCount();  // 当前部署模型分类头通道数，必须与 m1model 一致。
+/** 当前部署模型分类头通道数，来自 CMake 编译宏，必须与 m1model 一致。 */
+int ModelClassCount();
+
+/** 判断 raw class 是否允许进入后处理；ROD25 的 road 在此统一屏蔽。 */
 bool IsSupportedRawClass(int raw_class_id);
+
+/** 把模型原始类别映射到 8 类导航语义，不改变 raw_label。 */
 int SemanticClassFromRaw(int raw_class_id);
+
+/** PERSON 之外的导航语义是否属于一般实体障碍。 */
 bool IsObstacleClass(int semantic_class_id);
+
+/** 家具、小物体和车辆辅助判定，供阈值、NMS 和规划共享。 */
 bool IsFurnitureLikeRawClass(int raw_class_id);
 bool IsFurnitureLikeSemantic(int semantic_class_id);
 bool IsSmallObjectSemantic(int semantic_class_id);
 bool IsVehicleSemantic(int semantic_class_id);
+
+/** 每个 raw class 的召回阈值；与避障距离阈值相互独立。 */
 float CandidateThreshold(int raw_class_id);
+
+/** 导航排序权重，不回写或篡改神经网络置信度。 */
 float RiskWeight(int semantic_class_id);
 
 // 全链路共享的避障阈值。所有值都可由同名 A1_* 环境变量覆盖，确保测距、
@@ -50,6 +63,7 @@ float SectorRightBoundaryRatio();
 float WideBoxRatio();
 float CenterCorridorHalfWidthM();
 
+/** 导航语义全名、OSD 简写和模型原始类别名。 */
 std::string SemanticLabel(int semantic_class_id);
 std::string SemanticShortLabel(int semantic_class_id);
 std::string RawLabel(int raw_class_id);

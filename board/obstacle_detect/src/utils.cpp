@@ -121,10 +121,8 @@ void NMS(DetectionResult* result, float iou_threshold, int top_k)
                 const bool other_much_smaller = other_area < cur_area * 0.60f;
                 const bool cur_much_smaller = cur_area < other_area * 0.60f;
 
-                // In obstacle scenes a coarse high-score box often covers
-                // several smaller objects. Keep a smaller candidate when its
-                // score is close enough, then let display-level filtering
-                // decide which one should drive navigation.
+                // 粗粒度高分框可能同时覆盖多个独立障碍。若小框分数足够接近，
+                // 则保护小框不被大框 NMS 掉，再由显示和规划层选择真正的风险目标。
                 if (other_much_smaller && other.score >= cur.score * 0.65f) {
                     continue;
                 }
@@ -348,9 +346,8 @@ void VISUALIZER::DrawTestBox()
 int VISUALIZER::PickColorByClass(int class_id) const
 {
     (void)class_id;
-    // Use one OSD LUT entry for all detection boxes. Aurora renders the LUT
-    // colors over a grayscale preview, so class-dependent colors looked like
-    // inconsistent black/gray boxes during field tests.
+    // 所有检测框使用统一 OSD LUT 色。Aurora 在灰度预览上叠加 LUT，
+    // 若按类别切换颜色，实测会呈现深浅不一致的黑/灰框，影响框的可读性。
     return 2;
 }
 
@@ -648,10 +645,8 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
     std::vector<sst::device::osd::OsdQuadRangle> box_quads;
     box_quads.reserve(result.items.size());
 
-    // OSD layers:
-    // layer 0 = disabled legacy risk bar, layer 1 = action .ssbmp,
-    // layer 2 = dir/risk .ssbmp, layer 3 = kept empty,
-    // layer 4 = detection boxes.
+    // OSD 图层约定：layer 0 为停用的旧风险条；layer 1 为动作文字位图；
+    // layer 2 为方向/风险辅助位图；layer 3 预留；layer 4 绘制目标框。
     if (!static_layers_cleaned_) {
         osd_device.CleanLayer(0);
         osd_device.CleanLayer(3);
