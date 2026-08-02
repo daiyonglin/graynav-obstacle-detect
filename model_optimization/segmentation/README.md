@@ -26,6 +26,8 @@ python -m pip install -r segmentation/requirements_surface.txt
 
 # 0. Optional: import the official PaddleSeg RGB checkpoint.  This folds only
 #    the first Conv2D and fails if any remaining ordered tensor is incompatible.
+# Official release/2.10 model-zoo URL:
+# https://bj.bcebos.com/paddleseg/dygraph/cityscapes/fastscnn_cityscapes_1024x1024_160k/model.pdparams
 python scripts/import_paddleseg_fast_scnn.py \
   --paddle-checkpoint /weights/fast_scnn_cityscapes.pdparams \
   --output runs/graynav_fast_scnn/paddleseg_gray1_init.pt

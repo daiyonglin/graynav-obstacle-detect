@@ -154,7 +154,16 @@ du -sh /root/autodl-tmp/graynav/datasets/graynav_surface
 
 ## 5. 官方权重折叠
 
-把 PaddleSeg 官方 Fast-SCNN Cityscapes `.pdparams` 放到：
+PaddleSeg `release/2.10` 的 `configs/fastscnn/README.md` 给出的官方 160k Cityscapes 权重为：
+
+```bash
+cd /root/autodl-tmp/graynav/weights
+wget -c -O fast_scnn_cityscapes.pdparams \
+  https://bj.bcebos.com/paddleseg/dygraph/cityscapes/fastscnn_cityscapes_1024x1024_160k/model.pdparams
+sha256sum fast_scnn_cityscapes.pdparams
+```
+
+固定放到：
 
 ```text
 /root/autodl-tmp/graynav/weights/fast_scnn_cityscapes.pdparams
