@@ -567,4 +567,51 @@ void ObstacleTracker::Update(const DetectionResult& raw_result, int frame_id)
     decision_ = planner_.Update(stable_result_, raw_result.view_id, timestamp_ms);
 }
 
+void ObstacleTracker::PredictOnly(int frame_id, int64_t timestamp_ms)
+{
+    /*
+     * A segmentation slot is deliberately not an empty detector frame.  Keep
+     * the last boxes and range state alive, age them by wall-clock time only,
+     * and leave the last detector/planner decision unchanged.  This prevents
+     * D/D/D/S scheduling from manufacturing a one-frame obstacle disappearance.
+     */
+    if (timestamp_ms <= 0) timestamp_ms = static_cast<int64_t>(frame_id) * 67;
+    for (size_t i = 0; i < tracks_.size(); ++i) {
+        Track& track = tracks_[i];
+        track.matched_current_frame = false;
+        track.visible_in_current_roi = false;
+        ++track.age;
+        track.item.age = track.age;
+        track.last_frame = frame_id;
+    }
+    tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
+        [timestamp_ms](const Track& track) {
+            return timestamp_ms - track.last_seen_ms > 700;
+        }), tracks_.end());
+
+    DetectionResult predicted;
+    predicted.raw_candidate_count = stable_result_.raw_candidate_count;
+    predicted.post_nms_count = stable_result_.post_nms_count;
+    predicted.coarse_drop_count = stable_result_.coarse_drop_count;
+    predicted.view_id = stable_result_.view_id;
+    predicted.roi = stable_result_.roi;
+    predicted.timestamp_ms = timestamp_ms;
+    for (size_t i = 0; i < tracks_.size(); ++i) {
+        const Track& track = tracks_[i];
+        if (track.hits < kMinConfirmedHits ||
+            timestamp_ms - track.last_seen_ms > 700 ||
+            implausibly_broad_box(track.item, image_shape_)) {
+            continue;
+        }
+        DetectionItem item = track.item;
+        item.score *= 0.97f;
+        predicted.items.push_back(item);
+    }
+    std::sort(predicted.items.begin(), predicted.items.end(), better_detection);
+    if (predicted.items.size() > static_cast<size_t>(kMaxStableObjects)) {
+        predicted.items.resize(kMaxStableObjects);
+    }
+    stable_result_ = predicted;
+}
+
 }  // namespace obstacle

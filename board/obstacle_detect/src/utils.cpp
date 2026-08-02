@@ -320,6 +320,7 @@ void VISUALIZER::Initialize(std::array<int, 2>& in_img_shape)
     last_action_asset_.clear();
     last_info_asset_.clear();
     static_layers_cleaned_ = false;
+    image_shape_ = in_img_shape;
 }
 
 void VISUALIZER::Release()
@@ -689,4 +690,39 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
         }
     }
     osd_device.Draw(box_quads, 4);
+}
+
+void VISUALIZER::Draw(const DetectionResult& result,
+                      const AvoidanceDecision& decision,
+                      const SurfaceResult& surface)
+{
+    Draw(result, decision);
+    std::vector<sst::device::osd::OsdQuadRangle> corridors;
+    corridors.reserve(3);
+    const SurfaceCorridor* states[3] = {&surface.left, &surface.center, &surface.right};
+    const float x_bounds[4] = {0.0f, 0.40f, 0.60f, 1.0f};
+    const float width = static_cast<float>(image_shape_[0]);
+    const float height = static_cast<float>(image_shape_[1]);
+    const float roi_top = std::max(0.0f, height - width);
+    for (int i = 0; i < 3; ++i) {
+        const SurfaceCorridor& state = *states[i];
+        sst::device::osd::OsdQuadRangle q;
+        q.box = {x_bounds[i] * width + 4.0f, roi_top + 4.0f,
+                 x_bounds[i + 1] * width - 4.0f, height - 4.0f};
+        q.border = 6;
+        q.layer_id = 3;
+        q.type = fdevice::TYPE_HOLLOW;
+        q.alpha = fdevice::TYPE_ALPHA75;
+        if (!surface.valid || surface.stale || surface.perception_degraded) {
+            q.color = 2;
+        } else if (state.persistent_hazard || state.blocked_ratio >= 0.35f) {
+            q.color = 3;
+        } else if (state.safe_candidate) {
+            q.color = 0;
+        } else {
+            q.color = 2;
+        }
+        corridors.push_back(q);
+    }
+    osd_device.Draw(corridors, 3);
 }

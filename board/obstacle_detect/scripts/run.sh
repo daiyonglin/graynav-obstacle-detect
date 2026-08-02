@@ -69,6 +69,14 @@ export A1_OSD_INTERVAL_FRAMES="${A1_OSD_INTERVAL_FRAMES:-2}"
 export A1_PERF_INTERVAL_FRAMES="${A1_PERF_INTERVAL_FRAMES:-60}"
 export A1_SENSOR_FPS="${A1_SENSOR_FPS:-90}"
 
+# ===== D/D/D/S single-channel road-surface perception =====
+export A1_SEG_MODEL_PATH="${A1_SEG_MODEL_PATH:-/app_demo/app_assets/models/graynav_fast_scnn_gray1_int8.m1model}"
+export A1_SURFACE_PERIOD="${A1_SURFACE_PERIOD:-4}"
+export A1_SURFACE_SLOT="${A1_SURFACE_SLOT:-3}"
+export A1_SURFACE_STALE_MS="${A1_SURFACE_STALE_MS:-1500}"
+export A1_SEG_OUTPUT_LAYOUT="${A1_SEG_OUTPUT_LAYOUT:-HWC}"
+export A1_YOLO_DYNAMIC_ALLOC="${A1_YOLO_DYNAMIC_ALLOC:-0}"
+
 # ===== 相机安装参数、测距不确定度与三走廊规划 =====
 export A1_CAM_FOV_H_DEG="${A1_CAM_FOV_H_DEG:-49.7}"
 export A1_CAM_FOV_V_DEG="${A1_CAM_FOV_V_DEG:-78.9}"

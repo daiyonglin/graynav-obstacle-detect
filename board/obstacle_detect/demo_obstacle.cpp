@@ -19,12 +19,25 @@
 #include "include/tracker.hpp"
 #include "include/utils.hpp"
 
+#ifndef A1_ENABLE_SURFACE_SEG
+#define A1_ENABLE_SURFACE_SEG 0
+#endif
+
+#if A1_ENABLE_SURFACE_SEG
+#include "include/surface_fusion.hpp"
+#include "include/surface_segmentation.hpp"
+#endif
+
 #ifndef A1_ENABLE_VOICE
 #define A1_ENABLE_VOICE 0
 #endif
 
 #ifndef A1_MODEL_FILENAME
 #define A1_MODEL_FILENAME "yolov8n80_graycopy_head6.m1model"
+#endif
+
+#ifndef A1_SEG_MODEL_FILENAME
+#define A1_SEG_MODEL_FILENAME "graynav_fast_scnn_gray1_int8.m1model"
 #endif
 
 #if A1_ENABLE_VOICE
@@ -572,7 +585,8 @@ void append_zone(std::ostringstream& oss, const char* key, const ZoneStatus& zon
 
 void print_json_packet(int frame_id,
                        const DetectionResult& result,
-                       const AvoidanceDecision& decision)
+                       const AvoidanceDecision& decision,
+                       const SurfaceResult& surface)
 {
     int nearest_idx = -1;
     float nearest_dist = 1e9f;
@@ -643,7 +657,32 @@ void print_json_packet(int frame_id,
     oss << ",\"nav\":{\"action\":\"" << json_escape(decision.action) << "\"";
     oss << ",\"sector\":\"" << (nearest_idx >= 0 ? json_escape(result.items[nearest_idx].sector) : "clear") << "\"";
     oss << ",\"prompt\":\"" << json_escape(decision.prompt) << "\"";
-    oss << ",\"nearest_track\":" << decision.nearest_track_id << "}";
+    oss << ",\"nearest_track\":" << decision.nearest_track_id;
+    oss << ",\"hazard_type\":\"" << json_escape(decision.hazard_type) << "\"";
+    oss << ",\"hazard_sector\":\"" << json_escape(decision.hazard_sector) << "\"";
+    oss << ",\"perception_source\":\"" << json_escape(decision.perception_source) << "\"";
+    oss << ",\"surface_confidence\":" << std::fixed << std::setprecision(3)
+        << decision.surface_confidence;
+    oss << ",\"perception_degraded\":" << (decision.perception_degraded ? "true" : "false") << "}";
+    const auto append_surface = [&oss](const char* name, const SurfaceCorridor& corridor) {
+        oss << "\"" << name << "\":{";
+        oss << "\"ground\":" << std::fixed << std::setprecision(3) << corridor.ground_ratio;
+        oss << ",\"blocked\":" << corridor.blocked_ratio;
+        oss << ",\"step\":" << corridor.step_ratio;
+        oss << ",\"pothole\":" << corridor.pothole_ratio;
+        oss << ",\"safe_candidate\":" << (corridor.safe_candidate ? "true" : "false");
+        oss << ",\"persistent_hazard\":" << (corridor.persistent_hazard ? "true" : "false") << "}";
+    };
+    oss << ",\"surface\":{\"valid\":" << (surface.valid ? "true" : "false")
+        << ",\"stale\":" << (surface.stale ? "true" : "false")
+        << ",\"timestamp_ms\":" << surface.timestamp_ms
+        << ",\"proximity\":\"" << json_escape(surface.proximity) << "\",";
+    append_surface("left", surface.left);
+    oss << ",";
+    append_surface("center", surface.center);
+    oss << ",";
+    append_surface("right", surface.right);
+    oss << "}";
     oss << "}";
 
     std::cout << oss.str() << std::endl;
@@ -794,13 +833,28 @@ void print_human_packet(int frame_id,
     action_guidance_text(decision.action, speed, direction);
     const int nearest_idx = find_nearest_index(result);
     if (nearest_idx < 0) {
+        const char* decision_risk = "CLEAR";
+        if (decision.action == "system_fault") {
+            decision_risk = "FAULT";
+        } else if (decision.action == "stop") {
+            decision_risk = "EMERGENCY";
+        } else if (decision.hazard_type != "none" ||
+                   decision.action != "clear") {
+            decision_risk = "WARNING";
+        } else if (decision.perception_degraded) {
+            decision_risk = "UNKNOWN";
+        }
         std::ostringstream oss;
         oss << "[NAV] frame=" << frame_id
             << " speed=" << speed
             << " direction=" << direction
             << " obstacle=NONE"
             << " distance=--"
-            << " risk=CLEAR";
+            << " risk=" << decision_risk
+            << " hazard=" << to_upper_text(decision.hazard_type)
+            << " hazard_sector=" << to_upper_text(decision.hazard_sector)
+            << " perception=" << to_upper_text(decision.perception_source)
+            << " degraded=" << (decision.perception_degraded ? 1 : 0);
         append_diagnostics(oss, nullptr);
         std::cout << oss.str() << std::endl;
         return;
@@ -821,6 +875,10 @@ void print_human_packet(int frame_id,
         oss << "unknown";
     }
     oss << " risk=" << to_upper_text(item.risk_level);
+    oss << " hazard=" << to_upper_text(decision.hazard_type)
+        << " hazard_sector=" << to_upper_text(decision.hazard_sector)
+        << " perception=" << to_upper_text(decision.perception_source)
+        << " degraded=" << (decision.perception_degraded ? 1 : 0);
     if (result.items.size() > 1) {
         oss << " objects=" << result.items.size();
     }
@@ -844,6 +902,10 @@ int main()
     std::string path_det = env_string_value(
         "A1_MODEL_PATH",
         std::string("/app_demo/app_assets/models/") + A1_MODEL_FILENAME);
+    const std::array<int, 2> seg_shape = {256, 256};
+    const std::string path_seg = env_string_value(
+        "A1_SEG_MODEL_PATH",
+        std::string("/app_demo/app_assets/models/") + A1_SEG_MODEL_FILENAME);
 
     if (ssne_initial()) {
         fprintf(stderr, "SSNE initialization failed!\n");
@@ -853,11 +915,50 @@ int main()
     std::array<int, 2> full_shape = {full_width, full_height};
     std::array<int, 2> capture_shape = {capture_width, capture_height};
 
-    IMAGEPROCESSOR processor;
-    processor.Initialize(&capture_shape);
-
     YOLOV8GRAY detector;
     detector.Initialize(path_det, &capture_shape, &det_shape);
+
+    SurfaceResult surface_result;
+    bool surface_available = false;
+    bool surface_degraded = true;
+    int surface_failures = 0;
+    bool surface_degraded_announced = false;
+#if A1_ENABLE_SURFACE_SEG
+    obstacle::SurfaceSegmenter surface_segmenter;
+    obstacle::SurfaceDecisionFusion surface_fusion;
+    surface_available = surface_segmenter.Initialize(path_seg, full_shape, seg_shape);
+    if (surface_available && detector.ModelId() == surface_segmenter.ModelId()) {
+        std::cout << "[SURFACE][ERROR] detector and segmenter returned the same model_id="
+                  << detector.ModelId() << "; disabling surface perception" << std::endl;
+        surface_available = false;
+    }
+    const bool surface_model_present = std::ifstream(path_seg.c_str(), std::ios::binary).good();
+    if (!surface_available && surface_model_present) {
+        std::cout << "[SURFACE][WARN] retrying dual-model load with both models dynamic" << std::endl;
+        surface_segmenter.Release();
+        detector.Release();
+        ssne_release();
+        if (ssne_initial()) {
+            std::cout << "[SURFACE][ERROR] SSNE reinitialization failed; detector startup aborted"
+                      << std::endl;
+            return -1;
+        }
+        setenv("A1_YOLO_DYNAMIC_ALLOC", "1", 1);
+        detector.Initialize(path_det, &capture_shape, &det_shape);
+        surface_available = surface_segmenter.Initialize(path_seg, full_shape, seg_shape);
+        if (!surface_available || detector.ModelId() == surface_segmenter.ModelId()) {
+            surface_available = false;
+            std::cout << "[SURFACE][ERROR] dual dynamic load failed; use the predefined "
+                      << "Fast-SCNN-0.75 profile (target <=0.9 MiB). Detector-only fallback active."
+                      << std::endl;
+        }
+    }
+    surface_degraded = !surface_available;
+    surface_result.perception_degraded = surface_degraded;
+#endif
+
+    IMAGEPROCESSOR processor;
+    processor.Initialize(&capture_shape);
 
     DetectionResult* det_result = new DetectionResult;
     DetectionResult empty_result;
@@ -896,6 +997,9 @@ int main()
                                                      300);
     const int osd_interval_frames = env_int_value("A1_OSD_INTERVAL_FRAMES", 2, 1, 10);
     const int perf_interval_frames = env_int_value("A1_PERF_INTERVAL_FRAMES", 60, 10, 600);
+    const int surface_period = env_int_value("A1_SURFACE_PERIOD", 4, 2, 30);
+    const int surface_slot = env_int_value("A1_SURFACE_SLOT", 3, 0, surface_period - 1);
+    const int surface_stale_ms = env_int_value("A1_SURFACE_STALE_MS", 1500, 200, 10000);
     const int sensor_fps = env_int_value("A1_SENSOR_FPS", 90, 1, 240);
     const std::string test_fault_type = env_string_value("A1_TEST_FAULT_TYPE", "none");
     const int test_fault_start = env_int_value("A1_TEST_FAULT_START_FRAME", 120, 1, 1000000);
@@ -911,6 +1015,9 @@ int main()
     std::cout << "[INFO] capture image shape = [" << capture_shape[0] << ", " << capture_shape[1] << "]" << std::endl;
     std::cout << "[INFO] det input shape = [" << det_shape[0] << ", " << det_shape[1] << "]" << std::endl;
     std::cout << "[INFO] model path      = " << path_det << std::endl;
+    std::cout << "[INFO] surface model   = " << path_seg << std::endl;
+    std::cout << "[INFO] surface status  = " << (surface_available ? "ready" : "detector-only")
+              << " schedule=" << surface_period << ":" << surface_slot << std::endl;
     std::cout << "[INFO] output json     = " << (output_json_lines ? "on" : "off") << std::endl;
     std::cout << "[INFO] output human    = " << (output_human_summary ? "on" : "off") << std::endl;
     std::cout << "[INFO] output diag     = " << (output_serial_diagnostics ? "on" : "off") << std::endl;
@@ -964,11 +1071,11 @@ int main()
                 const AvoidanceDecision safe_decision = system_health.SafeDecision();
 #if A1_ENABLE_VOICE
                 if (voice_notifier.WantsOsd()) {
-                    visualizer.Draw(empty_result, safe_decision);
+                    visualizer.Draw(empty_result, safe_decision, SurfaceResult());
                 }
                 voice_notifier.Update(frame_id, empty_result, safe_decision);
 #else
-                visualizer.Draw(empty_result, safe_decision);
+                visualizer.Draw(empty_result, safe_decision, SurfaceResult());
 #endif
                 if (output_human_summary && frame_id % output_interval_frames == 0) {
                     print_fault_packet(frame_id, system_health, output_serial_diagnostics);
@@ -1010,8 +1117,39 @@ int main()
                       << " frozen_frames=" << system_health.frozen_frames
                       << std::endl;
         }
-        const bool inference_ok = detector.Predict(&img_sensor, det_result, 0.20f);
+        const int64_t now_ms = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        bool ran_surface = false;
+        bool inference_ok = true;
+#if A1_ENABLE_SURFACE_SEG
+        ran_surface = surface_available && !surface_degraded &&
+                      frame_id % surface_period == surface_slot;
+        if (ran_surface) {
+            inference_ok = surface_segmenter.Predict(&img_sensor, &surface_result);
+            if (inference_ok) {
+                surface_failures = 0;
+                surface_result.perception_degraded = false;
+            } else {
+                ++surface_failures;
+                if (surface_failures >= 3) {
+                    surface_degraded = true;
+                    surface_result.perception_degraded = true;
+                    if (!surface_degraded_announced) {
+                        std::cout << "[SURFACE][DEGRADED] three consecutive inference failures; "
+                                  << "detector-only fallback remains active" << std::endl;
+                        surface_degraded_announced = true;
+                    }
+                }
+            }
+        } else {
+            inference_ok = detector.Predict(&img_sensor, det_result, 0.20f);
+            system_health.inference_failures = inference_ok ? 0 : system_health.inference_failures + 1;
+        }
+#else
+        inference_ok = detector.Predict(&img_sensor, det_result, 0.20f);
         system_health.inference_failures = inference_ok ? 0 : system_health.inference_failures + 1;
+#endif
         system_health.UpdateResource(frame_stats, *det_result);
 
         /*
@@ -1039,13 +1177,28 @@ int main()
             break;
         }
         const std::chrono::steady_clock::time_point tracker_start = std::chrono::steady_clock::now();
-        tracker.Update(*det_result, frame_id);
+        if (ran_surface) {
+            tracker.PredictOnly(frame_id, now_ms);
+        } else {
+            tracker.Update(*det_result, frame_id);
+        }
         const float tracker_ms = std::chrono::duration_cast<std::chrono::duration<float, std::milli> >(
             std::chrono::steady_clock::now() - tracker_start).count();
 
         const DetectionResult& stable_result = tracker.StableResult();
         const AvoidanceDecision& tracker_decision = tracker.Decision();
+        SurfaceResult surface_snapshot = surface_result;
+        surface_snapshot.perception_degraded = surface_degraded;
+        if (surface_snapshot.valid && now_ms - surface_snapshot.timestamp_ms > surface_stale_ms) {
+            surface_snapshot.stale = true;
+        }
         AvoidanceDecision health_decision = tracker_decision;
+#if A1_ENABLE_SURFACE_SEG
+        health_decision = surface_fusion.Fuse(tracker_decision, surface_snapshot, now_ms);
+#else
+        health_decision.perception_degraded = true;
+        health_decision.perception_source = "detection_only";
+#endif
         const bool fault_active = system_health.FaultActive();
         if (fault_active) {
             health_decision = system_health.SafeDecision();
@@ -1072,7 +1225,8 @@ int main()
                                  frame_id % osd_interval_frames == 0;
         if (voice_notifier.WantsOsd() && refresh_osd) {
             visualizer.Draw(fault_active ? empty_result : stable_result,
-                            health_decision);
+                            health_decision,
+                            surface_snapshot);
             last_osd_action = health_decision.action;
         }
         voice_notifier.Update(frame_id,
@@ -1081,22 +1235,33 @@ int main()
 #else
         if (health_decision.action != last_osd_action || frame_id % osd_interval_frames == 0) {
             visualizer.Draw(fault_active ? empty_result : stable_result,
-                            health_decision);
+                            health_decision,
+                            surface_snapshot);
             last_osd_action = health_decision.action;
         }
 #endif
 
         if (output_serial_diagnostics && frame_id % perf_interval_frames == 0) {
             const DetectorTiming detector_timing = detector.GetLastTiming();
+#if A1_ENABLE_SURFACE_SEG
+            const SegmenterTiming segmenter_timing = surface_segmenter.GetLastTiming();
+#else
+            const SegmenterTiming segmenter_timing;
+#endif
             const float loop_ms = std::chrono::duration_cast<std::chrono::duration<float, std::milli> >(
                 std::chrono::steady_clock::now() - loop_start).count();
             std::cout << "[PERF] frame=" << frame_id
+                      << " npu_slot=" << (ran_surface ? "surface" : "detection")
                       << " view=" << det_result->view_id
                       << " capture_ms=" << capture_ms
                       << " preprocess_ms=" << detector_timing.preprocess_ms
                       << " inference_ms=" << detector_timing.inference_ms
                       << " output_ms=" << detector_timing.output_ms
                       << " decode_nms_ms=" << detector_timing.postprocess_ms
+                      << " seg_preprocess_ms=" << segmenter_timing.preprocess_ms
+                      << " seg_inference_ms=" << segmenter_timing.inference_ms
+                      << " seg_output_ms=" << segmenter_timing.output_ms
+                      << " seg_postprocess_ms=" << segmenter_timing.postprocess_ms
                       << " track_range_plan_ms=" << tracker_ms
                       << " loop_ms=" << loop_ms
                       << " fps_avg=" << frame_stats.fps_avg
@@ -1107,7 +1272,7 @@ int main()
         }
 
         if (output_json_lines && frame_id % output_interval_frames == 0) {
-            print_json_packet(frame_id, stable_result, health_decision);
+            print_json_packet(frame_id, stable_result, health_decision, surface_snapshot);
         }
         if (output_human_summary && !fault_active && frame_id % output_interval_frames == 0) {
             print_human_packet(frame_id,
@@ -1127,6 +1292,9 @@ int main()
     delete det_result;
 #if A1_ENABLE_VOICE
     voice_notifier.Release();
+#endif
+#if A1_ENABLE_SURFACE_SEG
+    surface_segmenter.Release();
 #endif
     detector.Release();
     processor.Release();

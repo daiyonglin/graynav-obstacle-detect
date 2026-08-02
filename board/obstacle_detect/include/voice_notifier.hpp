@@ -204,6 +204,8 @@ private:
     int last_sent_frame_;
     std::string last_action_;
     std::string last_key_;
+    std::string last_surface_hazard_;
+    bool surface_degraded_announced_;
     std::string last_tx_detail_;
     std::string tty_device_;
     std::chrono::steady_clock::time_point last_sent_time_;

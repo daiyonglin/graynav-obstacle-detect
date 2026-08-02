@@ -40,6 +40,9 @@ public:
 
     void Draw(const DetectionResult& result);
     void Draw(const DetectionResult& result, const AvoidanceDecision& decision);
+    void Draw(const DetectionResult& result,
+              const AvoidanceDecision& decision,
+              const SurfaceResult& surface);
 
 private:
     int PickColorByClass(int class_id) const;
@@ -49,4 +52,5 @@ private:
     std::string last_action_asset_;
     std::string last_info_asset_;
     bool static_layers_cleaned_ = false;
+    std::array<int, 2> image_shape_ = {720, 1280};
 };

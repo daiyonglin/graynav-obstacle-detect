@@ -24,6 +24,7 @@ public:
 
     void Initialize(const std::array<int, 2>& image_shape);
     void Update(const DetectionResult& raw_result, int frame_id);
+    void PredictOnly(int frame_id, int64_t timestamp_ms);
 
     const DetectionResult& StableResult() const { return stable_result_; }
     const AvoidanceDecision& Decision() const { return decision_; }

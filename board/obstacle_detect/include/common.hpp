@@ -97,6 +97,58 @@ struct ZoneStatus {
           risk_level("unknown") {}
 };
 
+/** @brief 单通道道路分割模型的四类部署契约。 */
+enum SurfaceClass {
+    GROUND_CANDIDATE = 0,
+    BLOCKED_SURFACE = 1,
+    STEP_OR_DROP = 2,
+    POTHOLE = 3,
+    SURFACE_CLASS_COUNT = 4
+};
+
+/** @brief 分割网格投影到单条导航走廊后的面积比例和稳定风险。 */
+struct SurfaceCorridor {
+    float ground_ratio;
+    float blocked_ratio;
+    float step_ratio;
+    float pothole_ratio;
+    bool safe_candidate;
+    bool persistent_hazard;
+
+    SurfaceCorridor()
+        : ground_ratio(0.0f),
+          blocked_ratio(0.0f),
+          step_ratio(0.0f),
+          pothole_ratio(0.0f),
+          safe_candidate(false),
+          persistent_hazard(false) {}
+};
+
+/** @brief 一次分割推理经过多数滤波、走廊统计和时序投票后的道路风险。 */
+struct SurfaceResult {
+    bool valid;
+    bool stale;
+    bool perception_degraded;
+    int64_t timestamp_ms;
+    SurfaceCorridor left;
+    SurfaceCorridor center;
+    SurfaceCorridor right;
+    std::string primary_hazard;
+    std::string primary_sector;
+    std::string proximity;
+    float confidence;
+
+    SurfaceResult()
+        : valid(false),
+          stale(true),
+          perception_degraded(false),
+          timestamp_ms(0),
+          primary_hazard("unknown"),
+          primary_sector("unknown"),
+          proximity("unknown"),
+          confidence(0.0f) {}
+};
+
 /**
  * @brief 避障规划器的最终输出。
  *
@@ -110,11 +162,21 @@ struct AvoidanceDecision {
     std::string action;
     std::string prompt;
     int nearest_track_id;
+    std::string hazard_type;
+    std::string hazard_sector;
+    std::string perception_source;
+    float surface_confidence;
+    bool perception_degraded;
 
     AvoidanceDecision()
         : action("clear"),
           prompt("clear"),
-          nearest_track_id(-1) {
+          nearest_track_id(-1),
+          hazard_type("none"),
+          hazard_sector("unknown"),
+          perception_source("detection"),
+          surface_confidence(0.0f),
+          perception_degraded(false) {
         left.dir = "left";
         center.dir = "center";
         right.dir = "right";
@@ -196,6 +258,16 @@ struct DetectorTiming {
         : preprocess_ms(0.0f), inference_ms(0.0f), output_ms(0.0f), postprocess_ms(0.0f) {}
 };
 
+/** @brief 单帧道路分割各阶段耗时。 */
+struct SegmenterTiming {
+    float preprocess_ms;
+    float inference_ms;
+    float output_ms;
+    float postprocess_ms;
+    SegmenterTiming()
+        : preprocess_ms(0.0f), inference_ms(0.0f), output_ms(0.0f), postprocess_ms(0.0f) {}
+};
+
 /**
  * @brief 图像获取模块
  *
@@ -258,6 +330,7 @@ public:
 
     LetterboxInfo GetLastLetterboxInfo() const { return lb_info_[active_view_]; }
     int ActiveView() const { return active_view_; }
+    uint16_t ModelId() const { return model_id; }
     DetectorTiming GetLastTiming() const { return last_timing_; }
 
 public:
@@ -271,8 +344,8 @@ public:
 
 private:
     uint16_t model_id = 0;
-    ssne_tensor_t inputs[1];
-    ssne_tensor_t outputs[6];
+    ssne_tensor_t inputs[1] = {};
+    ssne_tensor_t outputs[6] = {};
 
     AiPreprocessPipe pipe_offline_[2] = {nullptr, nullptr};
     LetterboxInfo lb_info_[2];

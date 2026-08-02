@@ -1028,7 +1028,12 @@ void YOLOV8GRAY::Initialize(std::string& model_path,
     }
 
     char* model_path_char = const_cast<char*>(model_path.c_str());
-    model_id = ssne_loadmodel(model_path_char, SSNE_STATIC_ALLOC);
+    const bool dynamic_alloc = getenv_flag("A1_YOLO_DYNAMIC_ALLOC", false);
+    model_id = ssne_loadmodel(model_path_char,
+                              dynamic_alloc ? SSNE_DYNAMIC_ALLOC : SSNE_STATIC_ALLOC);
+    std::cout << "[YOLOV8GRAY][INFO] model_id=" << model_id
+              << " alloc=" << (dynamic_alloc ? "dynamic" : "static")
+              << " input_count=1 output_count=6" << std::endl;
 
     int mean[3] = {0, 0, 0};
     int stdv[3] = {0, 0, 0};
@@ -1576,10 +1581,10 @@ bool YOLOV8GRAY::Predict(ssne_tensor_t* img_in,
 
 void YOLOV8GRAY::Release()
 {
-    release_tensor(inputs[0]);
+    if (get_data(inputs[0]) != NULL) release_tensor(inputs[0]);
 
     for (int i = 0; i < 6; ++i) {
-        release_tensor(outputs[i]);
+        if (get_data(outputs[i]) != NULL) release_tensor(outputs[i]);
     }
 
     for (int view = 0; view < 2; ++view) {
