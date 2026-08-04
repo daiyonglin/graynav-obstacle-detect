@@ -4,7 +4,7 @@ set -eu
 
 duration_s="${A1_DUAL_SMOKE_SECONDS:-1800}"
 log="${A1_DUAL_SMOKE_LOG:-/tmp/graynav_dual_model_smoke.log}"
-model="${A1_SEG_MODEL_PATH:-/app_demo/app_assets/models/graynav_fast_scnn_gray1_int8.m1model}"
+model="${A1_SEG_MODEL_PATH:-/app_demo/app_assets/models/graynav_surface_depth_gray1_int8.m1model}"
 
 if [ ! -s "$model" ]; then
     echo "[SMOKE][FAIL] missing surface model: $model" >&2

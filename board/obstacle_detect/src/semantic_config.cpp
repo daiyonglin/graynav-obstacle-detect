@@ -136,6 +136,21 @@ bool IsSupportedRawClass(int raw_class_id)
     if (ModelClassCount() == 25 && raw_class_id == 7) {
         return false;
     }
+    if (ModelClassCount() == 80) {
+        // COCO80 is retained at the detector head so that the public weights keep
+        // their general recognition ability.  Navigation deliberately consumes
+        // only classes whose shape or motion is useful for obstacle avoidance.
+        const int navigation_ids[] = {
+            0,                    // person
+            1, 2, 3, 5, 7,       // bicycle, car, motorcycle, bus, truck
+            13,                   // bench
+            16,                   // dog
+            24, 26, 28,           // backpack, handbag, suitcase
+            56, 57, 58, 60        // chair, couch, potted plant, dining table
+        };
+        return any_of(raw_class_id, navigation_ids,
+                      static_cast<int>(sizeof(navigation_ids) / sizeof(navigation_ids[0])));
+    }
     return true;
 }
 
@@ -162,17 +177,17 @@ int SemanticClassFromRaw(int raw_class_id)
     const int table_desk[] = {60};
     if (any_of(raw_class_id, table_desk, 1)) return TABLE_DESK;
 
-    const int sofa_bed[] = {57, 59};
-    if (any_of(raw_class_id, sofa_bed, 2)) return SOFA_BED;
+    const int sofa_bed[] = {57};
+    if (any_of(raw_class_id, sofa_bed, 1)) return SOFA_BED;
 
     const int bag_suitcase[] = {24, 26, 28};
     if (any_of(raw_class_id, bag_suitcase, 3)) return BAG_SUITCASE;
 
-    const int small_object[] = {39, 41, 63, 65, 66, 67, 73};
-    if (any_of(raw_class_id, small_object, 7)) return SMALL_OBJECT;
+    const int small_object[] = {58};
+    if (any_of(raw_class_id, small_object, 1)) return SMALL_OBJECT;
 
-    const int vehicle_bicycle[] = {1, 2, 3};
-    if (any_of(raw_class_id, vehicle_bicycle, 3)) return VEHICLE_BICYCLE;
+    const int vehicle_bicycle[] = {1, 2, 3, 5, 7};
+    if (any_of(raw_class_id, vehicle_bicycle, 5)) return VEHICLE_BICYCLE;
 
     return GENERIC_OBSTACLE;
 }
@@ -188,8 +203,8 @@ bool IsFurnitureLikeRawClass(int raw_class_id)
         return IsFurnitureLikeSemantic(SemanticClassFromRaw(raw_class_id));
     }
 
-    const int ids[] = {13, 56, 57, 59, 60};
-    return any_of(raw_class_id, ids, 5);
+    const int ids[] = {13, 56, 57, 60};
+    return any_of(raw_class_id, ids, 4);
 }
 
 bool IsFurnitureLikeSemantic(int semantic_class_id)

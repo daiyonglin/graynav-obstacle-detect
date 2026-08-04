@@ -77,7 +77,8 @@ python scripts/build_surface_calibration_set.py \
 The prepared public RGB images are converted to one grayscale channel before
 training.  Neither training nor export replicates grayscale into RGB.
 
-The A1 vendor converter is intentionally a separate, fail-closed step because
+The following describes the legacy four-class segmentation-only route. The A1
+vendor converter is intentionally a separate, fail-closed step because
 it is not distributed in this repository.  Feed it the audited ONNX and the
 generated Y8 calibration images, require an INT8 `1x4x32x32` output, then name
 the artifact `graynav_fast_scnn_gray1_int8.m1model` and place it in:
@@ -93,6 +94,11 @@ After conversion, rebuild the SDK and run the board smoke test from
 ```sh
 A1_DUAL_SMOKE_SECONDS=1800 ./scripts/run_dual_model_smoke.sh
 ```
+
+The active route is now `graynav_surface_depth.py`, whose two outputs are
+`1x3x64x64` surface logits and `1x16x64x64` depth logits. Its final deployment
+artifact is `graynav_surface_depth_gray1_int8.m1model`; see
+`docs/GRAYNAV_SURFACE_DEPTH_IMPLEMENTATION_2026-08-04.md`.
 
 The board executable loads YOLO with static allocation and Fast-SCNN with
 dynamic allocation.  If that fails it reinitializes SSNE and retries both with

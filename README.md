@@ -73,28 +73,29 @@ stability, action decisions, and OSD behavior.
 
 ## Model Optimization
 
-Current model direction:
+Current target model direction:
 
 ```text
-M1: gray image -> [G,G,G] -> YOLOv8n GrayNav fine-tuning -> head6
-M2: M1 first-conv folded/tied as GrayStem-BC -> fine-tuning -> head6
+M1: SC132GS Y8 -> true-mono COCO80 YOLOv8n -> head6
+M2: SC132GS Y8 -> shared Fast-SCNN -> 3-class surface + 16-bin depth heads
 ```
 
-Earlier pseudo-RGB adapter routes are kept for reproducibility, but the active
-optimization line has moved to gray-domain detector fine-tuning. GrayStem-BC
-uses the identity that `[G,G,G]` makes the first RGB convolution equivalent to a
-single gray convolution, then keeps the exported model compatible with the
-existing three-channel A1 input pipeline.
+Earlier ROD25 and pseudo-RGB routes remain for reproducibility and rollback.
+Both target models have a strict one-channel deployment contract. RGB public
+weights use the exact repeated-gray identity `W_gray = W_R + W_G + W_B` for the
+first convolution; public training data is converted to grayscale before it
+enters the loader.
 
-Main scripts:
+Main scripts for the new line:
 
 ```text
-model_optimization/run_graystem_experiment.sh
-model_optimization/scripts/prepare_graystem_dataset.py
-model_optimization/scripts/train_yolov8n_gray_obstacle8.py
-model_optimization/scripts/graystem_yolov8.py
-model_optimization/scripts/evaluate_graystem_obstacle8.py
-model_optimization/scripts/export_yolov8_head6.py
+model_optimization/build_coco80_gray1_detector.sh
+model_optimization/prepare_public_datasets.sh
+model_optimization/run_surface_depth_cloud.sh
+model_optimization/scripts/prepare_graynav_surface_depth_dataset.py
+model_optimization/scripts/train_graynav_surface_depth.py
+model_optimization/scripts/export_graynav_surface_depth.py
+model_optimization/scripts/audit_surface_depth_onnx.py
 ```
 
 Cloud upload packages should be generated only when training is about to run on

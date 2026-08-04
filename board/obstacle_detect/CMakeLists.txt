@@ -7,12 +7,12 @@ include(cmake_config/Paths.cmake)
 # 这四项构成板端模型契约。更换 .m1model 时必须同步核对输入通道、分类头
 # 通道数和语音链接开关；否则模型虽然可能加载成功，CPU 后处理仍会错读 tensor。
 option(A1_ENABLE_VOICE "Compile UART voice output support" ON)
-option(A1_ENABLE_SURFACE_SEG "Compile single-channel road-surface segmentation" ON)
+option(A1_ENABLE_SURFACE_SEG "Compile single-channel road-surface and depth model" ON)
 option(A1_BUILD_SURFACE_TESTS "Build board-side surface postprocess/fusion test" OFF)
-set(A1_YOLO_NUM_CLASSES "25" CACHE STRING "YOLO raw class count: 80 for COCO, 25 for ROD25, 8 for obstacle8")
+set(A1_YOLO_NUM_CLASSES "80" CACHE STRING "YOLO raw class count: 80 for COCO, 25 for ROD25, 8 for obstacle8")
 set(A1_YOLO_INPUT_CHANNELS "1" CACHE STRING "YOLO model input channels: 3 for gray-copy models, 1 for true grayscale models")
-set(A1_MODEL_FILENAME "graynav_rod25_gray1_dce_b3_head6.m1model" CACHE STRING "Model filename under /app_demo/app_assets/models")
-set(A1_SEG_MODEL_FILENAME "graynav_fast_scnn_gray1_int8.m1model" CACHE STRING "Surface model filename under /app_demo/app_assets/models")
+set(A1_MODEL_FILENAME "graynav_yolov8n80_gray1_head6.m1model" CACHE STRING "Model filename under /app_demo/app_assets/models")
+set(A1_SEG_MODEL_FILENAME "graynav_surface_depth_gray1_int8.m1model" CACHE STRING "Surface-depth model filename under /app_demo/app_assets/models")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O2")
 add_compile_options(-Wno-psabi)
@@ -46,6 +46,7 @@ set(OBSTACLE_DETECT_SOURCES
     ${PROJECT_SOURCE_DIR}/src/avoidance_planner.cpp
     ${PROJECT_SOURCE_DIR}/src/ranging.cpp
     ${PROJECT_SOURCE_DIR}/src/semantic_config.cpp
+    ${PROJECT_SOURCE_DIR}/src/surface_fusion.cpp
     ${PROJECT_SOURCE_DIR}/src/tracker.cpp
     ${PROJECT_SOURCE_DIR}/src/utils.cpp
     ${PROJECT_SOURCE_DIR}/src/yolov8_gray.cpp
@@ -54,7 +55,6 @@ set(OBSTACLE_DETECT_SOURCES
 if(A1_ENABLE_SURFACE_SEG)
     list(APPEND OBSTACLE_DETECT_SOURCES
         ${PROJECT_SOURCE_DIR}/src/surface_segmentation.cpp
-        ${PROJECT_SOURCE_DIR}/src/surface_fusion.cpp
     )
 endif()
 
@@ -72,6 +72,7 @@ if(A1_BUILD_SURFACE_TESTS AND A1_ENABLE_SURFACE_SEG)
         ${PROJECT_SOURCE_DIR}/tests/test_surface_logic.cpp
         ${PROJECT_SOURCE_DIR}/src/surface_segmentation.cpp
         ${PROJECT_SOURCE_DIR}/src/surface_fusion.cpp
+        ${PROJECT_SOURCE_DIR}/src/semantic_config.cpp
     )
 endif()
 

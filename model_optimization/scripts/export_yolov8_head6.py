@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opset", type=int, default=12)
     parser.add_argument("--num-classes", type=int, default=8)
     parser.add_argument("--input-name", default="images")
+    parser.add_argument("--prefix", default="obstacle8_yolov8n")
     parser.add_argument("--output-names", nargs="*", default=DEFAULT_HEAD6_OUTPUTS)
     return parser.parse_args()
 
@@ -71,11 +72,11 @@ def main() -> None:
         )
     )
 
-    full_onnx = args.out_dir / "obstacle8_yolov8n.onnx"
+    full_onnx = args.out_dir / f"{args.prefix}.onnx"
     if exported.resolve() != full_onnx.resolve():
         shutil.copy2(exported, full_onnx)
 
-    head6_onnx = args.out_dir / "obstacle8_yolov8n_head6.onnx"
+    head6_onnx = args.out_dir / f"{args.prefix}_head6.onnx"
     extract_model(
         str(full_onnx),
         str(head6_onnx),
@@ -89,4 +90,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

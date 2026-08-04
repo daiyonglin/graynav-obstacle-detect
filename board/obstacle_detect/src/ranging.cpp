@@ -158,18 +158,33 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
 bool RangingEstimator::SizePrior(int raw_class_id, float* size_m, float* relative_sigma) const
 {
     // 先验同时给出均值和相对标准差，个体尺寸差异不会被伪装成精确测量。
-    if (semantic::ModelClassCount() != 25 || size_m == NULL || relative_sigma == NULL) {
+    if (size_m == NULL || relative_sigma == NULL) {
         return false;
     }
-    switch (raw_class_id) {
-        case 3:  *size_m = 1.70f; *relative_sigma = 0.18f; return true;  // person
-        case 9:  *size_m = 0.55f; *relative_sigma = 0.45f; return true;  // dustbin/container
-        case 17: *size_m = 0.80f; *relative_sigma = 0.28f; return true;  // bench
-        case 20: *size_m = 0.70f; *relative_sigma = 0.40f; return true;  // traffic barrel
-        case 21: *size_m = 0.35f; *relative_sigma = 0.35f; return true;  // plant pot
-        case 23: *size_m = 0.85f; *relative_sigma = 0.25f; return true;  // chair
-        default: return false;
+    if (semantic::ModelClassCount() == 25) {
+        switch (raw_class_id) {
+            case 3:  *size_m = 1.70f; *relative_sigma = 0.18f; return true;  // person
+            case 9:  *size_m = 0.55f; *relative_sigma = 0.45f; return true;  // dustbin/container
+            case 17: *size_m = 0.80f; *relative_sigma = 0.28f; return true;  // bench
+            case 20: *size_m = 0.70f; *relative_sigma = 0.40f; return true;  // traffic barrel
+            case 21: *size_m = 0.35f; *relative_sigma = 0.35f; return true;  // plant pot
+            case 23: *size_m = 0.85f; *relative_sigma = 0.25f; return true;  // chair
+            default: return false;
+        }
     }
+    if (semantic::ModelClassCount() == 80) {
+        // COCO categories with sufficiently stable vertical extent.  Classes
+        // such as dogs, bags and plants intentionally have no fixed-size prior.
+        switch (raw_class_id) {
+            case 0:  *size_m = 1.70f; *relative_sigma = 0.25f; return true;  // person
+            case 13: *size_m = 0.80f; *relative_sigma = 0.35f; return true;  // bench
+            case 56: *size_m = 0.85f; *relative_sigma = 0.30f; return true;  // chair
+            case 57: *size_m = 0.80f; *relative_sigma = 0.35f; return true;  // couch
+            case 60: *size_m = 0.75f; *relative_sigma = 0.28f; return true;  // dining table
+            default: return false;
+        }
+    }
+    return false;
 }
 
 RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionItem& item) const
@@ -179,7 +194,8 @@ RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionIt
     const float pixel_width = box_width(item);
     const float pixel_height = box_height(item);
     const float aspect = pixel_width / pixel_height;
-    if (item.raw_class_id == 3 && pixel_width >= 18.0f) {
+    const int person_raw_id = semantic::ModelClassCount() == 25 ? 3 : 0;
+    if (item.raw_class_id == person_raw_id && pixel_width >= 18.0f) {
         const float foot_y = clampf(item.box[3], 0.0f,
                                     static_cast<float>(image_shape_[1] - 1));
         const float cy = 0.5f * image_shape_[1];
@@ -248,7 +264,8 @@ float RangingEstimator::NearFieldUpperBound(const DetectionItem& item) const
     if (clips_both_horizontal_borders || wr > 0.90f || item.quality == "coarse") {
         return -1.0f;
     }
-    if (item.raw_class_id == 3) {
+    const int person_raw_id = semantic::ModelClassCount() == 25 ? 3 : 0;
+    if (item.raw_class_id == person_raw_id) {
         const float aspect = box_width(item) / box_height(item);
         const bool head_like = bottom < 0.78f && aspect > 0.55f && aspect < 1.65f;
         if (head_like && wr > 0.30f) return 0.70f;

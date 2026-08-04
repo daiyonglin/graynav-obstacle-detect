@@ -3,6 +3,7 @@
 #include "avoidance_planner.hpp"
 #include "common.hpp"
 #include "ranging.hpp"
+#include "surface_fusion.hpp"
 
 #include <vector>
 
@@ -25,9 +26,11 @@ public:
     void Initialize(const std::array<int, 2>& image_shape);
     void Update(const DetectionResult& raw_result, int frame_id);
     void PredictOnly(int frame_id, int64_t timestamp_ms);
+    void SetSurfaceResult(const SurfaceResult& surface) { latest_surface_ = surface; }
 
     const DetectionResult& StableResult() const { return stable_result_; }
     const AvoidanceDecision& Decision() const { return decision_; }
+    const SurfaceResult& LatestSurfaceResult() const { return latest_surface_; }
 
 private:
     /** 单个物体的完整时序状态；DetectionItem 保存对外结果，其余字段只服务于关联和滤波。 */
@@ -95,7 +98,9 @@ private:
     DetectionResult stable_result_;
     AvoidanceDecision decision_;
     RangingEstimator ranging_;
+    DepthRangeFusion depth_fusion_;
     AvoidancePlanner planner_;
+    SurfaceResult latest_surface_;
 };
 
 }  // namespace obstacle

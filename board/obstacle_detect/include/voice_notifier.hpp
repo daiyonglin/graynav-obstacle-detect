@@ -205,6 +205,8 @@ private:
     std::string last_action_;
     std::string last_key_;
     std::string last_surface_hazard_;
+    std::string last_requested_action_;
+    std::string last_announced_depth_level_;
     bool surface_degraded_announced_;
     std::string last_tx_detail_;
     std::string tty_device_;

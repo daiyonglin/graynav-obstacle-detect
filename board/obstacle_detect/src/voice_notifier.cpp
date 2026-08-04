@@ -197,6 +197,8 @@ VoiceNotifier::VoiceNotifier()
       last_action_(""),
       last_key_(""),
       last_surface_hazard_("none"),
+      last_requested_action_(""),
+      last_announced_depth_level_("unknown"),
       surface_degraded_announced_(false),
       last_tx_detail_("not_sent"),
       tty_device_("/dev/ttyS1"),
@@ -833,10 +835,6 @@ std::vector<uint8_t> VoiceNotifier::BuildPromptPayload(const std::string& action
         append_bytes(&payload, kPromptSurfaceStep, sizeof(kPromptSurfaceStep));
         return payload;
     }
-    if (action == "surface_pothole") {
-        append_bytes(&payload, kPromptSurfacePothole, sizeof(kPromptSurfacePothole));
-        return payload;
-    }
     if (action == "surface_blocked") {
         append_bytes(&payload, kPromptSurfaceBlocked, sizeof(kPromptSurfaceBlocked));
         return payload;
@@ -1378,6 +1376,7 @@ void VoiceNotifier::Update(int frame_id,
     }
     (void)result;
     std::string action = decision.action.empty() ? "clear" : decision.action;
+    const bool hazard_changed = decision.hazard_type != last_surface_hazard_;
     if (!decision.perception_degraded) {
         surface_degraded_announced_ = false;
     }
@@ -1387,9 +1386,8 @@ void VoiceNotifier::Update(int frame_id,
         surface_degraded_announced_ = true;
     } else if (!safety_action && !decision.perception_degraded &&
                decision.hazard_type != "none" &&
-               decision.hazard_type != last_surface_hazard_) {
+               hazard_changed) {
         if (decision.hazard_type == "step_or_drop") action = "surface_step";
-        else if (decision.hazard_type == "pothole") action = "surface_pothole";
         else if (decision.hazard_type == "blocked_surface") action = "surface_blocked";
         else action = "surface_unknown";
     }
@@ -1401,6 +1399,18 @@ void VoiceNotifier::Update(int frame_id,
         const int since_fault_ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fault_seen_time_).count());
         if (since_fault_ms < fault_hold_ms_) action = "system_fault";
+    }
+    const bool critical = action == "stop" || action == "system_fault";
+    const bool action_changed = action != last_requested_action_;
+    const bool depth_changed = decision.depth_level != "unknown" &&
+                               decision.depth_level != last_announced_depth_level_;
+    const bool semantic_event = hazard_changed || action == "surface_degraded";
+    if (!critical && !action_changed && !depth_changed && !semantic_event) {
+        return;
+    }
+    last_requested_action_ = action;
+    if (decision.depth_level != "unknown") {
+        last_announced_depth_level_ = decision.depth_level;
     }
     if (action != "stop" && action != "system_fault" && frame_id % frame_interval_ != 0) {
         return;

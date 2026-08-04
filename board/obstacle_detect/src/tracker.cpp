@@ -142,7 +142,9 @@ void ObstacleTracker::Initialize(const std::array<int, 2>& image_shape)
     stable_result_.Clear();
     decision_ = AvoidanceDecision();
     ranging_.Initialize(image_shape);
+    depth_fusion_.Initialize(image_shape);
     planner_.Initialize(image_shape);
+    latest_surface_ = SurfaceResult();
 }
 
 float ObstacleTracker::MatchScore(const Track& track,
@@ -564,6 +566,7 @@ void ObstacleTracker::Update(const DetectionResult& raw_result, int frame_id)
     }
 
     RebuildStableResult(raw_result, timestamp_ms);
+    depth_fusion_.Apply(&stable_result_, &latest_surface_);
     decision_ = planner_.Update(stable_result_, raw_result.view_id, timestamp_ms);
 }
 
@@ -612,6 +615,8 @@ void ObstacleTracker::PredictOnly(int frame_id, int64_t timestamp_ms)
         predicted.items.resize(kMaxStableObjects);
     }
     stable_result_ = predicted;
+    depth_fusion_.Apply(&stable_result_, &latest_surface_);
+    decision_ = planner_.Update(stable_result_, predicted.view_id, timestamp_ms);
 }
 
 }  // namespace obstacle

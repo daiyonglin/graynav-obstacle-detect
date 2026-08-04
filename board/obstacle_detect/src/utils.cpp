@@ -664,7 +664,9 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
         q.layer_id = 0;
         q.type = fdevice::TYPE_HOLLOW;
         q.alpha = fdevice::TYPE_ALPHA75;
-        q.color = PickColorByClass(item.class_id);
+        // Aurora receives a monochrome preview.  Keep every dynamic box at one
+        // high-contrast LUT entry instead of encoding semantics with hue.
+        q.color = 2;
 
         box_quads.emplace_back(q);
     }
@@ -675,7 +677,11 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
     std::string risk_name = "UNK";
     if (primary_idx >= 0) {
         dir_name = dir_text(result.items[primary_idx].sector);
-        risk_name = risk_text(result.items[primary_idx].distance_m);
+        const std::string& depth = result.items[primary_idx].depth_level;
+        risk_name = depth == "near" ? "NEAR" :
+                    depth == "mid" ? "WARN" :
+                    depth == "far" ? "FAR" :
+                    risk_text(result.items[primary_idx].distance_m);
     }
     const std::string action_asset = hud_asset_path(action_name);
     const std::string info_asset = hud_asset_path(dir_name + "_" + risk_name);
@@ -698,31 +704,85 @@ void VISUALIZER::Draw(const DetectionResult& result,
 {
     Draw(result, decision);
     std::vector<sst::device::osd::OsdQuadRangle> corridors;
-    corridors.reserve(3);
+    std::vector<sst::device::osd::OsdQuadRangle> status;
+    corridors.reserve(96);
+    status.reserve(64);
     const SurfaceCorridor* states[3] = {&surface.left, &surface.center, &surface.right};
     const float x_bounds[4] = {0.0f, 0.40f, 0.60f, 1.0f};
     const float width = static_cast<float>(image_shape_[0]);
     const float height = static_cast<float>(image_shape_[1]);
     const float roi_top = std::max(0.0f, height - width);
+
+    std::string state_word = "UN";
+    if (surface.perception_degraded) state_word = "FAIL";
+    else if (surface.valid && !surface.stale) {
+        if (surface.primary_hazard == "step_or_drop") state_word = "STEP";
+        else if (surface.primary_hazard == "blocked_surface") state_word = "WALL";
+        else if (surface.center.safe_candidate) state_word = "PATH";
+    }
+    std::string depth_word = "UN";
+    if (decision.depth_level == "near") depth_word = "NEAR";
+    else if (decision.depth_level == "mid") depth_word = "MID";
+    else if (decision.depth_level == "far") depth_word = "FAR";
+    HudGlyphRenderer::DrawWord(&status, 300.0f, 28.0f, 0.42f, state_word);
+    HudGlyphRenderer::DrawWord(&status, 300.0f, 72.0f, 0.34f, depth_word);
+    int meter = decision.depth_level == "near" ? 3 :
+                decision.depth_level == "mid" ? 2 :
+                decision.depth_level == "far" ? 1 : action_level(decision.action);
+    draw_zone_meter(&status, width - 190.0f, 34.0f, meter);
+
+    if (surface.perception_degraded) {
+        // A failed surface/depth model must never leave a stale road graphic.
+        osd_device.Draw(corridors, 3);
+        osd_device.Draw(status, 0);
+        return;
+    }
+
     for (int i = 0; i < 3; ++i) {
         const SurfaceCorridor& state = *states[i];
-        sst::device::osd::OsdQuadRangle q;
-        q.box = {x_bounds[i] * width + 4.0f, roi_top + 4.0f,
-                 x_bounds[i + 1] * width - 4.0f, height - 4.0f};
-        q.border = 6;
-        q.layer_id = 3;
-        q.type = fdevice::TYPE_HOLLOW;
-        q.alpha = fdevice::TYPE_ALPHA75;
-        if (!surface.valid || surface.stale || surface.perception_degraded) {
-            q.color = 2;
-        } else if (state.persistent_hazard || state.blocked_ratio >= 0.35f) {
-            q.color = 3;
+        const float x1 = x_bounds[i] * width + 8.0f;
+        const float x2 = x_bounds[i + 1] * width - 8.0f;
+        const float y1 = roi_top + 120.0f;
+        const float y2 = height - 10.0f;
+        if (!surface.valid || surface.stale) {
+            // UNKNOWN: dashed outline, with no large opaque overlay.
+            for (float y = y1; y < y2; y += 42.0f) {
+                push_solid(&corridors, x1, y, x1 + 5.0f, std::min(y + 20.0f, y2));
+                push_solid(&corridors, x2 - 5.0f, y, x2, std::min(y + 20.0f, y2));
+            }
+        } else if (state.persistent_hazard || state.step_ratio >= 0.02f) {
+            // STEP/DROP: two strong edge lines plus a downward arrow.
+            const float edge_y = y1 + 0.58f * (y2 - y1);
+            push_solid(&corridors, x1, edge_y, x2, edge_y + 6.0f);
+            push_solid(&corridors, x1, edge_y + 18.0f, x2, edge_y + 24.0f);
+            const float cx = 0.5f * (x1 + x2);
+            push_solid(&corridors, cx - 4.0f, edge_y + 30.0f, cx + 4.0f, edge_y + 82.0f);
+            push_solid(&corridors, cx - 20.0f, edge_y + 64.0f, cx, edge_y + 72.0f);
+            push_solid(&corridors, cx, edge_y + 64.0f, cx + 20.0f, edge_y + 72.0f);
+        } else if (state.blocked_ratio >= 0.35f) {
+            // WALL: double boundary and a block-built X, all in the same gray.
+            push_hollow(&corridors, x1, y1, x2, y2, 6);
+            push_hollow(&corridors, x1 + 12.0f, y1 + 12.0f, x2 - 12.0f, y2 - 12.0f, 4);
+            const int marks = 10;
+            for (int k = 1; k < marks; ++k) {
+                const float t = static_cast<float>(k) / marks;
+                const float x = x1 + t * (x2 - x1);
+                const float ya = y1 + t * (y2 - y1);
+                const float yb = y2 - t * (y2 - y1);
+                push_solid(&corridors, x - 5.0f, ya - 8.0f, x + 5.0f, ya + 8.0f);
+                push_solid(&corridors, x - 5.0f, yb - 8.0f, x + 5.0f, yb + 8.0f);
+            }
         } else if (state.safe_candidate) {
-            q.color = 0;
+            // PATH: a thin, unfilled corridor boundary.  The background remains
+            // visible, so the demonstration still shows the real Y8 image.
+            push_hollow(&corridors, x1, y1, x2, y2, 3);
         } else {
-            q.color = 2;
+            for (float y = y1; y < y2; y += 42.0f) {
+                push_solid(&corridors, x1, y, x1 + 5.0f, std::min(y + 20.0f, y2));
+                push_solid(&corridors, x2 - 5.0f, y, x2, std::min(y + 20.0f, y2));
+            }
         }
-        corridors.push_back(q);
     }
     osd_device.Draw(corridors, 3);
+    osd_device.Draw(status, 0);
 }

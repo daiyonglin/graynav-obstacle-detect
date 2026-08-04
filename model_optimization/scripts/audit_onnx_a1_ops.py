@@ -72,7 +72,7 @@ def output_channels(value_info: onnx.ValueInfoProto) -> int | None:
     return int(dims[1].dim_value) if dims[1].dim_value else None
 
 
-def audit_conv(node: onnx.NodeProto) -> list[str]:
+def audit_conv(node: onnx.NodeProto, initializers: dict[str, onnx.TensorProto]) -> list[str]:
     """Check Conv kernel, stride and padding limits documented for A1."""
     issues: list[str] = []
     kernel = attr(node, "kernel_shape", [])
@@ -84,6 +84,17 @@ def audit_conv(node: onnx.NodeProto) -> list[str]:
             issues.append(f"{node.name or node.output[0]} Conv {label} exceeds 16: {vals}")
     if group < 1:
         issues.append(f"{node.name or node.output[0]} Conv invalid group={group}")
+    weight = initializers.get(node.input[1]) if len(node.input) > 1 else None
+    if weight is not None and len(weight.dims) == 4:
+        cin_per_group = int(weight.dims[1])
+        kh, kw = int(weight.dims[2]), int(weight.dims[3])
+        cin = cin_per_group * group
+        if cin_per_group * kh * kw > 2048:
+            issues.append(
+                f"{node.name or node.output[0]} Kw*Kh*Cin/group exceeds 2048"
+            )
+        if group not in (1, cin):
+            issues.append(f"{node.name or node.output[0]} group={group}, Cin={cin}")
     return issues
 
 
@@ -100,10 +111,11 @@ def main() -> None:
     unsupported = sorted(op for op in ops if op not in SUPPORTED_OPS)
     risky = sorted(op for op in ops if op in RISKY_OPS)
     issues: list[str] = []
+    initializers = {item.name: item for item in model.graph.initializer}
     for node in model.graph.node:
         if node.op_type == "Conv":
-            issues.extend(audit_conv(node))
-        if node.op_type == "MaxPool":
+            issues.extend(audit_conv(node, initializers))
+        if node.op_type in {"AveragePool", "MaxPool"}:
             kernel = attr(node, "kernel_shape", [])
             if kernel and any(int(v) > 8 for v in kernel):
                 issues.append(f"{node.name or node.output[0]} MaxPool kernel exceeds 8: {kernel}")

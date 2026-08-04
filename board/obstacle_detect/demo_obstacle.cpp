@@ -37,7 +37,7 @@
 #endif
 
 #ifndef A1_SEG_MODEL_FILENAME
-#define A1_SEG_MODEL_FILENAME "graynav_fast_scnn_gray1_int8.m1model"
+#define A1_SEG_MODEL_FILENAME "graynav_surface_depth_gray1_int8.m1model"
 #endif
 
 #if A1_ENABLE_VOICE
@@ -627,6 +627,12 @@ void print_json_packet(int frame_id,
         append_float_or_null(oss, item.approach_mps);
         oss << ",\"ttc_s\":";
         append_float_or_null(oss, item.ttc_s);
+        oss << ",\"depth_level\":\"" << json_escape(item.depth_level) << "\"";
+        oss << ",\"depth_confidence\":" << std::fixed << std::setprecision(3)
+            << item.depth_confidence;
+        oss << ",\"depth_source\":\"" << json_escape(item.depth_source) << "\"";
+        oss << ",\"depth_consistent\":" << (item.depth_consistent ? "true" : "false");
+        oss << ",\"approaching\":" << (item.approaching ? "true" : "false");
         oss << ",\"box\":["
             << static_cast<int>(std::round(item.box[0])) << ","
             << static_cast<int>(std::round(item.box[1])) << ","
@@ -663,20 +669,30 @@ void print_json_packet(int frame_id,
     oss << ",\"perception_source\":\"" << json_escape(decision.perception_source) << "\"";
     oss << ",\"surface_confidence\":" << std::fixed << std::setprecision(3)
         << decision.surface_confidence;
-    oss << ",\"perception_degraded\":" << (decision.perception_degraded ? "true" : "false") << "}";
+    oss << ",\"perception_degraded\":" << (decision.perception_degraded ? "true" : "false");
+    oss << ",\"depth_level\":\"" << json_escape(decision.depth_level) << "\"";
+    oss << ",\"depth_confidence\":" << decision.depth_confidence;
+    oss << ",\"depth_source\":\"" << json_escape(decision.depth_source) << "\"";
+    oss << ",\"depth_consistent\":" << (decision.depth_consistent ? "true" : "false");
+    oss << ",\"approaching\":" << (decision.approaching ? "true" : "false") << "}";
     const auto append_surface = [&oss](const char* name, const SurfaceCorridor& corridor) {
         oss << "\"" << name << "\":{";
         oss << "\"ground\":" << std::fixed << std::setprecision(3) << corridor.ground_ratio;
         oss << ",\"blocked\":" << corridor.blocked_ratio;
         oss << ",\"step\":" << corridor.step_ratio;
-        oss << ",\"pothole\":" << corridor.pothole_ratio;
         oss << ",\"safe_candidate\":" << (corridor.safe_candidate ? "true" : "false");
         oss << ",\"persistent_hazard\":" << (corridor.persistent_hazard ? "true" : "false") << "}";
     };
     oss << ",\"surface\":{\"valid\":" << (surface.valid ? "true" : "false")
         << ",\"stale\":" << (surface.stale ? "true" : "false")
         << ",\"timestamp_ms\":" << surface.timestamp_ms
-        << ",\"proximity\":\"" << json_escape(surface.proximity) << "\",";
+        << ",\"proximity\":\"" << json_escape(surface.proximity) << "\""
+        << ",\"hazard\":\"" << json_escape(surface.primary_hazard) << "\""
+        << ",\"sector\":\"" << json_escape(surface.primary_sector) << "\""
+        << ",\"depth_level\":\"" << json_escape(surface.depth_level) << "\""
+        << ",\"depth_confidence\":" << surface.depth_confidence
+        << ",\"depth_source\":\"" << json_escape(surface.depth_source) << "\""
+        << ",\"approaching\":" << (surface.approaching ? "true" : "false") << ",";
     append_surface("left", surface.left);
     oss << ",";
     append_surface("center", surface.center);
@@ -1176,6 +1192,12 @@ int main()
             g_exit_flag.store(true);
             break;
         }
+        SurfaceResult surface_snapshot = surface_result;
+        surface_snapshot.perception_degraded = surface_degraded;
+        if (surface_snapshot.valid && now_ms - surface_snapshot.timestamp_ms > surface_stale_ms) {
+            surface_snapshot.stale = true;
+        }
+        tracker.SetSurfaceResult(surface_snapshot);
         const std::chrono::steady_clock::time_point tracker_start = std::chrono::steady_clock::now();
         if (ran_surface) {
             tracker.PredictOnly(frame_id, now_ms);
@@ -1187,11 +1209,7 @@ int main()
 
         const DetectionResult& stable_result = tracker.StableResult();
         const AvoidanceDecision& tracker_decision = tracker.Decision();
-        SurfaceResult surface_snapshot = surface_result;
-        surface_snapshot.perception_degraded = surface_degraded;
-        if (surface_snapshot.valid && now_ms - surface_snapshot.timestamp_ms > surface_stale_ms) {
-            surface_snapshot.stale = true;
-        }
+        surface_snapshot = tracker.LatestSurfaceResult();
         AvoidanceDecision health_decision = tracker_decision;
 #if A1_ENABLE_SURFACE_SEG
         health_decision = surface_fusion.Fuse(tracker_decision, surface_snapshot, now_ms);

@@ -183,16 +183,24 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
 
     int nearest_track = -1;
     float nearest = 1e9f;
+    const DetectionItem* nearest_item = NULL;
+    const DetectionItem* depth_candidate = NULL;
     bool wide_urgent = false;
     bool uncertain_hazard = false;
     for (size_t i = 0; i < result.items.size(); ++i) {
         const DetectionItem& item = result.items[i];
         if (!IsActionHazard(item)) continue;
+        if (item.depth_level != "unknown" &&
+            (depth_candidate == NULL ||
+             item.depth_confidence > depth_candidate->depth_confidence)) {
+            depth_candidate = &item;
+        }
         const float distance = item.safe_distance_m >= 0.0f
             ? item.safe_distance_m : item.distance_m;
         if (distance >= 0.0f && distance < nearest) {
             nearest = distance;
             nearest_track = item.track_id;
+            nearest_item = &item;
         }
         if (item.distance_confidence < 0.25f && item.quality != "good") {
             uncertain_hazard = true;
@@ -281,10 +289,19 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     }
 
     AvoidanceDecision decision;
+    if (nearest_item == NULL) nearest_item = depth_candidate;
     decision.left = left.zone;
     decision.center = center.zone;
     decision.right = right.zone;
-    decision.nearest_track_id = nearest_track;
+    decision.nearest_track_id = nearest_track >= 0 ? nearest_track :
+        (nearest_item != NULL ? nearest_item->track_id : -1);
+    if (nearest_item != NULL) {
+        decision.depth_level = nearest_item->depth_level;
+        decision.depth_confidence = nearest_item->depth_confidence;
+        decision.depth_source = nearest_item->depth_source;
+        decision.depth_consistent = nearest_item->depth_consistent;
+        decision.approaching = nearest_item->approaching;
+    }
     decision.action = StabilizeAction(desired, timestamp_ms);
     std::ostringstream prompt;
     prompt << "reason=" << reason

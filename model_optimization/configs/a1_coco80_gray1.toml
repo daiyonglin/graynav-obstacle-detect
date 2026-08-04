@@ -1,0 +1,4 @@
+# A1 conversion input-preprocess contract for true-mono COCO80 YOLOv8n.
+[calibrate.inputs.images]
+mean = [0]
+std = [1]

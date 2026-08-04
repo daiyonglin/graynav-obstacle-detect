@@ -50,6 +50,11 @@ struct DetectionItem {
     float approach_mps;        // 朝向相机的径向速度，非接近时为 0。
     float ttc_s;               // 碰撞时间；证据不足时为负值。
     int range_measurements;    // 该轨迹累计的可靠测距次数。
+    std::string depth_level;   // near/mid/far/unknown，仅用于稳健远近表达。
+    float depth_confidence;    // 学习深度与几何证据融合后的 0~1 置信度。
+    std::string depth_source;  // geometry/learned/fused/conflict/unknown。
+    bool depth_consistent;     // 几何与学习深度的相对差异是否在 40% 内。
+    bool approaching;          // tracker 或稠密深度是否显示目标持续接近。
 
     DetectionItem()
         : box{0.f, 0.f, 0.f, 0.f},
@@ -74,7 +79,12 @@ struct DetectionItem {
           missed(0),
           approach_mps(0.0f),
           ttc_s(-1.0f),
-          range_measurements(0) {}
+          range_measurements(0),
+          depth_level("unknown"),
+          depth_confidence(0.0f),
+          depth_source("unknown"),
+          depth_consistent(false),
+          approaching(false) {}
 };
 
 /** @brief 左、中、右单条通行走廊的最近风险摘要。 */
@@ -97,21 +107,23 @@ struct ZoneStatus {
           risk_level("unknown") {}
 };
 
-/** @brief 单通道道路分割模型的四类部署契约。 */
+/** @brief 单通道道路分割模型的三类部署契约。 */
 enum SurfaceClass {
     GROUND_CANDIDATE = 0,
     BLOCKED_SURFACE = 1,
     STEP_OR_DROP = 2,
-    POTHOLE = 3,
-    SURFACE_CLASS_COUNT = 4
+    SURFACE_CLASS_COUNT = 3
 };
+
+static const int SURFACE_GRID_SIZE = 64;
+static const int SURFACE_GRID_CELLS = SURFACE_GRID_SIZE * SURFACE_GRID_SIZE;
+static const int DEPTH_BIN_COUNT = 16;
 
 /** @brief 分割网格投影到单条导航走廊后的面积比例和稳定风险。 */
 struct SurfaceCorridor {
     float ground_ratio;
     float blocked_ratio;
     float step_ratio;
-    float pothole_ratio;
     bool safe_candidate;
     bool persistent_hazard;
 
@@ -119,7 +131,6 @@ struct SurfaceCorridor {
         : ground_ratio(0.0f),
           blocked_ratio(0.0f),
           step_ratio(0.0f),
-          pothole_ratio(0.0f),
           safe_candidate(false),
           persistent_hazard(false) {}
 };
@@ -137,6 +148,15 @@ struct SurfaceResult {
     std::string primary_sector;
     std::string proximity;
     float confidence;
+    std::string depth_level;
+    float depth_confidence;
+    std::string depth_source;
+    bool depth_consistent;
+    bool approaching;
+    float center_depth_m;  // 内部融合使用，不对 Aurora/语音显示米数。
+    std::array<uint8_t, SURFACE_GRID_CELLS> labels;
+    std::array<float, SURFACE_GRID_CELLS> depth_m;
+    std::array<float, SURFACE_GRID_CELLS> depth_cell_confidence;
 
     SurfaceResult()
         : valid(false),
@@ -146,7 +166,16 @@ struct SurfaceResult {
           primary_hazard("unknown"),
           primary_sector("unknown"),
           proximity("unknown"),
-          confidence(0.0f) {}
+          confidence(0.0f),
+          depth_level("unknown"),
+          depth_confidence(0.0f),
+          depth_source("unknown"),
+          depth_consistent(false),
+          approaching(false),
+          center_depth_m(-1.0f),
+          labels{},
+          depth_m{},
+          depth_cell_confidence{} {}
 };
 
 /**
@@ -167,6 +196,11 @@ struct AvoidanceDecision {
     std::string perception_source;
     float surface_confidence;
     bool perception_degraded;
+    std::string depth_level;
+    float depth_confidence;
+    std::string depth_source;
+    bool depth_consistent;
+    bool approaching;
 
     AvoidanceDecision()
         : action("clear"),
@@ -176,7 +210,12 @@ struct AvoidanceDecision {
           hazard_sector("unknown"),
           perception_source("detection"),
           surface_confidence(0.0f),
-          perception_degraded(false) {
+          perception_degraded(false),
+          depth_level("unknown"),
+          depth_confidence(0.0f),
+          depth_source("unknown"),
+          depth_consistent(false),
+          approaching(false) {
         left.dir = "left";
         center.dir = "center";
         right.dir = "right";
