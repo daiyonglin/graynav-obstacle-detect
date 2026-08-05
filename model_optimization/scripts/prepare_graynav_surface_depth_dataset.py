@@ -24,18 +24,15 @@ STEP = 2
 IGNORE = 255
 
 # MIT Scene Parsing 150 uses one-based ids and zero for unlabeled pixels.
-ADE_GROUND = {4, 7, 12, 14, 29, 30, 47, 53, 55}
-ADE_BLOCKED = {1, 2, 15, 33, 39, 43}
-ADE_STEP = {54, 60}
-
-# NYUv2 labelled release uses the official NYU40 ids.  Stairs are folded into
-# "other structure" by NYU40, so NYU contributes ground/blocked and metric
-# depth while StairNetV3 supplies the explicit step/drop supervision.
-NYU_GROUND = {2, 20}  # floor, floor mat
-NYU_BLOCKED = {
-    1, 3, 4, 6, 7, 8, 9, 10, 12, 14, 15, 17, 19, 22, 24, 25,
-    29, 30, 32, 33, 34, 36, 38, 39,
+# Keep this mapping conservative: ground is a traversable-shape candidate, while
+# water, vegetation and vertical structures are blocked.  The four explicit
+# stair-like labels in ADE150 are folded into one deployment hazard class.
+ADE_GROUND = {4, 7, 12, 14, 29, 30, 47, 53, 55, 92, 95}
+ADE_BLOCKED = {
+    1, 2, 5, 10, 15, 18, 22, 27, 33, 35, 39, 43, 49, 52, 61,
+    69, 73, 80, 85, 96, 105, 110, 114, 129,
 }
+ADE_STEP = {54, 60, 97, 122}
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,15 +115,6 @@ def remap_ade(mask: np.ndarray) -> np.ndarray:
     return out
 
 
-def remap_nyu(mask: np.ndarray) -> np.ndarray:
-    out = np.full(mask.shape[:2], IGNORE, dtype=np.uint8)
-    for value in NYU_GROUND:
-        out[mask == value] = GROUND
-    for value in NYU_BLOCKED:
-        out[mask == value] = BLOCKED
-    return out
-
-
 def convert_ade(root: Path, output: Path, split: str) -> list[dict[str, object]]:
     official = "training" if split == "train" else "validation"
     image_root = find_dir(root, (f"images/{official}", official))
@@ -166,11 +154,18 @@ def split_indices(splits_path: Path | None, count: int) -> tuple[set[int], set[i
 
 
 def convert_nyu(mat_path: Path, splits_path: Path | None, output: Path) -> dict[str, list[dict[str, object]]]:
+    """Convert official labeled NYUv2 as grayscale metric-depth supervision.
+
+    The MAT file's ``labels`` tensor contains the original fine-grained NYU
+    category ids, not NYU40 ids.  Applying NYU40 class numbers directly would
+    silently create incorrect ground/blocked masks, so segmentation remains
+    loss-masked here.  ADE20K and StairNetV3 provide segmentation supervision.
+    """
+
     records = {"train": [], "val": []}
     with h5py.File(mat_path, "r") as handle:
         images = handle["images"]
         depths = handle["depths"]
-        labels = handle.get("labels")
         train, val = split_indices(splits_path, images.shape[0])
         for index in range(images.shape[0]):
             split = "train" if index in train else ("val" if index in val else "")
@@ -178,10 +173,9 @@ def convert_nyu(mat_path: Path, splits_path: Path | None, output: Path) -> dict[
                 continue
             rgb = np.asarray(images[index]).transpose(2, 1, 0)
             depth = np.asarray(depths[index]).T.astype(np.float32)
-            seg = None if labels is None else remap_nyu(np.asarray(labels[index]).T)
             gray = to_gray(rgb)
             records[split].append(write_sample(
-                output, split, f"nyu_{index:06d}", "nyuv2", gray, seg, depth,
+                output, split, f"nyu_{index:06d}", "nyuv2", gray, None, depth,
             ))
     return records
 
@@ -189,7 +183,10 @@ def convert_nyu(mat_path: Path, splits_path: Path | None, output: Path) -> dict[
 def paired_stair_files(split_root: Path) -> list[tuple[Path, Path, Path | None]]:
     image_root = find_dir(split_root, ("images", "image", "rgb"))
     mask_root = find_dir(split_root, ("segmentations", "segmentation", "labels", "masks"))
-    depth_root = find_dir(split_root, ("depth", "depths", "depth_maps"))
+    # The official StairNetV3 archive intentionally spells this directory
+    # "depthes".  Retain aliases for repackaged mirrors, but recognize the
+    # published layout without requiring the user to rename any files.
+    depth_root = find_dir(split_root, ("depthes", "depth", "depths", "depth_maps"))
     if image_root is None or mask_root is None:
         return []
     masks = {path.stem: path for path in files(mask_root, {".png", ".jpg", ".bmp"})}
