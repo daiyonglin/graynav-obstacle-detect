@@ -148,6 +148,18 @@ tmux new -s graynav
 bash model_optimization/run_surface_depth_cloud.sh 2>&1 | tee /root/autodl-tmp/graynav/logs/surface_depth.log
 ```
 
+训练循环使用 tqdm 显示 epoch、batch、总损失、分割损失、深度损失和学习率。另开一个终端启动 TensorBoard：
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate /root/autodl-tmp/graynav/env
+tensorboard \
+  --logdir /root/autodl-tmp/graynav_surface_depth_run/tensorboard \
+  --host 0.0.0.0 --port 6006
+```
+
+TensorBoard 记录逐 batch 总损失与学习率，并按 epoch 记录分割/深度损失、三类 IoU/F1、危险类别平均 F1、AbsRel、delta1、近远顺序正确率和模型选择分数。
+
 导入器必须打印：
 
 ```text

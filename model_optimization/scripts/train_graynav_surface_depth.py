@@ -15,7 +15,9 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from tqdm.auto import tqdm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODEL_ROOT = SCRIPT_DIR.parent
@@ -50,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width-mult", type=float, choices=(1.0, 0.75), default=1.0)
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--log-dir", type=Path)
     parser.add_argument(
         "--pretrained-fastscnn",
         type=Path,
@@ -257,7 +260,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
     delta1_hits = 0
     depth_count = 0
     sample_depth_pairs: list[tuple[float, float]] = []
-    for batch in loader:
+    for batch in tqdm(loader, desc="validation", unit="batch", dynamic_ncols=True, leave=False):
         images = batch["image"].to(device)
         seg = F.interpolate(batch["seg"][:, None].float(), (64, 64), mode="nearest")[:, 0].long()
         depth = F.interpolate(batch["depth"][:, None], (64, 64), mode="nearest")[:, 0].to(device)
@@ -358,6 +361,9 @@ def main() -> None:
                 best_score = max(float(row["selection_score"]) for row in history)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
     class_weights = CLASS_WEIGHTS.to(device)
+    log_dir = args.log_dir or (args.output / "tensorboard")
+    writer = SummaryWriter(log_dir=str(log_dir))
+    print(f"tensorboard_log_dir={log_dir}")
     for epoch in range(start_epoch, args.epochs):
         if epoch < 5:
             epoch_lr = args.lr * float(epoch + 1) / 5.0
@@ -369,7 +375,14 @@ def main() -> None:
         model.train()
         running = 0.0
         parts = {"seg": 0.0, "depth_ordinal": 0.0, "depth_smooth": 0.0}
-        for batch in train_loader:
+        progress = tqdm(
+            train_loader,
+            desc=f"train {epoch + 1}/{args.epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            leave=True,
+        )
+        for batch_index, batch in enumerate(progress):
             images = batch["image"].to(device, non_blocking=True)
             seg = batch["seg"].to(device, non_blocking=True)
             depth = batch["depth"].to(device, non_blocking=True)
@@ -383,6 +396,15 @@ def main() -> None:
             running += float(loss.detach())
             for key in parts:
                 parts[key] += detail[key]
+            global_step = epoch * len(train_loader) + batch_index
+            writer.add_scalar("train/loss_step", float(loss.detach()), global_step)
+            writer.add_scalar("train/learning_rate_step", epoch_lr, global_step)
+            progress.set_postfix(
+                loss=f"{float(loss.detach()):.4f}",
+                seg=f"{detail['seg']:.4f}",
+                depth=f"{detail['depth_ordinal']:.4f}",
+                lr=f"{epoch_lr:.2e}",
+            )
         model.eval()
         metrics = evaluate(model, val_loader, device)
         score = float(metrics["hazard_macro_f1"]) - 0.25 * float(metrics["depth_absrel"])
@@ -396,6 +418,21 @@ def main() -> None:
         }
         history.append(row)
         print(json.dumps(row, ensure_ascii=False))
+        writer.add_scalar("train/loss_epoch", row["loss"], epoch)
+        writer.add_scalar("train/seg_loss_epoch", row["seg"], epoch)
+        writer.add_scalar("train/depth_ordinal_epoch", row["depth_ordinal"], epoch)
+        writer.add_scalar("train/depth_smooth_epoch", row["depth_smooth"], epoch)
+        writer.add_scalar("train/learning_rate_epoch", epoch_lr, epoch)
+        writer.add_scalar("val/hazard_macro_f1", metrics["hazard_macro_f1"], epoch)
+        writer.add_scalar("val/depth_absrel", metrics["depth_absrel"], epoch)
+        writer.add_scalar("val/depth_delta1", metrics["depth_delta1"], epoch)
+        writer.add_scalar("val/near_far_order_accuracy", metrics["near_far_order_accuracy"], epoch)
+        writer.add_scalar("val/selection_score", score, epoch)
+        for name, value in metrics["iou"].items():
+            writer.add_scalar(f"val_iou/{name}", value, epoch)
+        for name, value in metrics["f1"].items():
+            writer.add_scalar(f"val_f1/{name}", value, epoch)
+        writer.flush()
         contract = {
             "model": "graynav_surface_depth_gray1",
             "input_shape": [1, 1, 256, 256],
@@ -419,6 +456,7 @@ def main() -> None:
         history_path.write_text(
             json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+    writer.close()
 
 
 if __name__ == "__main__":

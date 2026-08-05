@@ -5,3 +5,5 @@ onnx>=1.14,<2
 onnxruntime>=1.16,<2
 h5py>=3.10,<4
 scipy>=1.11,<2
+tensorboard>=2.16,<3
+tqdm>=4.66,<5

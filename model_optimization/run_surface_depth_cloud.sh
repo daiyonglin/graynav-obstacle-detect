@@ -46,6 +46,7 @@ fi
 
 python "${ROOT}/scripts/train_graynav_surface_depth.py" \
   --data "${PREPARED}" --output "${RUN_ROOT}/train" \
+  --log-dir "${RUN_ROOT}/tensorboard" \
   --epochs 50 --batch-size 32 --workers 8 --lr 3e-4 \
   --weight-decay 0.01 --width-mult "${WIDTH_MULT}" --amp \
   "${TRAIN_INIT[@]}"
