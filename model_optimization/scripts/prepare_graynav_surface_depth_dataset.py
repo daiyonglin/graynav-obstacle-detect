@@ -208,9 +208,16 @@ def read_depth(path: Path | None) -> np.ndarray | None:
     raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if raw is None:
         raise RuntimeError(f"cannot read depth {path}")
+    # StairNetV3 train/val publishes 8-bit depth visualizations.  No metric
+    # scale or per-image conversion is provided for those PNGs, so treating
+    # their 0..255 intensities as metres or millimetres would silently corrupt
+    # the ordinal-depth target.  Keep them loss-masked; NYUv2 supplies the
+    # reliable metric-depth supervision.  Repackaged uint16 depth maps are
+    # accepted as millimetres, while float arrays are expected through .npy.
+    if raw.dtype == np.uint8:
+        return None
     depth = raw.astype(np.float32)
-    # StairNet exports may be millimetres; values already in metres remain unchanged.
-    if float(np.nanpercentile(depth, 95)) > 100.0:
+    if np.issubdtype(raw.dtype, np.integer):
         depth *= 0.001
     return depth
 
