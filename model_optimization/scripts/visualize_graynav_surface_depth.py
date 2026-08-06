@@ -13,7 +13,6 @@ import json
 import math
 import random
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -127,10 +126,12 @@ def put_text(
     )
 
 
-def add_panel(image: np.ndarray, title: str, subtitle: str = "") -> np.ndarray:
+def titled_image(image: np.ndarray, title: str, subtitle: str = "") -> np.ndarray:
+    """Render one information type as its own readable image file."""
+
     resized = cv2.resize(image, (PANEL_SIZE, PANEL_SIZE), interpolation=cv2.INTER_AREA)
     canvas = np.full((PANEL_SIZE + 58, PANEL_SIZE, 3), 24, dtype=np.uint8)
-    canvas[48:] = resized
+    canvas[58 : 58 + PANEL_SIZE] = resized
     put_text(canvas, title, (10, 21), scale=0.58, thickness=2)
     if subtitle:
         put_text(canvas, subtitle, (10, 41), scale=0.42, color=(205, 205, 205))
@@ -220,24 +221,6 @@ def depth_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, objec
     }
 
 
-def make_contact_sheet(strips: list[np.ndarray], title: str) -> np.ndarray:
-    thumb_width = 960
-    thumbs = [
-        cv2.resize(strip, (thumb_width, int(strip.shape[0] * thumb_width / strip.shape[1])))
-        for strip in strips
-    ]
-    cell_height = max(item.shape[0] for item in thumbs)
-    columns = 2
-    rows = math.ceil(len(thumbs) / columns)
-    sheet = np.full((56 + rows * cell_height, columns * thumb_width, 3), 18, np.uint8)
-    put_text(sheet, title, (18, 36), scale=0.82, thickness=2)
-    for index, thumb in enumerate(thumbs):
-        y = 56 + (index // columns) * cell_height
-        x = (index % columns) * thumb_width
-        sheet[y : y + thumb.shape[0], x : x + thumb.shape[1]] = thumb
-    return sheet
-
-
 def mean_available(rows: list[dict[str, object]], path: tuple[str, ...]) -> float | None:
     values: list[float] = []
     for row in rows:
@@ -271,7 +254,6 @@ def main() -> None:
         load_manifest(args.data), list(args.sources), args.samples_per_source, args.seed
     )
     results: list[dict[str, object]] = []
-    strips_by_source: dict[str, list[np.ndarray]] = defaultdict(list)
 
     for record in records:
         source = str(record["source"])
@@ -343,34 +325,42 @@ def main() -> None:
             gt_depth_view = unavailable_panel("NO METRIC DEPTH GT")
 
         mono = cv2.cvtColor(gray256, cv2.COLOR_GRAY2BGR)
-        strip = np.concatenate(
-            (
-                add_panel(mono, "MONO INPUT", source_id),
-                add_panel(gt_seg_view, "SEGMENTATION GT", "green ground / red blocked / orange step"),
-                add_panel(
-                    prediction_overlay,
-                    "SEGMENTATION PREDICTION",
-                    f"mean confidence {float(seg_confidence.mean()):.3f}",
-                ),
-                add_panel(
-                    predicted_depth_view,
-                    "DEPTH PREDICTION",
-                    f"corridor {level}; metric value diagnostic only",
-                ),
-                add_panel(gt_depth_view, "METRIC DEPTH GT", "near warm / far cool"),
+        scene_dir = args.output / source / source_id.replace(":", "_")
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        scene_images = {
+            "mono_input": titled_image(mono, "MONO MODEL INPUT", source_id),
+            "segmentation_gt": titled_image(
+                gt_seg_view,
+                "SEGMENTATION GROUND TRUTH",
+                "green ground / red blocked / orange step",
             ),
-            axis=1,
-        )
-        destination = args.output / source / f"{source_id.replace(':', '_')}.jpg"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(destination), strip, [cv2.IMWRITE_JPEG_QUALITY, 94]):
-            raise RuntimeError(f"cannot write {destination}")
-        sample["visualization"] = destination.relative_to(args.output).as_posix()
+            "segmentation_prediction": titled_image(
+                prediction_overlay,
+                "SEGMENTATION PREDICTION",
+                f"mean confidence {float(seg_confidence.mean()):.3f}",
+            ),
+            "depth_prediction": titled_image(
+                predicted_depth_view,
+                "DEPTH PREDICTION",
+                f"center corridor {level}; diagnostic only",
+            ),
+            "metric_depth_gt": titled_image(
+                gt_depth_view,
+                "METRIC DEPTH GROUND TRUTH",
+                "near warm / far cool",
+            ),
+        }
+        written: dict[str, str] = {}
+        for order, (kind, image) in enumerate(scene_images.items(), start=1):
+            destination = scene_dir / f"{order:02d}_{kind}.jpg"
+            if not cv2.imwrite(str(destination), image, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                raise RuntimeError(f"cannot write {destination}")
+            written[kind] = destination.relative_to(args.output).as_posix()
+        sample["visualizations"] = written
         results.append(sample)
-        strips_by_source[source].append(strip)
 
     aggregate: dict[str, object] = {}
-    for source, strips in strips_by_source.items():
+    for source in args.sources:
         rows = [row for row in results if row["source"] == source]
         aggregate[source] = {
             "samples": len(rows),
@@ -395,12 +385,6 @@ def main() -> None:
                 for level in ("NEAR", "MID", "FAR", "UNKNOWN")
             },
         }
-        sheet = make_contact_sheet(strips, f"GrayNav public validation: {source}")
-        cv2.imwrite(
-            str(args.output / f"contact_sheet_{source}.jpg"),
-            sheet,
-            [cv2.IMWRITE_JPEG_QUALITY, 92],
-        )
 
     report = {
         "checkpoint": str(args.checkpoint),
@@ -416,6 +400,7 @@ def main() -> None:
             "Colour overlays are cloud diagnostics and are not the grayscale Aurora OSD.",
             "Public validation images do not reproduce the SC132GS spectral response.",
             "Displayed metric depth is diagnostic and is not a calibrated board claim.",
+            "Each scene and information type is saved separately; no contact sheet is generated.",
         ],
         "aggregate": aggregate,
         "samples": results,
@@ -427,6 +412,7 @@ def main() -> None:
         "GrayNav public-validation qualitative diagnostics.\n"
         "Green=ground candidate, red=blocked surface, orange=step/drop.\n"
         "Depth uses warm=near and cool=far. Metric values are diagnostic only.\n"
+        "Each source/scene directory contains five separate images.\n"
         "These colour panels are not the grayscale Aurora deployment UI.\n",
         encoding="utf-8",
     )
