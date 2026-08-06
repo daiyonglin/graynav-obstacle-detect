@@ -39,6 +39,7 @@ CLASS_COLORS_BGR = np.asarray(
         (70, 190, 70),    # ground: green
         (55, 55, 225),    # blocked: red
         (0, 190, 255),    # step/drop: orange
+        (180, 90, 30),    # unknown/other: blue
     ),
     dtype=np.uint8,
 )
@@ -52,6 +53,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-source", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--fixed-regression-set", action="store_true",
+        help="use the immutable E1/E2/E3 comparison sample ids",
+    )
     parser.add_argument(
         "--sources",
         nargs="+",
@@ -73,11 +78,17 @@ def load_manifest(root: Path) -> list[dict[str, object]]:
 
 
 def select_records(
-    rows: list[dict[str, object]], sources: list[str], count: int, seed: int
+    rows: list[dict[str, object]], sources: list[str], count: int, seed: int,
+    fixed_regression_set: bool = False,
 ) -> list[dict[str, object]]:
     if count < 1:
         raise ValueError("samples-per-source must be positive")
     chosen: list[dict[str, object]] = []
+    fixed_suffixes = {
+        "ade20k": ("000285", "000501"),
+        "stairnetv3": ("000006", "000014", "000027", "000068", "000299", "000382", "000414", "000485"),
+        "nyuv2": ("000118", "000649", "000663", "001088"),
+    }
     for source_index, source in enumerate(sources):
         candidates = sorted(
             (row for row in rows if str(row.get("source")) == source),
@@ -85,6 +96,19 @@ def select_records(
         )
         if not candidates:
             raise RuntimeError(f"validation source is empty: {source}")
+        if fixed_regression_set:
+            selected = [
+                row for suffix in fixed_suffixes.get(source, ())
+                for row in candidates if str(row["source_id"]).endswith(suffix)
+            ]
+            missing = [
+                suffix for suffix in fixed_suffixes.get(source, ())
+                if not any(str(row["source_id"]).endswith(suffix) for row in candidates)
+            ]
+            if missing:
+                raise RuntimeError(f"fixed {source} regression ids are missing: {missing}")
+            chosen.extend(selected)
+            continue
         rng = random.Random(seed + source_index * 1009)
         indices = sorted(rng.sample(range(len(candidates)), min(count, len(candidates))))
         chosen.extend(candidates[index] for index in indices)
@@ -246,12 +270,17 @@ def main() -> None:
     contract = checkpoint.get("contract", {})
     if contract.get("input_shape") != [1, 1, 256, 256]:
         raise RuntimeError(f"not a GrayNav mono checkpoint: {contract}")
-    model = GrayNavSurfaceDepth(width_mult=float(contract.get("width_mult", 1.0)))
+    model = GrayNavSurfaceDepth(
+        width_mult=float(contract.get("width_mult", 1.0)),
+        detail64=bool(contract.get("detail64", False)),
+        num_surface_classes=int(contract.get("seg_shape", [1, 4])[1]),
+    )
     model.load_state_dict(checkpoint["model"], strict=True)
     model.to(device).eval()
 
     records = select_records(
-        load_manifest(args.data), list(args.sources), args.samples_per_source, args.seed
+        load_manifest(args.data), list(args.sources), args.samples_per_source, args.seed,
+        args.fixed_regression_set,
     )
     results: list[dict[str, object]] = []
 
@@ -332,7 +361,7 @@ def main() -> None:
             "segmentation_gt": titled_image(
                 gt_seg_view,
                 "SEGMENTATION GROUND TRUTH",
-                "green ground / red blocked / orange step",
+                "green ground / red blocked / orange step / blue unknown",
             ),
             "segmentation_prediction": titled_image(
                 prediction_overlay,
@@ -392,7 +421,10 @@ def main() -> None:
         "input_contract": [1, 1, 256, 256],
         "sampling": {
             "split": "official_validation",
-            "method": "fixed-seed random without replacement per source",
+            "method": (
+                "immutable regression ids" if args.fixed_regression_set
+                else "fixed-seed random without replacement per source"
+            ),
             "seed": args.seed,
             "samples_per_source": args.samples_per_source,
         },
@@ -410,7 +442,7 @@ def main() -> None:
     )
     (args.output / "README.txt").write_text(
         "GrayNav public-validation qualitative diagnostics.\n"
-        "Green=ground candidate, red=blocked surface, orange=step/drop.\n"
+        "Green=ground, red=blocked, orange=step/drop, blue=unknown/other.\n"
         "Depth uses warm=near and cool=far. Metric values are diagnostic only.\n"
         "Each source/scene directory contains five separate images.\n"
         "These colour panels are not the grayscale Aurora deployment UI.\n",

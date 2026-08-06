@@ -15,9 +15,14 @@ from .graynav_fast_scnn import (
 )
 
 
-NUM_SURFACE_CLASSES = 3
+NUM_SURFACE_CLASSES = 4
 NUM_DEPTH_BINS = 16
-SURFACE_CLASS_NAMES = ("ground_candidate", "blocked_surface", "step_or_drop")
+SURFACE_CLASS_NAMES = (
+    "ground_candidate",
+    "blocked_surface",
+    "step_or_drop",
+    "unknown_other",
+)
 DEPTH_MIN_M = 0.30
 DEPTH_MAX_M = 8.0
 
@@ -25,7 +30,13 @@ DEPTH_MAX_M = 8.0
 class GrayNavSurfaceDepth(nn.Module):
     """True-mono shared encoder with raw 64x64 segmentation/depth logits."""
 
-    def __init__(self, in_channels: int = 1, width_mult: float = 1.0) -> None:
+    def __init__(
+        self,
+        in_channels: int = 1,
+        width_mult: float = 1.0,
+        detail64: bool = False,
+        num_surface_classes: int = NUM_SURFACE_CLASSES,
+    ) -> None:
         super().__init__()
         if in_channels != 1:
             raise ValueError("deployment contract requires one grayscale input channel")
@@ -35,6 +46,8 @@ class GrayNavSurfaceDepth(nn.Module):
             _scaled_channels(value, width_mult) for value in (32, 48, 64, 96, 128)
         )
         self.width_mult = width_mult
+        self.detail64 = detail64
+        self.num_surface_classes = num_surface_classes
         self.learning_to_downsample = nn.Sequential(
             ConvBNReLU(1, c32, kernel_size=3, stride=2, padding=1),
             SeparableConvBNReLU(c32, c48, stride=2),
@@ -51,8 +64,19 @@ class GrayNavSurfaceDepth(nn.Module):
             SeparableConvBNReLU(c128, c128),
             SeparableConvBNReLU(c128, c128),
         )
-        self.seg_head = nn.Conv2d(c128, NUM_SURFACE_CLASSES, kernel_size=1, bias=True)
-        self.depth_head = nn.Conv2d(c128, NUM_DEPTH_BINS, kernel_size=1, bias=True)
+        head_channels = c128
+        if detail64:
+            c_detail = _scaled_channels(64, width_mult)
+            self.detail_projection = ConvBNReLU(c48, c_detail, kernel_size=1, padding=0)
+            self.semantic_projection = ConvBNReLU(
+                c128, c_detail, kernel_size=1, padding=0, relu=False
+            )
+            self.detail_refinement = SeparableConvBNReLU(c_detail, c_detail)
+            head_channels = c_detail
+        self.seg_head = nn.Conv2d(
+            head_channels, num_surface_classes, kernel_size=1, bias=True
+        )
+        self.depth_head = nn.Conv2d(head_channels, NUM_DEPTH_BINS, kernel_size=1, bias=True)
 
     @property
     def first_conv(self) -> nn.Conv2d:
@@ -62,7 +86,9 @@ class GrayNavSurfaceDepth(nn.Module):
         return conv
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        high = self.learning_to_downsample(images)  # 32x32
+        stem = self.learning_to_downsample[0](images)       # 128x128
+        detail = self.learning_to_downsample[1](stem)       # 64x64
+        high = self.learning_to_downsample[2](detail)       # 32x32
         low = self.bottleneck1(high)
         low = self.bottleneck2(low)                 # 8x8
         low = self.bottleneck3(low)
@@ -73,6 +99,14 @@ class GrayNavSurfaceDepth(nn.Module):
             inplace=False,
         )
         shared = self.shared_decoder(fused)
+        if self.detail64:
+            semantic = self.semantic_projection(shared)
+            semantic = F.interpolate(semantic, scale_factor=2.0, mode="nearest")
+            shared = F.relu(
+                self.detail_projection(detail) + semantic,
+                inplace=False,
+            )
+            shared = self.detail_refinement(shared)
         seg = self.seg_head(shared)
         depth = self.depth_head(shared)
         # Keep the deployment output coarse but retain thin stair boundaries better
@@ -80,8 +114,9 @@ class GrayNavSurfaceDepth(nn.Module):
         # A constant scale vector exports directly to Resize.  Passing
         # size=(64,64) makes PyTorch synthesize Shape/Slice nodes to preserve N/C,
         # which the A1 compiler contract forbids even though H/W are fixed.
-        seg = F.interpolate(seg, scale_factor=2.0, mode="nearest")
-        depth = F.interpolate(depth, scale_factor=2.0, mode="nearest")
+        if not self.detail64:
+            seg = F.interpolate(seg, scale_factor=2.0, mode="nearest")
+            depth = F.interpolate(depth, scale_factor=2.0, mode="nearest")
         return seg, depth
 
 

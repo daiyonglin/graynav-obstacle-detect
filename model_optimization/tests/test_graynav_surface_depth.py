@@ -21,9 +21,17 @@ class GrayNavSurfaceDepthTest(unittest.TestCase):
         model = GrayNavSurfaceDepth().eval()
         with torch.no_grad():
             seg, depth = model(torch.zeros(1, 1, 256, 256))
-        self.assertEqual(tuple(seg.shape), (1, 3, 64, 64))
+        self.assertEqual(tuple(seg.shape), (1, 4, 64, 64))
         self.assertEqual(tuple(depth.shape), (1, 16, 64, 64))
         self.assertEqual(model.first_conv.weight.shape[1], 1)
+
+    def test_detail64_contract(self) -> None:
+        model = GrayNavSurfaceDepth(detail64=True).eval()
+        with torch.no_grad():
+            seg, depth = model(torch.zeros(1, 1, 256, 256))
+        self.assertEqual(tuple(seg.shape), (1, 4, 64, 64))
+        self.assertEqual(tuple(depth.shape), (1, 16, 64, 64))
+        self.assertTrue(model.detail64)
 
     def test_fold_is_replicate_exact(self) -> None:
         model = GrayNavSurfaceDepth()

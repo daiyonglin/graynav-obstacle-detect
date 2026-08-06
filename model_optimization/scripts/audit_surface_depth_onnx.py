@@ -55,7 +55,7 @@ def main() -> None:
     if input_shapes != {"images": [1, 1, 256, 256]}:
         errors.append(f"input contract mismatch: {input_shapes}")
     expected_outputs = {
-        "seg_logits": [1, 3, 64, 64],
+        "seg_logits": [1, 4, 64, 64],
         "depth_logits": [1, 16, 64, 64],
     }
     if output_shapes != expected_outputs:

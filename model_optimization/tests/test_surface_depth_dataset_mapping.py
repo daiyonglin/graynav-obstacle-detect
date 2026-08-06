@@ -16,26 +16,37 @@ from scripts.prepare_graynav_surface_depth_dataset import (  # noqa: E402
     GROUND,
     IGNORE,
     STEP,
+    UNKNOWN,
     paired_stair_files,
     read_depth,
     remap_ade,
+    remap_stair_mask,
 )
 
 
 class SurfaceDepthDatasetMappingTest(unittest.TestCase):
     def test_ade20k_hazard_mapping(self) -> None:
         # floor, road, wall, vegetation, water, stairs, stairway,
-        # escalator, step and person (ignored)
+        # escalator, step, person (unknown), and raw unlabeled
         source = np.array(
-            [[4, 7, 1, 18, 22, 54, 60, 97, 122, 13]],
+            [[4, 7, 1, 18, 22, 54, 60, 97, 122, 13, 0]],
             dtype=np.uint8,
         )
         expected = np.array(
             [[GROUND, GROUND, BLOCKED, BLOCKED, BLOCKED,
-              STEP, STEP, STEP, STEP, IGNORE]],
+              STEP, STEP, STEP, STEP, UNKNOWN, IGNORE]],
             dtype=np.uint8,
         )
         np.testing.assert_array_equal(remap_ade(source), expected)
+
+    def test_stairnet_has_negative_supervision_and_ignored_boundary(self) -> None:
+        mask = np.zeros((31, 31), dtype=np.uint8)
+        mask[8:23, 8:23] = 255
+        mapped = remap_stair_mask(mask, boundary_pixels=2)
+        self.assertEqual(int(mapped[15, 15]), STEP)
+        self.assertEqual(int(mapped[0, 0]), UNKNOWN)
+        self.assertEqual(int(mapped[8, 15]), IGNORE)
+        self.assertFalse(bool(np.any(mapped == GROUND)))
 
     def test_official_stairnet_depthes_directory_is_paired(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

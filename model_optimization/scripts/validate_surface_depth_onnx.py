@@ -29,8 +29,11 @@ def main() -> None:
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     payload = torch.load(args.checkpoint, map_location="cpu")
-    width = float(payload.get("contract", {}).get("width_mult", 1.0))
-    model = GrayNavSurfaceDepth(width_mult=width).eval()
+    contract = payload.get("contract", {})
+    width = float(contract.get("width_mult", 1.0))
+    model = GrayNavSurfaceDepth(
+        width_mult=width, detail64=bool(contract.get("detail64", False))
+    ).eval()
     model.load_state_dict(payload["model"], strict=True)
     session = ort.InferenceSession(str(args.onnx), providers=["CPUExecutionProvider"])
     paths = sorted(

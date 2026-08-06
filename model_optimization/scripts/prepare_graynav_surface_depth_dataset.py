@@ -21,6 +21,7 @@ from scipy.io import loadmat
 GROUND = 0
 BLOCKED = 1
 STEP = 2
+UNKNOWN = 3
 IGNORE = 255
 
 # MIT Scene Parsing 150 uses one-based ids and zero for unlabeled pixels.
@@ -105,7 +106,10 @@ def write_sample(
 
 
 def remap_ade(mask: np.ndarray) -> np.ndarray:
-    out = np.full(mask.shape[:2], IGNORE, dtype=np.uint8)
+    # ADE ids 1..150 are valid annotated pixels.  Unmapped semantic content is
+    # explicitly UNKNOWN instead of ignore, so it can suppress false hazards.
+    out = np.full(mask.shape[:2], UNKNOWN, dtype=np.uint8)
+    out[mask == 0] = IGNORE
     for value in ADE_GROUND:
         out[mask == value] = GROUND
     for value in ADE_BLOCKED:
@@ -113,6 +117,24 @@ def remap_ade(mask: np.ndarray) -> np.ndarray:
     for value in ADE_STEP:
         out[mask == value] = STEP
     return out
+
+
+def remap_stair_mask(mask: np.ndarray, boundary_pixels: int = 5) -> np.ndarray:
+    """Map StairNet to STEP/UNKNOWN with an ignored anti-aliased boundary band."""
+
+    if mask.ndim == 3:
+        positive = np.any(mask >= 128, axis=2)
+    else:
+        positive = mask >= 128
+    kernel_size = max(1, int(boundary_pixels) * 2 + 1)
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    expanded = cv2.dilate(positive.astype(np.uint8), kernel) > 0
+    contracted = cv2.erode(positive.astype(np.uint8), kernel) > 0
+    boundary = expanded & ~contracted
+    seg = np.full(positive.shape, UNKNOWN, dtype=np.uint8)
+    seg[positive & ~boundary] = STEP
+    seg[boundary] = IGNORE
+    return seg
 
 
 def convert_ade(root: Path, output: Path, split: str) -> list[dict[str, object]]:
@@ -232,11 +254,7 @@ def convert_stairs(root: Path, output: Path, split: str) -> list[dict[str, objec
         mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
         if bgr is None or mask is None:
             raise RuntimeError(f"cannot read StairNet pair {image_path}")
-        positive = np.any(mask != 0, axis=2) if mask.ndim == 3 else mask != 0
-        band = max(3, min(15, (min(positive.shape) // 80) | 1))
-        positive = cv2.dilate(positive.astype(np.uint8), np.ones((band, band), np.uint8)) > 0
-        seg = np.full(positive.shape, IGNORE, dtype=np.uint8)
-        seg[positive] = STEP
+        seg = remap_stair_mask(mask, boundary_pixels=5)
         records.append(write_sample(
             output, split, f"stair_{split}_{index:06d}", "stairnetv3",
             cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), seg, read_depth(depth_path),
@@ -267,7 +285,9 @@ def main() -> None:
     if not any(by_split.values()):
         raise RuntimeError("no public dataset was provided or recognized")
     summary: dict[str, object] = {
-        "classes": ["ground_candidate", "blocked_surface", "step_or_drop"],
+        "classes": [
+            "ground_candidate", "blocked_surface", "step_or_drop", "unknown_other"
+        ],
         "depth_bins": 16,
         "depth_range_m": [0.3, 8.0],
         "input_channels": 1,
