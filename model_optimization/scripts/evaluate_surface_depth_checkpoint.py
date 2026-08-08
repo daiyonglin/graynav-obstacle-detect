@@ -62,6 +62,9 @@ def main() -> None:
         "depth_absrel": metrics["depth"]["absrel"],
         "depth_gradient_mae": metrics["depth"]["gradient_mae"],
         "whole_frame_step_prediction_count": metrics["safety"]["whole_frame_step_prediction_count"],
+        "false_whole_frame_step_prediction_count": metrics["safety"][
+            "false_whole_frame_step_prediction_count"
+        ],
         "output": str(args.output),
     }, ensure_ascii=False, indent=2))
     print("GRAYNAV_CHECKPOINT_EVALUATION_OK")

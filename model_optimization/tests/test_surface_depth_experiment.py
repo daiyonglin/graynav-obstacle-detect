@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import sys
 import unittest
 from pathlib import Path
@@ -11,12 +12,26 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from train_graynav_surface_depth import (  # noqa: E402
     CLASS_WEIGHTS,
+    SurfaceDepthDataset,
     experiment_gates,
+    false_whole_frame_step_prediction,
     multitask_loss,
 )
 
 
 class SurfaceDepthExperimentTest(unittest.TestCase):
+    def test_ade_positive_crop_contains_the_selected_step(self) -> None:
+        seg = torch.full((512, 512), 3, dtype=torch.uint8).numpy()
+        seg[256, 256] = 2
+        random.seed(42)
+        x, y = SurfaceDepthDataset.crop_origin(
+            512, 512, seg, "ade20k", ade_step_center_prob=1.0
+        )
+        self.assertLessEqual(x, 256)
+        self.assertLessEqual(y, 256)
+        self.assertGreater(x + 256, 256)
+        self.assertGreater(y + 256, 256)
+
     def test_e2_loss_is_finite_and_backpropagates(self) -> None:
         seg_logits = torch.randn(2, 4, 64, 64, requires_grad=True)
         depth_logits = torch.randn(2, 16, 64, 64, requires_grad=True)
@@ -54,8 +69,8 @@ class SurfaceDepthExperimentTest(unittest.TestCase):
                 "stairnetv3": {"precision": task, "recall": task},
             },
             "safety": {
-                "stair_whole_frame_step_prediction_count": 0,
-                "whole_frame_step_prediction_count": 0,
+                "stair_false_whole_frame_step_prediction_count": 0,
+                "false_whole_frame_step_prediction_count": 0,
                 "ade_no_step_bottom_false_image_rate": 0.02,
                 "hazard_to_ground_rate": 0.04,
             },
@@ -68,6 +83,19 @@ class SurfaceDepthExperimentTest(unittest.TestCase):
         }
         self.assertTrue(experiment_gates(metrics, "e2", e0_gradient_mae=1.0)["passed"])
         self.assertFalse(experiment_gates(metrics, "e2", e0_gradient_mae=None)["passed"])
+
+    def test_whole_frame_step_gate_distinguishes_truth_from_overfill(self) -> None:
+        truth = torch.full((64, 64), 2, dtype=torch.long)
+        truth[:3] = 3
+        all_step = torch.full_like(truth, 2)
+        self.assertFalse(false_whole_frame_step_prediction(all_step, truth))
+
+        sparse_truth = torch.full((64, 64), 3, dtype=torch.long)
+        sparse_truth[40:] = 2
+        self.assertTrue(false_whole_frame_step_prediction(all_step, sparse_truth))
+
+        ignored = torch.full((64, 64), 255, dtype=torch.long)
+        self.assertFalse(false_whole_frame_step_prediction(all_step, ignored))
 
 
 if __name__ == "__main__":

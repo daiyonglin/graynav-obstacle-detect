@@ -31,6 +31,9 @@ def main() -> None:
             "step_f1": metrics["f1"]["step_or_drop"],
             "hazard_to_ground": metrics["safety"]["hazard_to_ground_rate"],
             "whole_frame_step": metrics["safety"]["whole_frame_step_prediction_count"],
+            "false_whole_frame_step": metrics["safety"].get(
+                "false_whole_frame_step_prediction_count"
+            ),
             "ade_bottom_false_images": metrics["safety"]["ade_no_step_bottom_false_image_rate"],
             "absrel": metrics["depth"]["absrel"],
             "delta1": metrics["depth"]["delta1"],

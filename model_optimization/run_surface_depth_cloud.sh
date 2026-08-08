@@ -6,9 +6,14 @@ ROOT="${GRAYNAV_ROOT:-${SCRIPT_DIR}}"
 PREPARED="${GRAYNAV_PREPARED:-/root/autodl-tmp/graynav_surface_depth_prepared_v2}"
 RUN_ROOT="${GRAYNAV_RUN_ROOT:-/root/autodl-tmp/graynav_surface_depth_optimized}"
 EXPERIMENT="${GRAYNAV_EXPERIMENT:-e1}"
+RUN_NAME="${GRAYNAV_RUN_NAME:-${EXPERIMENT}}"
 WIDTH_MULT="${GRAYNAV_WIDTH_MULT:-1.0}"
 PRETRAINED="${GRAYNAV_PRETRAINED:-/root/autodl-tmp/graynav_surface_depth_run/preflight/fast_scnn_gray1_init.pt}"
-EXPERIMENT_ROOT="${RUN_ROOT}/${EXPERIMENT}"
+EXPERIMENT_ROOT="${RUN_ROOT}/${RUN_NAME}"
+SAMPLING_ADE20K="${GRAYNAV_SAMPLING_ADE20K:-0.40}"
+SAMPLING_NYUV2="${GRAYNAV_SAMPLING_NYUV2:-0.35}"
+SAMPLING_STAIRNETV3="${GRAYNAV_SAMPLING_STAIRNETV3:-0.25}"
+ADE_STEP_CENTER_PROB="${GRAYNAV_ADE_STEP_CENTER_PROB:-0.0}"
 
 if [[ ! "${EXPERIMENT}" =~ ^e[123]$ ]]; then
   echo "GRAYNAV_EXPERIMENT must be e1, e2, or e3" >&2
@@ -58,6 +63,10 @@ python "${ROOT}/scripts/train_graynav_surface_depth.py" \
   --log-dir "${EXPERIMENT_ROOT}/tensorboard" \
   --epochs 50 --batch-size 32 --workers 8 --lr 3e-4 \
   --weight-decay 0.01 --seed 42 --width-mult "${WIDTH_MULT}" --amp \
+  --sampling-ade20k "${SAMPLING_ADE20K}" \
+  --sampling-nyuv2 "${SAMPLING_NYUV2}" \
+  --sampling-stairnetv3 "${SAMPLING_STAIRNETV3}" \
+  --ade-step-center-prob "${ADE_STEP_CENTER_PROB}" \
   "${BASELINE_ARGS[@]}" "${TRAIN_INIT[@]}"
 
 python "${ROOT}/scripts/summarize_surface_depth_experiment.py" \
@@ -71,7 +80,7 @@ if [[ ! -f "${CANDIDATE}" ]]; then
   echo "Gate did not produce best_overall.pt; visualizing best_seg.pt for diagnosis only."
 fi
 python "${ROOT}/scripts/evaluate_surface_depth_checkpoint.py" \
-  --name "${EXPERIMENT}" --checkpoint "${CANDIDATE}" --data "${PREPARED}" \
+  --name "${RUN_NAME}" --checkpoint "${CANDIDATE}" --data "${PREPARED}" \
   --output "${EXPERIMENT_ROOT}/candidate_evaluation.json" \
   --batch-size 32 --workers 8 --device cuda
 if [[ ! -f "${EXPERIMENT_ROOT}/fixed_visualization/visualization_report.json" ]]; then

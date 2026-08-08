@@ -69,6 +69,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="official PaddleSeg Fast-SCNN after true-mono folding/import",
     )
+    parser.add_argument("--sampling-ade20k", type=float, default=0.40)
+    parser.add_argument("--sampling-nyuv2", type=float, default=0.35)
+    parser.add_argument("--sampling-stairnetv3", type=float, default=0.25)
+    parser.add_argument(
+        "--ade-step-center-prob",
+        type=float,
+        default=0.0,
+        help="probability of centering an ADE20K training crop on a mapped step pixel",
+    )
     return parser.parse_args()
 
 
@@ -89,11 +98,20 @@ def sha256(path: Path) -> str:
 
 
 class SurfaceDepthDataset(Dataset[dict[str, object]]):
-    def __init__(self, root: Path, split: str, experiment: str = "e1") -> None:
+    def __init__(
+        self,
+        root: Path,
+        split: str,
+        experiment: str = "e1",
+        ade_step_center_prob: float = 0.0,
+    ) -> None:
         self.root = root
         self.records = manifest(root, split)
         self.training = split == "train"
         self.experiment = experiment
+        if not 0.0 <= ade_step_center_prob <= 1.0:
+            raise ValueError("ade_step_center_prob must be in [0, 1]")
+        self.ade_step_center_prob = ade_step_center_prob
 
     def __len__(self) -> int:
         return len(self.records)
@@ -121,8 +139,12 @@ class SurfaceDepthDataset(Dataset[dict[str, object]]):
         height: int,
         seg: np.ndarray,
         source: str,
+        ade_step_center_prob: float = 0.0,
     ) -> tuple[int, int]:
-        if source == "stairnetv3" and random.random() < 0.70:
+        center_probability = 0.70 if source == "stairnetv3" else 0.0
+        if source == "ade20k":
+            center_probability = ade_step_center_prob
+        if center_probability > 0.0 and random.random() < center_probability:
             ys, xs = np.where(seg == 2)
             if len(xs):
                 selected = random.randrange(len(xs))
@@ -162,7 +184,9 @@ class SurfaceDepthDataset(Dataset[dict[str, object]]):
             gray = cv2.resize(gray, (width, height), interpolation=cv2.INTER_LINEAR)
             seg = cv2.resize(seg, (width, height), interpolation=cv2.INTER_NEAREST)
             depth = cv2.resize(depth, (width, height), interpolation=cv2.INTER_NEAREST)
-            x, y = self.crop_origin(width, height, seg, source)
+            x, y = self.crop_origin(
+                width, height, seg, source, self.ade_step_center_prob
+            )
             gray, seg, depth = (
                 value[y : y + 256, x : x + 256] for value in (gray, seg, depth)
             )
@@ -382,6 +406,32 @@ def depth_level(values: torch.Tensor) -> torch.Tensor:
     return levels
 
 
+def false_whole_frame_step_prediction(
+    guess: torch.Tensor,
+    truth: torch.Tensor,
+    prediction_threshold: float = 0.60,
+    excess_threshold: float = 0.20,
+) -> bool:
+    """Flag material step overfill without penalizing truly stair-filled scenes.
+
+    StairNet contains legitimate images whose ground-truth stair area exceeds
+    60 percent.  A raw prediction-area threshold therefore cannot distinguish
+    those samples from the original all-frame false-positive failure.  Compare
+    prediction and truth over labelled pixels and only flag a prediction that
+    is both mostly STEP and overfills truth by more than 20 percentage points.
+    """
+
+    valid = truth != IGNORE
+    if not bool(valid.any()):
+        return False
+    prediction_ratio = float((guess[valid] == 2).float().mean())
+    truth_ratio = float((truth[valid] == 2).float().mean())
+    return (
+        prediction_ratio > prediction_threshold
+        and prediction_ratio - truth_ratio > excess_threshold
+    )
+
+
 def experiment_gates(
     metrics: dict[str, object], experiment: str, e0_gradient_mae: float | None = None
 ) -> dict[str, object]:
@@ -392,7 +442,9 @@ def experiment_gates(
     safety = metrics["safety"]
     depth = metrics["depth"]
     e1_checks = {
-        "stair_whole_frame_step_predictions_zero": safety["stair_whole_frame_step_prediction_count"] == 0,
+        "stair_false_whole_frame_step_predictions_zero": (
+            safety["stair_false_whole_frame_step_prediction_count"] == 0
+        ),
         "stair_step_precision_ge_065": metrics["per_source"]["stairnetv3"]["precision"]["step_or_drop"] >= 0.65,
         "stair_step_recall_ge_065": metrics["per_source"]["stairnetv3"]["recall"]["step_or_drop"] >= 0.65,
         "ade_bottom_step_false_image_rate_le_010": safety["ade_no_step_bottom_false_image_rate"] <= 0.10,
@@ -406,7 +458,9 @@ def experiment_gates(
         "step_recall_ge_070": recall["step_or_drop"] >= 0.70,
         "step_f1_ge_070": f1["step_or_drop"] >= 0.70,
         "hazard_to_ground_le_008": safety["hazard_to_ground_rate"] <= 0.08,
-        "whole_frame_step_predictions_zero": safety["whole_frame_step_prediction_count"] == 0,
+        "false_whole_frame_step_predictions_zero": (
+            safety["false_whole_frame_step_prediction_count"] == 0
+        ),
         "ade_bottom_step_false_image_rate_le_005": safety["ade_no_step_bottom_false_image_rate"] <= 0.05,
         "depth_absrel_le_025": depth["absrel"] <= 0.25,
         "depth_delta1_ge_060": depth["delta1"] >= 0.60,
@@ -433,6 +487,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
     calibration_confidence = torch.zeros(10, dtype=torch.float64)
     stair_outside_fp = stair_outside_pixels = 0
     ade_no_step = ade_false_images = whole_frame_step = stair_whole_frame_step = 0
+    false_whole_frame_step = stair_false_whole_frame_step = 0
     hazard_ground = hazard_pixels = 0
     depth_count = delta1 = delta2 = delta3 = 0
     absrel_sum = squared_error_sum = squared_log_error_sum = 0.0
@@ -483,8 +538,11 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
                 hazard_pixels += int(hazards.sum())
             step_ratio = float((guess == 2).float().mean())
             whole_frame_step += int(step_ratio > 0.60)
+            false_whole = false_whole_frame_step_prediction(guess, truth)
+            false_whole_frame_step += int(false_whole)
             if source == "stairnetv3":
                 stair_whole_frame_step += int(step_ratio > 0.60)
+                stair_false_whole_frame_step += int(false_whole)
                 outside = truth == 3
                 stair_outside_fp += int(((guess == 2) & outside).sum())
                 stair_outside_pixels += int(outside.sum())
@@ -572,6 +630,11 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
             "ade_no_step_image_count": ade_no_step,
             "whole_frame_step_prediction_count": whole_frame_step,
             "stair_whole_frame_step_prediction_count": stair_whole_frame_step,
+            "false_whole_frame_step_prediction_count": false_whole_frame_step,
+            "stair_false_whole_frame_step_prediction_count": stair_false_whole_frame_step,
+            "false_whole_frame_step_definition": (
+                "valid-pixel step ratio > 0.60 and prediction exceeds truth by > 0.20"
+            ),
             "hazard_to_ground_rate": hazard_ground / max(1, hazard_pixels),
             "calibration_ece": ece,
         },
@@ -605,6 +668,15 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
 
 def main() -> None:
     args = parse_args()
+    fractions = {
+        "ade20k": args.sampling_ade20k,
+        "nyuv2": args.sampling_nyuv2,
+        "stairnetv3": args.sampling_stairnetv3,
+    }
+    if any(value < 0.0 for value in fractions.values()):
+        raise RuntimeError(f"sampling fractions must be non-negative: {fractions}")
+    if not math.isclose(sum(fractions.values()), 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise RuntimeError(f"sampling fractions must sum to 1.0: {fractions}")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -633,7 +705,8 @@ def main() -> None:
         "warmup_epochs": 5,
         "schedule": "cosine_to_5pct",
         "amp": args.amp,
-        "sampling": {"ade20k": 0.40, "nyuv2": 0.35, "stairnetv3": 0.25},
+        "sampling": fractions,
+        "ade_step_center_prob": args.ade_step_center_prob,
         "segmentation": {
             "classes": list(SURFACE_CLASS_NAMES),
             "class_weights": CLASS_WEIGHTS.tolist(),
@@ -653,9 +726,10 @@ def main() -> None:
     (args.output / "experiment_config.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    train_set = SurfaceDepthDataset(args.data, "train", args.experiment)
+    train_set = SurfaceDepthDataset(
+        args.data, "train", args.experiment, args.ade_step_center_prob
+    )
     val_set = SurfaceDepthDataset(args.data, "val", args.experiment)
-    fractions = {"ade20k": 0.40, "nyuv2": 0.35, "stairnetv3": 0.25}
     groups = [str(record["source"]) for record in train_set.records]
     counts = {name: groups.count(name) for name in fractions}
     missing = [name for name, count in counts.items() if count == 0]
