@@ -23,6 +23,7 @@ BLOCKED = 1
 STEP = 2
 UNKNOWN = 3
 IGNORE = 255
+MAX_STAIR_STEP_RATIO = 0.95
 
 # MIT Scene Parsing 150 uses one-based ids and zero for unlabeled pixels.
 # Keep this mapping conservative: ground is a traversable-shape candidate, while
@@ -137,6 +138,12 @@ def remap_stair_mask(mask: np.ndarray, boundary_pixels: int = 5) -> np.ndarray:
     return seg
 
 
+def is_full_frame_stair_label(seg: np.ndarray) -> bool:
+    """Reject StairNet labels that cannot provide meaningful negative pixels."""
+
+    return float(np.mean(seg == STEP)) > MAX_STAIR_STEP_RATIO
+
+
 def convert_ade(root: Path, output: Path, split: str) -> list[dict[str, object]]:
     official = "training" if split == "train" else "validation"
     image_root = find_dir(root, (f"images/{official}", official))
@@ -244,22 +251,28 @@ def read_depth(path: Path | None) -> np.ndarray | None:
     return depth
 
 
-def convert_stairs(root: Path, output: Path, split: str) -> list[dict[str, object]]:
+def convert_stairs(
+    root: Path, output: Path, split: str
+) -> tuple[list[dict[str, object]], int]:
     split_root = find_dir(root, (split, "training" if split == "train" else "validation"))
     if split_root is None:
-        return []
+        return [], 0
     records: list[dict[str, object]] = []
+    filtered_full_frame = 0
     for index, (image_path, mask_path, depth_path) in enumerate(paired_stair_files(split_root)):
         bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
         if bgr is None or mask is None:
             raise RuntimeError(f"cannot read StairNet pair {image_path}")
         seg = remap_stair_mask(mask, boundary_pixels=5)
+        if is_full_frame_stair_label(seg):
+            filtered_full_frame += 1
+            continue
         records.append(write_sample(
             output, split, f"stair_{split}_{index:06d}", "stairnetv3",
             cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), seg, read_depth(depth_path),
         ))
-    return records
+    return records, filtered_full_frame
 
 
 def main() -> None:
@@ -272,6 +285,7 @@ def main() -> None:
         shutil.rmtree(args.output)
     args.output.mkdir(parents=True, exist_ok=True)
     by_split: dict[str, list[dict[str, object]]] = {"train": [], "val": []}
+    stair_full_frame_filtered = {"train": 0, "val": 0}
     if args.ade_root:
         for split in by_split:
             by_split[split].extend(convert_ade(args.ade_root, args.output, split))
@@ -281,7 +295,9 @@ def main() -> None:
             by_split[split].extend(nyu[split])
     if args.stair_root:
         for split in by_split:
-            by_split[split].extend(convert_stairs(args.stair_root, args.output, split))
+            stair_records, filtered = convert_stairs(args.stair_root, args.output, split)
+            by_split[split].extend(stair_records)
+            stair_full_frame_filtered[split] = filtered
     if not any(by_split.values()):
         raise RuntimeError("no public dataset was provided or recognized")
     summary: dict[str, object] = {
@@ -292,6 +308,9 @@ def main() -> None:
         "depth_range_m": [0.3, 8.0],
         "input_channels": 1,
         "rgb_input_used": False,
+        "automatic_filters": {
+            "stair_step_ratio_gt_0_95": stair_full_frame_filtered,
+        },
     }
     ids: dict[str, set[str]] = {}
     for split, records in by_split.items():

@@ -15,9 +15,11 @@ from scripts.prepare_graynav_surface_depth_dataset import (  # noqa: E402
     BLOCKED,
     GROUND,
     IGNORE,
+    MAX_STAIR_STEP_RATIO,
     STEP,
     UNKNOWN,
     paired_stair_files,
+    is_full_frame_stair_label,
     read_depth,
     remap_ade,
     remap_stair_mask,
@@ -47,6 +49,14 @@ class SurfaceDepthDatasetMappingTest(unittest.TestCase):
         self.assertEqual(int(mapped[0, 0]), UNKNOWN)
         self.assertEqual(int(mapped[8, 15]), IGNORE)
         self.assertFalse(bool(np.any(mapped == GROUND)))
+
+    def test_full_frame_stair_filter_is_strict_and_deterministic(self) -> None:
+        full = np.full((100, 100), STEP, dtype=np.uint8)
+        acceptable = full.copy()
+        acceptable[:5] = UNKNOWN
+        self.assertTrue(is_full_frame_stair_label(full))
+        self.assertFalse(is_full_frame_stair_label(acceptable))
+        self.assertEqual(MAX_STAIR_STEP_RATIO, 0.95)
 
     def test_official_stairnet_depthes_directory_is_paired(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
