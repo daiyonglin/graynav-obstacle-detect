@@ -32,6 +32,22 @@ class SurfaceDepthExperimentTest(unittest.TestCase):
         self.assertGreater(x + 256, 256)
         self.assertGreater(y + 256, 256)
 
+    def test_stair_negative_crop_prefers_unknown_context(self) -> None:
+        seg = torch.full((512, 512), 3, dtype=torch.uint8).numpy()
+        seg[:300, :300] = 2
+        random.seed(7)
+        x, y = SurfaceDepthDataset.crop_origin(
+            512,
+            512,
+            seg,
+            "stairnetv3",
+            stair_step_center_prob=0.0,
+            stair_negative_crop_prob=1.0,
+            stair_negative_crop_attempts=32,
+        )
+        selected = seg[y : y + 256, x : x + 256]
+        self.assertLess(float((selected == 2).mean()), 0.25)
+
     def test_e2_loss_is_finite_and_backpropagates(self) -> None:
         seg_logits = torch.randn(2, 4, 64, 64, requires_grad=True)
         depth_logits = torch.randn(2, 16, 64, 64, requires_grad=True)

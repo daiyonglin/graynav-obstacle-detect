@@ -14,6 +14,9 @@ SAMPLING_ADE20K="${GRAYNAV_SAMPLING_ADE20K:-0.40}"
 SAMPLING_NYUV2="${GRAYNAV_SAMPLING_NYUV2:-0.35}"
 SAMPLING_STAIRNETV3="${GRAYNAV_SAMPLING_STAIRNETV3:-0.25}"
 ADE_STEP_CENTER_PROB="${GRAYNAV_ADE_STEP_CENTER_PROB:-0.0}"
+STAIR_STEP_CENTER_PROB="${GRAYNAV_STAIR_STEP_CENTER_PROB:-0.70}"
+STAIR_NEGATIVE_CROP_PROB="${GRAYNAV_STAIR_NEGATIVE_CROP_PROB:-0.0}"
+STAIR_NEGATIVE_CROP_ATTEMPTS="${GRAYNAV_STAIR_NEGATIVE_CROP_ATTEMPTS:-12}"
 
 if [[ ! "${EXPERIMENT}" =~ ^e[123]$ ]]; then
   echo "GRAYNAV_EXPERIMENT must be e1, e2, or e3" >&2
@@ -67,6 +70,9 @@ python "${ROOT}/scripts/train_graynav_surface_depth.py" \
   --sampling-nyuv2 "${SAMPLING_NYUV2}" \
   --sampling-stairnetv3 "${SAMPLING_STAIRNETV3}" \
   --ade-step-center-prob "${ADE_STEP_CENTER_PROB}" \
+  --stair-step-center-prob "${STAIR_STEP_CENTER_PROB}" \
+  --stair-negative-crop-prob "${STAIR_NEGATIVE_CROP_PROB}" \
+  --stair-negative-crop-attempts "${STAIR_NEGATIVE_CROP_ATTEMPTS}" \
   "${BASELINE_ARGS[@]}" "${TRAIN_INIT[@]}"
 
 python "${ROOT}/scripts/summarize_surface_depth_experiment.py" \

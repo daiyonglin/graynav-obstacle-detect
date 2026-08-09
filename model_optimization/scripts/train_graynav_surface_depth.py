@@ -78,6 +78,19 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="probability of centering an ADE20K training crop on a mapped step pixel",
     )
+    parser.add_argument(
+        "--stair-step-center-prob",
+        type=float,
+        default=0.70,
+        help="probability of centering a StairNet crop on a step pixel",
+    )
+    parser.add_argument(
+        "--stair-negative-crop-prob",
+        type=float,
+        default=0.0,
+        help="probability of choosing the lowest-STEP StairNet crop from random candidates",
+    )
+    parser.add_argument("--stair-negative-crop-attempts", type=int, default=12)
     return parser.parse_args()
 
 
@@ -104,6 +117,9 @@ class SurfaceDepthDataset(Dataset[dict[str, object]]):
         split: str,
         experiment: str = "e1",
         ade_step_center_prob: float = 0.0,
+        stair_step_center_prob: float = 0.70,
+        stair_negative_crop_prob: float = 0.0,
+        stair_negative_crop_attempts: int = 12,
     ) -> None:
         self.root = root
         self.records = manifest(root, split)
@@ -111,7 +127,18 @@ class SurfaceDepthDataset(Dataset[dict[str, object]]):
         self.experiment = experiment
         if not 0.0 <= ade_step_center_prob <= 1.0:
             raise ValueError("ade_step_center_prob must be in [0, 1]")
+        if not 0.0 <= stair_step_center_prob <= 1.0:
+            raise ValueError("stair_step_center_prob must be in [0, 1]")
+        if not 0.0 <= stair_negative_crop_prob <= 1.0:
+            raise ValueError("stair_negative_crop_prob must be in [0, 1]")
+        if stair_step_center_prob + stair_negative_crop_prob > 1.0:
+            raise ValueError("StairNet crop probabilities must sum to at most 1")
+        if stair_negative_crop_attempts < 1:
+            raise ValueError("stair_negative_crop_attempts must be positive")
         self.ade_step_center_prob = ade_step_center_prob
+        self.stair_step_center_prob = stair_step_center_prob
+        self.stair_negative_crop_prob = stair_negative_crop_prob
+        self.stair_negative_crop_attempts = stair_negative_crop_attempts
 
     def __len__(self) -> int:
         return len(self.records)
@@ -140,17 +167,43 @@ class SurfaceDepthDataset(Dataset[dict[str, object]]):
         seg: np.ndarray,
         source: str,
         ade_step_center_prob: float = 0.0,
+        stair_step_center_prob: float = 0.70,
+        stair_negative_crop_prob: float = 0.0,
+        stair_negative_crop_attempts: int = 12,
     ) -> tuple[int, int]:
-        center_probability = 0.70 if source == "stairnetv3" else 0.0
-        if source == "ade20k":
-            center_probability = ade_step_center_prob
-        if center_probability > 0.0 and random.random() < center_probability:
+        draw = random.random()
+        center_probability = (
+            stair_step_center_prob if source == "stairnetv3"
+            else ade_step_center_prob if source == "ade20k"
+            else 0.0
+        )
+        if center_probability > 0.0 and draw < center_probability:
             ys, xs = np.where(seg == 2)
             if len(xs):
                 selected = random.randrange(len(xs))
                 x = int(np.clip(xs[selected] - random.randint(64, 192), 0, width - 256))
                 y = int(np.clip(ys[selected] - random.randint(64, 192), 0, height - 256))
                 return x, y
+        if (
+            source == "stairnetv3"
+            and draw < stair_step_center_prob + stair_negative_crop_prob
+        ):
+            candidates = [
+                (
+                    random.randint(0, width - 256),
+                    random.randint(0, height - 256),
+                )
+                for _ in range(stair_negative_crop_attempts)
+            ]
+            return min(
+                candidates,
+                key=lambda origin: float(
+                    (seg[
+                        origin[1] : origin[1] + 256,
+                        origin[0] : origin[0] + 256,
+                    ] == 2).mean()
+                ),
+            )
         return random.randint(0, width - 256), random.randint(0, height - 256)
 
     def __getitem__(self, index: int) -> dict[str, object]:
@@ -185,7 +238,14 @@ class SurfaceDepthDataset(Dataset[dict[str, object]]):
             seg = cv2.resize(seg, (width, height), interpolation=cv2.INTER_NEAREST)
             depth = cv2.resize(depth, (width, height), interpolation=cv2.INTER_NEAREST)
             x, y = self.crop_origin(
-                width, height, seg, source, self.ade_step_center_prob
+                width,
+                height,
+                seg,
+                source,
+                self.ade_step_center_prob,
+                self.stair_step_center_prob,
+                self.stair_negative_crop_prob,
+                self.stair_negative_crop_attempts,
             )
             gray, seg, depth = (
                 value[y : y + 256, x : x + 256] for value in (gray, seg, depth)
@@ -677,6 +737,14 @@ def main() -> None:
         raise RuntimeError(f"sampling fractions must be non-negative: {fractions}")
     if not math.isclose(sum(fractions.values()), 1.0, rel_tol=0.0, abs_tol=1e-6):
         raise RuntimeError(f"sampling fractions must sum to 1.0: {fractions}")
+    if not 0.0 <= args.stair_step_center_prob <= 1.0:
+        raise RuntimeError("stair-step-center-prob must be in [0, 1]")
+    if not 0.0 <= args.stair_negative_crop_prob <= 1.0:
+        raise RuntimeError("stair-negative-crop-prob must be in [0, 1]")
+    if args.stair_step_center_prob + args.stair_negative_crop_prob > 1.0:
+        raise RuntimeError("StairNet crop probabilities must sum to at most 1")
+    if args.stair_negative_crop_attempts < 1:
+        raise RuntimeError("stair-negative-crop-attempts must be positive")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -707,6 +775,14 @@ def main() -> None:
         "amp": args.amp,
         "sampling": fractions,
         "ade_step_center_prob": args.ade_step_center_prob,
+        "stair_crop": {
+            "step_center_prob": args.stair_step_center_prob,
+            "negative_crop_prob": args.stair_negative_crop_prob,
+            "random_crop_prob": 1.0 - (
+                args.stair_step_center_prob + args.stair_negative_crop_prob
+            ),
+            "negative_crop_attempts": args.stair_negative_crop_attempts,
+        },
         "segmentation": {
             "classes": list(SURFACE_CLASS_NAMES),
             "class_weights": CLASS_WEIGHTS.tolist(),
@@ -727,7 +803,13 @@ def main() -> None:
         json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     train_set = SurfaceDepthDataset(
-        args.data, "train", args.experiment, args.ade_step_center_prob
+        args.data,
+        "train",
+        args.experiment,
+        args.ade_step_center_prob,
+        args.stair_step_center_prob,
+        args.stair_negative_crop_prob,
+        args.stair_negative_crop_attempts,
     )
     val_set = SurfaceDepthDataset(args.data, "val", args.experiment)
     groups = [str(record["source"]) for record in train_set.records]
