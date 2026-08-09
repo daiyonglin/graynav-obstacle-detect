@@ -492,6 +492,19 @@ def false_whole_frame_step_prediction(
     )
 
 
+def tensorboard_scalar_metrics(
+    metrics: dict[str, object],
+) -> dict[str, float]:
+    """Return only numeric metrics accepted by SummaryWriter.add_scalar."""
+
+    numeric = (int, float, np.integer, np.floating)
+    return {
+        name: float(value)
+        for name, value in metrics.items()
+        if isinstance(value, numeric)
+    }
+
+
 def experiment_gates(
     metrics: dict[str, object], experiment: str, e0_gradient_mae: float | None = None
 ) -> dict[str, object]:
@@ -962,8 +975,11 @@ def main() -> None:
         writer.add_scalar("val/depth_near_mid_far_macro_f1", metrics["depth"]["near_mid_far_macro_f1"], epoch)
         writer.add_scalar("val/step_precision", metrics["precision"]["step_or_drop"], epoch)
         writer.add_scalar("val/step_recall", metrics["recall"]["step_or_drop"], epoch)
-        for name, value in metrics["safety"].items():
+        for name, value in tensorboard_scalar_metrics(metrics["safety"]).items():
             writer.add_scalar(f"val_safety/{name}", value, epoch)
+        for name, value in metrics["safety"].items():
+            if isinstance(value, str):
+                writer.add_text(f"val_safety/{name}", value, epoch)
         writer.add_scalar("val/selection_score", overall_score, epoch)
         writer.add_scalar("val/gate_passed", int(gates["passed"]), epoch)
         for name, value in metrics["iou"].items():

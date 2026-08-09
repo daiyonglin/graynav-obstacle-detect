@@ -16,10 +16,22 @@ from train_graynav_surface_depth import (  # noqa: E402
     experiment_gates,
     false_whole_frame_step_prediction,
     multitask_loss,
+    tensorboard_scalar_metrics,
 )
 
 
 class SurfaceDepthExperimentTest(unittest.TestCase):
+    def test_tensorboard_safety_logging_separates_text(self) -> None:
+        values = {
+            "count": 5,
+            "rate": 0.25,
+            "definition": "diagnostic text",
+        }
+        self.assertEqual(
+            tensorboard_scalar_metrics(values),
+            {"count": 5.0, "rate": 0.25},
+        )
+
     def test_ade_positive_crop_contains_the_selected_step(self) -> None:
         seg = torch.full((512, 512), 3, dtype=torch.uint8).numpy()
         seg[256, 256] = 2
