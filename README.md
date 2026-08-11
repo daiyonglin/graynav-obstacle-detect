@@ -1,112 +1,175 @@
-# GrayNav Obstacle Detection
+# GrayNav 单目灰度综合避障系统
 
-Blind-navigation obstacle detection project for the Flyingchip A1 Vision Pi
-and SC132GS mono camera. This repository keeps only the project-specific code:
-board application sources, OSD/runtime assets, UART voice integration code, and
-model optimization scripts.
+GrayNav 是面向视障辅助导航场景的边缘端感知原型，运行平台为 Flyingchip A1 Vision Pi，输入来自 SC132GS 单通道灰度相机。本仓库管理板端应用、模型训练与转换脚本、灰度 OSD、串口/语音接口以及可复现的实验记录；完整 A1 SDK、公开数据集、训练输出和 Buildroot 产物不进入 Git。
 
-The full A1 SDK, Docker buildroot output, datasets, training results, and large
-model-development artifacts are intentionally not tracked here.
+> 安全边界：GrayNav 当前是研究与演示原型，不应作为无人陪同出行的唯一安全依据。学习深度只提供 `NEAR / MID / FAR / UNKNOWN` 相对证据，不对外播报米制距离。
 
-## Repository Layout
+## 当前状态
+
+| 模块 | 状态 | 说明 |
+|---|---|---|
+| 板上回退版本 | 已部署、受保护 | 真单通道 ROD25 YOLOv8n 检测、跟踪、几何测距、避障决策、Aurora OSD 和 SYN6288 语音 |
+| SurfaceDepth E3 | 已训练并完成 A1 INT8 转换 | `4` 类道路分割 + `16` 级相对深度，等待 C++ 后处理契约升级与双模型上板验证 |
+| SurfaceDepth 板端框架 | 已有初版 | 已有分时调度、三走廊统计、融合和降级框架；当前代码仍需从 3 类更新为 E3 的 4 类输出 |
+| 真单通道 COCO80 检测 | 构建链已具备，最终模型待集成 | 保留 80 类 raw head，CPU 完成 DFL、解码、NMS、语义筛选和跟踪 |
+| Aurora | 不修改客户端 | 所有展示由板端灰度 OSD 生成，使用边界、符号、文字和风险条表达状态 |
+
+当前板子仍烧录优化前的 ROD25 版本。SurfaceDepth 转换完成不等同于已经上板；只有完成 SDK 构建、烧录和实景验收后，才会把新镜像标记为候选部署版本。
+
+## 目标系统架构
+
+```mermaid
+flowchart LR
+    CAM["SC132GS Mono<br/>720 x 1280 Y8"] --> PRE["单通道 ROI 预处理<br/>灰度增强与分时调度"]
+
+    PRE -->|"D / D / D"| DET["Mono-YOLOv8n<br/>目标检测 raw heads"]
+    PRE -->|"SD"| ENC["SurfaceDepth E3<br/>Fast-SCNN detail64 共享编码器"]
+
+    ENC --> SEG["4 类分割头<br/>1 x 4 x 64 x 64"]
+    ENC --> DEP["16 级深度头<br/>1 x 16 x 64 x 64"]
+
+    DET --> DPOST["CPU: DFL / NMS / Tracker<br/>几何距离与 TTC"]
+    SEG --> SPOST["CPU: ArgMax / 多数滤波<br/>走廊比例与时序投票"]
+    DEP --> ZPOST["CPU: 分组概率 / 中位数<br/>NEAR / MID / FAR / UNKNOWN"]
+
+    DPOST --> FUSE["保守多源避障融合"]
+    SPOST --> FUSE
+    ZPOST --> FUSE
+
+    FUSE --> DEC["统一 AvoidanceDecision<br/>clear / slow / stop / turn_left / turn_right"]
+    DEC --> OSD["Aurora 灰度 OSD"]
+    DEC --> SERIAL["串口诊断 / JSON"]
+    DEC --> VOICE["SYN6288 异步语音"]
+```
+
+### SurfaceDepth E3 契约
 
 ```text
-board/obstacle_detect/
-  demo_obstacle.cpp          A1 runtime entry: camera, NPU, postprocess, OSD, UART
-  include/                   Board application headers
-  src/                       YOLOv8 head6 decode, tracker, semantics, OSD, voice
-  app_assets/                Required OSD assets and current deployed .m1model
-  scripts/                   Board-side helper scripts
-  cmake_config/, tools/      SDK build integration files
+input
+  images        float32  1 x 1 x 256 x 256  range [0, 1]
+
+outputs
+  seg_logits    INT8     1 x 4 x 64 x 64
+  depth_logits  INT8     1 x 16 x 64 x 64
+
+surface classes
+  0 ground_candidate
+  1 blocked_surface
+  2 step_or_drop
+  3 unknown_other
+```
+
+模型始终使用真单通道输入，训练数据在加载阶段转换为灰度，板端不执行 Y8 到 BGR 的复制。E3 使用真实 `64 x 64` 细节融合分支；部署图只保留静态 Conv、ReLU、Add、Concat、Pool 和 Resize 等 A1 安全算子，Softmax、ArgMax、时序过滤和决策全部放在 CPU。
+
+## 模型证据摘要
+
+SurfaceDepth E3 选择 epoch 49 的 `best_seg.pt`。公开验证集上的主要结果如下：
+
+| 指标 | 结果 |
+|---|---:|
+| ground IoU | 0.6209 |
+| blocked IoU | 0.6441 |
+| step precision / recall / F1 | 0.7777 / 0.9318 / 0.8478 |
+| 危险真值误判为 ground | 3.37% |
+| NYUv2 AbsRel / delta1 | 0.2416 / 0.6480 |
+| 近远排序准确率 | 0.8778 |
+
+这些指标说明模型具备可用于板端实验的分割和相对深度能力，但 ADE20K 小台阶召回、楼梯外部误报和跨相机域泛化仍有限，因此板端必须保留 `UNKNOWN_OTHER`、时序投票、走廊约束以及检测/几何信息融合。
+
+正式 ONNX 与官方 A1 INT8 转换均已完成：
+
+| 产物/检查 | 结果 |
+|---|---|
+| ONNX | 4,593,443 bytes，静态 opset 12，A1 本地算子预审通过 |
+| PyTorch / ONNX | 分割网格一致率 1.0000；深度等级一致率 0.9999976 |
+| INT8 `.m1model` | 1,459,634 bytes |
+| 官方余弦相似度 | `seg_logits=0.98599`，`depth_logits=0.99582` |
+| FP32 / INT8 远近等级 | 单元格一致率 95.61%（离线补充分析） |
+
+完整哈希、转换契约与部署限制见 [SurfaceDepth E3 部署证据](docs/GRAYNAV_SURFACE_DEPTH_E3_DEPLOYMENT_EVIDENCE.md)。训练和门控实验见 [E0-E3 实验说明](docs/GRAYNAV_SURFACE_DEPTH_OPTIMIZATION_EXPERIMENTS.md)。
+
+## 仓库结构
+
+```text
+board/
+  obstacle_detect/
+    demo_obstacle.cpp       A1 相机、NPU、调度与系统入口
+    include/                公共数据结构和模块接口
+    src/                    检测、分割/深度后处理、融合、OSD、语音
+    tests/                  可在主机运行的后处理与决策测试
+    app_assets/             受控模型与 OSD 资源
+    scripts/                镜像候选归档等辅助脚本
+  buildroot/                SDK Buildroot 集成文件
 
 model_optimization/
-  scripts/                   Gray adapter training, export, evaluation, diagnostics
-  configs/                   Dataset/model configuration files
-  requirements.txt           Cloud training Python dependencies
+  segmentation/             单通道 Fast-SCNN / SurfaceDepth 模型
+  scripts/                  数据准备、训练、评估、导出和审计
+  configs/                  A1 转换预处理配置
+  tests/                    数据映射、模型和实验门控测试
+
+docs/                       设计、实验、部署证据和交接文档
 ```
 
-## Board Development
+## 本地开发与构建
 
-Canonical SDK app path on the local machine:
+Git 仓库是代码管理副本；实际 A1 SDK 编译源位于：
 
 ```text
-E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk\smart_software\src\app_demo\obstacle_detect\ssne_ai_demo
+E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk
 ```
 
-After editing code in this repository, sync the changed board files back to the
-SDK app path before Docker compilation.
-
-Build inside the `A1_Builder` container:
-
-```sh
-cd /home/smartsens_flying_chip_a1_sdk/A1_SDK_SC132GS/smartsens_sdk
-bash ./scripts/a1_sc132gs_build.sh
-```
-
-The flashable image is generated at:
+板端代码每次完成一个可测试目标后，必须把 `board/obstacle_detect` 的对应改动同步到 SDK：
 
 ```text
-output/images/zImage.smartsens-m1-evb
+smart_software/src/app_demo/obstacle_detect/ssne_ai_demo
 ```
 
-On the Windows host this is normally visible as:
+随后在 `A1_Builder` 中执行完整构建：
+
+```powershell
+docker exec A1_Builder sh -lc `
+  'cd /home/smartsens_flying_chip_a1_sdk/A1_SDK_SC132GS/smartsens_sdk && ./scripts/a1_sc132gs_build.sh'
+```
+
+候选镜像输出：
 
 ```text
 E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk\output\images\zImage.smartsens-m1-evb
 ```
 
-## Runtime Diagnostics
+构建成功不代表板测通过。烧录前还要核对 CMakeCache、两个模型的名称/哈希、`zImage < 15 MiB`，并为新候选单独建立归档。
 
-Useful board runtime switches:
+## 运行与演示原则
 
-```sh
-A1_OUTPUT_HUMAN=1
-A1_OUTPUT_JSON=0
-A1_OUTPUT_SERIAL_DIAG=1
-A1_OUTPUT_INTERVAL_FRAMES=5
-A1_DEBUG_POSTPROCESS=1
-A1_DEBUG_POSTPROCESS_INTERVAL=30
-```
+- NPU 默认按 `D -> D -> D -> SD` 分时运行；SD 帧只更新 tracker 预测，不把空检测当作目标消失。
+- `step_or_drop` 持续成立时优先于深度头给出的 `FAR`。
+- 深度 NEAR/MID/FAR 分组最高与次高概率差小于 `0.20` 时输出 `UNKNOWN`，决策至少为 `slow`。
+- `unknown_other` 不能作为可通行地面；检测与道路理解均稳定无风险时才允许 `clear`。
+- SurfaceDepth 连续推理失败后进入降级模式，只播报一次；检测框、串口和语音链路继续运行。
+- Aurora 不依赖颜色：PATH 使用空心走廊，WALL 使用双线和 X，STEP/DROP 使用平行横线和箭头，UNKNOWN 使用虚线和问号。
 
-Use these during board tests to compare raw candidates, NMS results, tracker
-stability, action decisions, and OSD behavior.
+## 回退保护
 
-## Model Optimization
-
-Current target model direction:
+当前板上可靠回退镜像必须保持只读：
 
 ```text
-M1: SC132GS Y8 -> true-mono COCO80 YOLOv8n -> head6
-M2: SC132GS Y8 -> shared Fast-SCNN -> 3-class surface + 16-bin depth heads
+bytes  = 8,214,488
+SHA256 = A7976710ECB456CB312D18F0195DCAE496ED652EFC582AB698EBC3EB7B055530
 ```
 
-Earlier ROD25 and pseudo-RGB routes remain for reproducibility and rollback.
-Both target models have a strict one-channel deployment contract. RGB public
-weights use the exact repeated-gray identity `W_gray = W_R + W_G + W_B` for the
-first convolution; public training data is converted to grayscale before it
-enters the loader.
-
-Main scripts for the new line:
+至少保存在：
 
 ```text
-model_optimization/build_coco80_gray1_detector.sh
-model_optimization/prepare_public_datasets.sh
-model_optimization/run_surface_depth_cloud.sh
-model_optimization/scripts/prepare_graynav_surface_depth_dataset.py
-model_optimization/scripts/train_graynav_surface_depth.py
-model_optimization/scripts/export_graynav_surface_depth.py
-model_optimization/scripts/audit_surface_depth_onnx.py
+E:\jichuang\files\zImage.smartsens-m1-evb
+E:\jichuang\firmware_archive\GrayNav_B3_1ch_DCE_25class_A7976710\zImage.smartsens-m1-evb
 ```
 
-Cloud upload packages should be generated only when training is about to run on
-the cloud machine.
+新构建禁止覆盖以上文件。只有完成双模型加载、30 分钟稳定性、降级回退和功能场景测试后，才可通过 `board/obstacle_detect/scripts/archive_candidate.ps1` 归档为新候选。
 
-## Development Rules
+## 提交规则
 
-- Do not commit full SDK trees, build outputs, datasets, cloud results, or
-  temporary archives.
-- Add or update stage-summary documents only after a phase is complete.
-- Keep comments meaningful: each new class/function should state its role, and
-  complex logic blocks should have a short orienting comment.
-- Each optimization iteration should be committed with a focused message after
-  it builds or after its experiment result is recorded.
+- 一个 commit 只解决一个主要目标，显式暂存文件，禁止在混合工作区使用无范围的 `git add -A`。
+- 不提交 SDK 全树、公开数据集、云端训练目录、临时压缩包或 Buildroot 输出。
+- 模型二进制只有在契约、来源、大小和 SHA256 完整记录后才允许作为受控板端资产提交。
+- C++ 改动先运行主机单元测试，再同步 SDK；完成一个实质性板端阶段后才执行完整 Docker 构建。
+- README 和状态文档必须明确区分：`已训练`、`已转换`、`已构建`、`已烧录`、`已验收`。
