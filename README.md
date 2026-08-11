@@ -86,7 +86,7 @@ SurfaceDepth E3 选择 epoch 49 的 `best_seg.pt`。公开验证集上的主要�
 | 官方余弦相似度 | `seg_logits=0.98599`，`depth_logits=0.99582` |
 | FP32 / INT8 远近等级 | 单元格一致率 95.61%（离线补充分析） |
 
-完整哈希、转换契约与部署限制见 [SurfaceDepth E3 部署证据](docs/GRAYNAV_SURFACE_DEPTH_E3_DEPLOYMENT_EVIDENCE.md)。训练和门控实验见 [E0-E3 实验说明](docs/GRAYNAV_SURFACE_DEPTH_OPTIMIZATION_EXPERIMENTS.md)。
+完整哈希、转换契约与部署限制见 [SurfaceDepth E3 部署证据](docs/GRAYNAV_SURFACE_DEPTH_E3_DEPLOYMENT_EVIDENCE.md)。训练和门控实验见 [E0-E3 实验说明](docs/GRAYNAV_SURFACE_DEPTH_OPTIMIZATION_EXPERIMENTS.md)，本地集成与上板顺序见 [后处理、构建和板测计划](docs/GRAYNAV_LOCAL_INTEGRATION_AND_BOARD_TEST_PLAN_2026-08-11.md)。
 
 ## 仓库结构
 
