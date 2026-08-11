@@ -69,6 +69,10 @@ motorcycle、car、bus 和 truck 等避障相关 COCO 类进入跟踪、规划�
 ## 3. 网络与 A1 约束
 
 - 官方 YOLOv8n RGB 首层按 `W_gray = W_R + W_G + W_B` 折叠为真单通道；
+- 三个检测尺度使用两层深度可分离卷积和最终 1x1 raw 输出，避免 P5 的
+  `3x3x256=2304` 超过 A1 卷积输入限制；
+- YOLOv8 C2f 使用等价的固定通道 `Split`，禁止导出器生成
+  Shape/Gather/Slice/Div 动态分块；
 - 道路分支使用 P3 的 48x48 细节特征和经 1x1 Conv 降维、nearest Resize 的 P4 语义特征；
 - 融合只使用 Add、ReLU 和轻量深度可分离卷积；
 - 静态 batch 1、NCHW、opset 12，不允许动态 shape；
@@ -78,6 +82,29 @@ motorcycle、car、bus 和 truck 等避障相关 COCO 类进入跟踪、规划�
 - 随机图本地预审通过后才租用 4090，正式 `.m1model` 只转换最终模型一次。
 
 目标是单个 INT8 模型不超过 5 MiB；最终约束以官方 A1 编译器和实板 SSNE 为准。
+
+### 3.1 随机图预审结果
+
+2026-08-11 本地完成两轮随机图审计。第一轮正确拦截了动态 C2f 分块和 P5 普通 3x3
+检测头；完成上述 A1-safe 调整后第二轮通过：
+
+```text
+input          images 1 x 1 x 384 x 384
+outputs        3 x COCO80 cls + 3 x DFL64 reg
+               seg 1 x 4 x 48 x 48
+               depth 1 x 16 x 48 x 48
+FP32 ONNX      9,680,416 bytes
+SHA256         CDF215168C59B4BCF233BD5C410FBB544292B2E225AA86C6BD89A7AB95E1D5F0
+forbidden ops  none
+constraint     none
+```
+
+算子计数为 Conv 81、Sigmoid 44、Mul 44、ReLU 28、Concat 13、Split 8、Add 7、
+Constant 6、MaxPool 3、Resize 3。该结果只是本地静态门槛，不替代官方 A1 转换器。
+
+权重迁移烟雾测试也已通过：COCO80 首层由 `(16,3,3,3)` 折叠为 `(16,1,3,3)`，
+三个 A1-safe 检测头保留 12 个最终 raw projection 权重/偏置张量；SurfaceDepth E3 的
+semantic projection、detail refinement、seg head 和 depth head 共 22/22 个兼容张量可导入。
 
 ## 4. 训练方案
 
