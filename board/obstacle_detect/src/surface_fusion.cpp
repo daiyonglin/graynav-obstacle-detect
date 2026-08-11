@@ -28,6 +28,14 @@ float median(std::vector<float>* values)
     return result;
 }
 
+int level_severity(const std::string& level)
+{
+    if (level == "near") return 3;
+    if (level == "mid") return 2;
+    if (level == "far") return 1;
+    return 0;
+}
+
 }  // namespace
 
 bool SurfaceDecisionFusion::IsSafe(const SurfaceCorridor& corridor)
@@ -38,7 +46,7 @@ bool SurfaceDecisionFusion::IsSafe(const SurfaceCorridor& corridor)
 float SurfaceDecisionFusion::SafeScore(const SurfaceCorridor& corridor)
 {
     return corridor.ground_ratio - corridor.blocked_ratio -
-           2.0f * corridor.step_ratio;
+           2.0f * corridor.step_ratio - 0.75f * corridor.unknown_ratio;
 }
 
 AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection,
@@ -74,9 +82,18 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     fused.hazard_type = surface.primary_hazard;
     fused.hazard_sector = surface.primary_sector;
     fused.surface_confidence = surface.confidence;
-    if (fused.depth_level == "unknown" || surface.depth_level == "near") {
+    // Keep a reliable object/geometry level when the road model is ambiguous.
+    // A valid SurfaceDepth level replaces it only when object depth is absent
+    // or the road evidence is more dangerous.
+    const bool accept_surface_depth = !surface.depth_ambiguous &&
+        surface.depth_level != "unknown" &&
+        (fused.depth_level == "unknown" ||
+         level_severity(surface.depth_level) > level_severity(fused.depth_level));
+    if (accept_surface_depth) {
         fused.depth_level = surface.depth_level;
         fused.depth_confidence = surface.depth_confidence;
+        fused.depth_margin = surface.depth_margin;
+        fused.depth_ambiguous = surface.depth_ambiguous;
         fused.depth_source = surface.depth_source;
         fused.depth_consistent = surface.depth_consistent;
         fused.approaching = fused.approaching || surface.approaching;
@@ -93,10 +110,19 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     const bool center_drop = surface.center.persistent_hazard &&
                              surface.center.step_ratio >= 0.02f;
     const bool center_blocked = surface.center.blocked_ratio >= 0.35f;
+    const bool center_unknown = !center_drop && !center_blocked &&
+        (surface.center.unknown_ratio >= 0.30f || !center_safe);
     const bool near_surface = surface.depth_level == "near";
 
     std::string reason = "surface_clear";
     if (center_drop) {
+        if (fused.depth_level == "far") {
+            fused.depth_level = "unknown";
+            fused.depth_confidence = 0.0f;
+            fused.depth_margin = 0.0f;
+            fused.depth_ambiguous = true;
+            fused.depth_source = "step_override_far";
+        }
         if (near_surface || (!left_safe && !right_safe)) {
             fused.action = "stop";
             reason = "surface_drop_near_or_no_safe_side";
@@ -133,9 +159,10 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
         reason = "surface_reject_right_turn";
     } else if (detection.action != "clear") {
         reason = "detection_action_preserved";
-    } else if (!center_safe) {
+    } else if (center_unknown) {
         fused.action = "slow";
-        fused.hazard_type = fused.hazard_type == "none" ? "unknown" : fused.hazard_type;
+        fused.hazard_type = fused.hazard_type == "none"
+            ? "unknown_other" : fused.hazard_type;
         fused.hazard_sector = "center";
         reason = "surface_center_unknown";
     } else {
@@ -239,7 +266,7 @@ bool DepthRangeFusion::SampleBox(const DetectionItem& item,
             if (surface.labels[index] == BLOCKED_SURFACE) continue;
             const float value = surface.depth_m[index];
             const float conf = surface.depth_cell_confidence[index];
-            if (value > 0.0f && std::isfinite(value) && conf >= 0.08f) {
+            if (value > 0.0f && std::isfinite(value) && conf >= 0.20f) {
                 values.push_back(value);
                 confidences.push_back(conf);
             }
@@ -316,7 +343,8 @@ void DepthRangeFusion::Apply(DetectionResult* result, SurfaceResult* surface)
         }
     }
     const float scale = StableScale();
-    if (surface->valid && !surface->stale && surface->center_depth_m > 0.0f) {
+    if (surface->valid && !surface->stale && !surface->depth_ambiguous &&
+        surface->center_depth_m > 0.0f) {
         if (scale > 0.0f) {
             surface->center_depth_m *= scale;
             surface->depth_level = LevelFromDepth(surface->center_depth_m);

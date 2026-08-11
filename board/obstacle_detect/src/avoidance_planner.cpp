@@ -298,6 +298,8 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     if (nearest_item != NULL) {
         decision.depth_level = nearest_item->depth_level;
         decision.depth_confidence = nearest_item->depth_confidence;
+        decision.depth_margin = 0.0f;
+        decision.depth_ambiguous = nearest_item->depth_level == "unknown";
         decision.depth_source = nearest_item->depth_source;
         decision.depth_consistent = nearest_item->depth_consistent;
         decision.approaching = nearest_item->approaching;

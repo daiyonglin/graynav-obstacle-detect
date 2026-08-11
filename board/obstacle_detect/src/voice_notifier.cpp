@@ -1402,8 +1402,12 @@ void VoiceNotifier::Update(int frame_id,
     }
     const bool critical = action == "stop" || action == "system_fault";
     const bool action_changed = action != last_requested_action_;
+    // A depth-level transition is only a speech event when it also changes the
+    // conservative motion advice.  Otherwise floor depth jitter would enqueue
+    // repeated "clear" prompts during an otherwise stable demonstration.
     const bool depth_changed = decision.depth_level != "unknown" &&
-                               decision.depth_level != last_announced_depth_level_;
+                               decision.depth_level != last_announced_depth_level_ &&
+                               (action == "slow" || action == "stop");
     const bool semantic_event = hazard_changed || action == "surface_degraded";
     if (!critical && !action_changed && !depth_changed && !semantic_event) {
         return;

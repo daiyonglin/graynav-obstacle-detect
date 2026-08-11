@@ -672,6 +672,8 @@ void print_json_packet(int frame_id,
     oss << ",\"perception_degraded\":" << (decision.perception_degraded ? "true" : "false");
     oss << ",\"depth_level\":\"" << json_escape(decision.depth_level) << "\"";
     oss << ",\"depth_confidence\":" << decision.depth_confidence;
+    oss << ",\"depth_margin\":" << decision.depth_margin;
+    oss << ",\"depth_ambiguous\":" << (decision.depth_ambiguous ? "true" : "false");
     oss << ",\"depth_source\":\"" << json_escape(decision.depth_source) << "\"";
     oss << ",\"depth_consistent\":" << (decision.depth_consistent ? "true" : "false");
     oss << ",\"approaching\":" << (decision.approaching ? "true" : "false") << "}";
@@ -680,6 +682,7 @@ void print_json_packet(int frame_id,
         oss << "\"ground\":" << std::fixed << std::setprecision(3) << corridor.ground_ratio;
         oss << ",\"blocked\":" << corridor.blocked_ratio;
         oss << ",\"step\":" << corridor.step_ratio;
+        oss << ",\"unknown\":" << corridor.unknown_ratio;
         oss << ",\"safe_candidate\":" << (corridor.safe_candidate ? "true" : "false");
         oss << ",\"persistent_hazard\":" << (corridor.persistent_hazard ? "true" : "false") << "}";
     };
@@ -691,6 +694,12 @@ void print_json_packet(int frame_id,
         << ",\"sector\":\"" << json_escape(surface.primary_sector) << "\""
         << ",\"depth_level\":\"" << json_escape(surface.depth_level) << "\""
         << ",\"depth_confidence\":" << surface.depth_confidence
+        << ",\"depth_margin\":" << surface.depth_margin
+        << ",\"depth_ambiguous\":" << (surface.depth_ambiguous ? "true" : "false")
+        << ",\"depth_group_probabilities\":["
+        << surface.depth_group_probabilities[0] << ","
+        << surface.depth_group_probabilities[1] << ","
+        << surface.depth_group_probabilities[2] << "]"
         << ",\"depth_source\":\"" << json_escape(surface.depth_source) << "\""
         << ",\"approaching\":" << (surface.approaching ? "true" : "false") << ",";
     append_surface("left", surface.left);
@@ -813,6 +822,7 @@ int find_nearest_index(const DetectionResult& result)
 void print_human_packet(int frame_id,
                         const DetectionResult& result,
                         const AvoidanceDecision& decision,
+                        const SurfaceResult& surface,
                         const FrameStats& frame_stats,
                         const LightStats& light_stats,
                         int displayed_count,
@@ -831,7 +841,16 @@ void print_human_packet(int frame_id,
             << " post_nms=" << result.post_nms_count
             << " displayed=" << displayed_count
             << " tracks=" << result.Size()
-            << " coarse_drop=" << result.coarse_drop_count;
+            << " coarse_drop=" << result.coarse_drop_count
+            << " depth=" << to_upper_text(decision.depth_level)
+            << " depth_conf=" << std::setprecision(2) << decision.depth_confidence
+            << " depth_margin=" << decision.depth_margin
+            << " depth_ambiguous=" << (decision.depth_ambiguous ? 1 : 0)
+            << " surface_center="
+            << std::setprecision(2) << surface.center.ground_ratio << "/"
+            << surface.center.blocked_ratio << "/"
+            << surface.center.step_ratio << "/"
+            << surface.center.unknown_ratio;
         if (item != nullptr) {
             oss << " conf=" << std::fixed << std::setprecision(2) << item->score
                 << " src=" << item->distance_source
@@ -870,6 +889,7 @@ void print_human_packet(int frame_id,
             << " hazard=" << to_upper_text(decision.hazard_type)
             << " hazard_sector=" << to_upper_text(decision.hazard_sector)
             << " perception=" << to_upper_text(decision.perception_source)
+            << " depth=" << to_upper_text(decision.depth_level)
             << " degraded=" << (decision.perception_degraded ? 1 : 0);
         append_diagnostics(oss, nullptr);
         std::cout << oss.str() << std::endl;
@@ -894,6 +914,7 @@ void print_human_packet(int frame_id,
     oss << " hazard=" << to_upper_text(decision.hazard_type)
         << " hazard_sector=" << to_upper_text(decision.hazard_sector)
         << " perception=" << to_upper_text(decision.perception_source)
+        << " depth=" << to_upper_text(decision.depth_level)
         << " degraded=" << (decision.perception_degraded ? 1 : 0);
     if (result.items.size() > 1) {
         oss << " objects=" << result.items.size();
@@ -1296,6 +1317,7 @@ int main()
             print_human_packet(frame_id,
                                stable_result,
                                health_decision,
+                               surface_snapshot,
                                frame_stats,
                                light_stats,
                                static_cast<int>(std::min<size_t>(det_result->Size(), 6)),

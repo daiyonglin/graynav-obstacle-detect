@@ -107,12 +107,13 @@ struct ZoneStatus {
           risk_level("unknown") {}
 };
 
-/** @brief 单通道道路分割模型的三类部署契约。 */
+/** @brief 单通道道路分割模型的四类部署契约。 */
 enum SurfaceClass {
     GROUND_CANDIDATE = 0,
     BLOCKED_SURFACE = 1,
     STEP_OR_DROP = 2,
-    SURFACE_CLASS_COUNT = 3
+    UNKNOWN_OTHER = 3,
+    SURFACE_CLASS_COUNT = 4
 };
 
 static const int SURFACE_GRID_SIZE = 64;
@@ -124,6 +125,7 @@ struct SurfaceCorridor {
     float ground_ratio;
     float blocked_ratio;
     float step_ratio;
+    float unknown_ratio;
     bool safe_candidate;
     bool persistent_hazard;
 
@@ -131,6 +133,7 @@ struct SurfaceCorridor {
         : ground_ratio(0.0f),
           blocked_ratio(0.0f),
           step_ratio(0.0f),
+          unknown_ratio(0.0f),
           safe_candidate(false),
           persistent_hazard(false) {}
 };
@@ -150,6 +153,9 @@ struct SurfaceResult {
     float confidence;
     std::string depth_level;
     float depth_confidence;
+    float depth_margin;
+    bool depth_ambiguous;
+    std::array<float, 3> depth_group_probabilities;
     std::string depth_source;
     bool depth_consistent;
     bool approaching;
@@ -169,6 +175,9 @@ struct SurfaceResult {
           confidence(0.0f),
           depth_level("unknown"),
           depth_confidence(0.0f),
+          depth_margin(0.0f),
+          depth_ambiguous(true),
+          depth_group_probabilities{0.0f, 0.0f, 0.0f},
           depth_source("unknown"),
           depth_consistent(false),
           approaching(false),
@@ -198,6 +207,8 @@ struct AvoidanceDecision {
     bool perception_degraded;
     std::string depth_level;
     float depth_confidence;
+    float depth_margin;
+    bool depth_ambiguous;
     std::string depth_source;
     bool depth_consistent;
     bool approaching;
@@ -213,6 +224,8 @@ struct AvoidanceDecision {
           perception_degraded(false),
           depth_level("unknown"),
           depth_confidence(0.0f),
+          depth_margin(0.0f),
+          depth_ambiguous(true),
           depth_source("unknown"),
           depth_consistent(false),
           approaching(false) {

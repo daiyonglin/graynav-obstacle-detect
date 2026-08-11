@@ -11,21 +11,17 @@
 - 160 个分层校准样本和 40 个量化评估样本；
 - 官方 A1 INT8 转换，两个输出余弦相似度均高于 0.98；
 - 转换证据、输入输出 scale、模型哈希和部署限制归档；
-- GitHub 功能分支和 Draft PR 建立。
+- 代码管理切换为直接提交并推送 `main`，不再使用本项目 Draft PR 流程；
+- E3 四类/深度后处理、主机测试、SDK 同步和双模型候选构建已经完成。
 
 尚未完成：
 
-- 板端 C++ 从旧 3 类契约升级到 E3 的 4 类契约；
-- 深度分组概率、量化输出处理和歧义保护；
-- 正式 `.m1model` 进入受控板端资产；
-- Git 副本与 SDK 编译副本同步；
-- 候选镜像构建、烧录和实板验收。
+- 候选镜像归档；
+- 烧录和实板双模型加载、稳定性与功能验收。
 
 ## 2. 分步策略
 
-首次上板候选采用“当前 ROD25 检测 + SurfaceDepth E3”，不同时更换检测模型。原因是这样能把风险限定在新增道路理解链路：如果新候选异常，可以直接判断是 SurfaceDepth 模型、后处理、内存或调度问题，而不会与 COCO80 检测模型切换相互干扰。
-
-SurfaceDepth 稳定后，再把检测器替换为真单通道 COCO80，形成第二个独立候选。两个阶段分别构建、归档和验收，均不覆盖当前板上回退镜像。
+根据 2026-08-11 的实施决策，首次上板候选直接采用“COCO80 gray-copy 检测 + SurfaceDepth E3”。相机源仍是单通道 Y8；检测支路显式生成 `[G,G,G]`，道路/深度支路保持真单通道。这样优先验证完整的“常见物体 + 道路场景”演示能力，同时保留旧 ROD25 镜像作为回退。
 
 ```mermaid
 flowchart TD
@@ -33,14 +29,13 @@ flowchart TD
     B --> C{"主机与静态测试通过？"}
     C -->|否| B
     C -->|是| D["批次 B：加入 E3 m1model 受控资产"]
-    D --> E["批次 C：同步 SDK 并构建 ROD25 + E3 候选"]
+    D --> E["批次 C：同步 SDK 并构建 COCO80 + E3 候选"]
     E --> F{"双模型与镜像检查通过？"}
     F -->|否| B
     F -->|是| G["烧录与 30 分钟实板测试"]
     G --> H{"功能和降级测试通过？"}
     H -->|否| A
-    H -->|是| I["归档候选 1"]
-    I --> J["批次 D：单独替换 COCO80 检测模型"]
+    H -->|是| I["归档并保留候选"]
 ```
 
 ## 3. 批次 A：完善纯 CPU 后处理
@@ -114,7 +109,7 @@ FAR:  center >= 2.20
 
 ```text
 board/obstacle_detect/app_assets/models/
-  graynav_surface_depth_e3_gray1_int8.m1model
+  graynav_surface_depth_e3_gray1.m1model
 ```
 
 2. 只为该精确路径增加 `.gitignore` 例外，不开放全局 `*.m1model`。
@@ -131,7 +126,7 @@ SHA256 = d40b6f6c6392d062a5c39625b3f39c69e579255583498e2c218bb8c2593106f1
 
 ## 5. 批次 C：SDK 同步和首个候选构建
 
-目标：使用当前 ROD25 检测器与 E3 组合，验证双模型链路，不同时承担 COCO80 变更风险。
+目标：使用现有 A1 COCO80 gray-copy 检测器与正式 E3 组合，验证完整双模型链路。
 
 ### C1. 同步前保护
 
@@ -145,11 +140,11 @@ SHA256 = d40b6f6c6392d062a5c39625b3f39c69e579255583498e2c218bb8c2593106f1
 第一候选显式使用：
 
 ```text
-detector classes    = 25
-detector channels   = 1
-detector model      = graynav_rod25_gray1_dce_b3_head6.m1model
+detector classes    = 80
+detector channels   = 3（Y8 显式复制为 [G,G,G]）
+detector model      = yolov8n80_graycopy_head6.m1model
 surface enabled     = ON
-surface model       = graynav_surface_depth_e3_gray1_int8.m1model
+surface model       = graynav_surface_depth_e3_gray1.m1model
 voice               = ON
 ```
 
@@ -204,9 +199,9 @@ voice               = ON
 
 通过后使用 `archive_candidate.ps1` 归档 Git commit、两个模型、审计/校准契约、zImage 和 30 分钟日志。
 
-## 7. 批次 D：检测模型升级
+## 7. 后续可选：真单通道 COCO80
 
-只有候选 1 的 SurfaceDepth 链路稳定后，才单独完成真单通道 COCO80：
+当前候选先使用已有、已转换的 COCO80 gray-copy 模型。只有完成新的官方 A1 转换后，才可将其替换为真单通道 COCO80：
 
 1. 构建/选择正式 COCO80 checkpoint；
 2. 导出 head6、完成 A1 转换和 CPU 解码一致性；
@@ -224,9 +219,9 @@ docs: document SurfaceDepth E3 deployment status       已完成
 fix(board): align SurfaceDepth E3 postprocessing       批次 A
 test(board): cover four-class and depth ambiguity      批次 A
 feat(board): add audited SurfaceDepth E3 model asset   批次 B
-build(board): stage ROD25 plus SurfaceDepth candidate  批次 C
+build(board): stage COCO80 plus SurfaceDepth candidate 批次 C
 docs(board): record candidate image and board results  板测后
-feat(detector): integrate true-mono COCO80 candidate   批次 D
+feat(detector): integrate true-mono COCO80 candidate   后续可选
 ```
 
 如果一个实现和测试高度耦合，可以把批次 A 的 `fix` 与 `test` 合并为一个 commit；不得把模型二进制、Docker 构建产物和板测记录混在同一个提交中。

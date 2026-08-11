@@ -618,6 +618,22 @@ std::string risk_text(float distance_m)
     return "FAR";
 }
 
+std::string object_hud_text(const DetectionItem& item)
+{
+    const std::string& label = item.raw_label.empty() ? item.label : item.raw_label;
+    if (label == "person") return "PERSON";
+    if (label == "chair") return "CHAIR";
+    if (label == "bench") return "BENCH";
+    if (label == "couch" || label == "sofa") return "COUCH";
+    if (label == "dining table" || label == "table") return "TABLE";
+    if (label == "dog") return "DOG";
+    if (label == "potted plant" || label == "plant") return "PLANT";
+    if (label == "backpack" || label == "handbag" || label == "suitcase") return "BAG";
+    if (label == "bicycle" || label == "motorcycle" || label == "car" ||
+        label == "bus" || label == "truck") return "VEHICLE";
+    return "ITEM";
+}
+
 std::string hud_asset_path(const std::string& name)
 {
     return "/app_demo/app_assets/osd/" + name + ".ssbmp";
@@ -726,6 +742,11 @@ void VISUALIZER::Draw(const DetectionResult& result,
     else if (decision.depth_level == "far") depth_word = "FAR";
     HudGlyphRenderer::DrawWord(&status, 300.0f, 28.0f, 0.42f, state_word);
     HudGlyphRenderer::DrawWord(&status, 300.0f, 72.0f, 0.34f, depth_word);
+    const int object_index = find_primary_index(result);
+    if (object_index >= 0) {
+        HudGlyphRenderer::DrawWord(
+            &status, 300.0f, 108.0f, 0.28f, object_hud_text(result.items[object_index]));
+    }
     int meter = decision.depth_level == "near" ? 3 :
                 decision.depth_level == "mid" ? 2 :
                 decision.depth_level == "far" ? 1 : action_level(decision.action);

@@ -12,7 +12,7 @@ namespace obstacle {
 /**
  * @brief A1 单通道 Fast-SCNN 推理与道路走廊后处理。
  *
- * 模型输入固定为 1x1x256x256 Y8，输出 1x3x64x64 分割 logits 与
+ * 模型输入固定为 1x1x256x256 Y8，输出 1x4x64x64 分割 logits 与
  * 1x16x64x64 深度等级 logits。Softmax/ArgMax、区域中位数和时序投票
  * 全部在 CPU 完成。
  */
@@ -47,8 +47,8 @@ private:
         int total;
         int lowest_hazard_y;
         CorridorStats()
-            : counts{0, 0, 0},
-              largest_components{0, 0, 0},
+            : counts{},
+              largest_components{},
               total(0),
               lowest_hazard_y(-1) {}
     };
@@ -56,6 +56,7 @@ private:
     bool Preprocess(ssne_tensor_t* image);
     bool ReadOutputLogits(const ssne_tensor_t& tensor,
                           int channels,
+                          float quant_scale,
                           std::vector<float>* logits) const;
     bool BindOutputs(bool* hwc_layout);
     void MajorityFilter(const std::array<uint8_t, SURFACE_GRID_CELLS>& input,
@@ -68,6 +69,9 @@ private:
     static bool CellInCorridor(int x, int y, int corridor_index);
     static std::string DepthLevel(float depth_m, float confidence);
     static float Median(std::vector<float>* values);
+    std::string StabilizeDepthLevel(const std::string& candidate,
+                                    float confidence,
+                                    float margin);
     void DecodeDepth(const float* logits,
                      bool hwc_layout,
                      const std::array<uint8_t, SURFACE_GRID_CELLS>& labels,
@@ -90,6 +94,9 @@ private:
     bool hazard_latched_[3];
     int hazard_clear_count_[3];
     std::deque<float> center_depth_history_;
+    std::deque<std::string> center_depth_level_history_;
+    std::string stable_depth_level_;
+    bool output_contract_logged_;
 };
 
 }  // namespace obstacle

@@ -18,6 +18,11 @@ const int kClasses = SURFACE_CLASS_COUNT;
 const int kDepthBins = DEPTH_BIN_COUNT;
 const float kDepthMinM = 0.30f;
 const float kDepthMaxM = 8.0f;
+const float kSegOutputScale = 0.0690593868494f;
+const float kDepthOutputScale = 0.367095053196f;
+const float kUnknownMaxRatio = 0.30f;
+const float kDepthGroupMinProbability = 0.45f;
+const float kDepthAmbiguityMargin = 0.20f;
 
 int64_t monotonic_ms()
 {
@@ -53,6 +58,38 @@ float depth_center(int bin)
     return std::exp(log_min + (static_cast<float>(bin) + 0.5f) * step);
 }
 
+int depth_group_for_bin(int bin)
+{
+    const float center = depth_center(bin);
+    if (center < semantic::NearDistanceM()) return 0;
+    if (center < semantic::WarningDistanceM()) return 1;
+    return 2;
+}
+
+std::string depth_group_name(int group)
+{
+    if (group == 0) return "near";
+    if (group == 1) return "mid";
+    if (group == 2) return "far";
+    return "unknown";
+}
+
+int depth_severity(const std::string& level)
+{
+    if (level == "near") return 3;
+    if (level == "mid") return 2;
+    if (level == "far") return 1;
+    return 0;
+}
+
+const char* dtype_name(uint8_t dtype)
+{
+    if (dtype == SSNE_FLOAT32) return "float32";
+    if (dtype == SSNE_INT8) return "int8";
+    if (dtype == SSNE_UINT8) return "uint8";
+    return "unknown";
+}
+
 }  // namespace
 
 SurfaceSegmenter::SurfaceSegmenter()
@@ -67,7 +104,9 @@ SurfaceSegmenter::SurfaceSegmenter()
       preprocess_pipe_(NULL),
       image_shape_{720, 1280},
       input_shape_{256, 256},
-      roi_{0, 560, 720, 1280}
+      roi_{0, 560, 720, 1280},
+      stable_depth_level_("unknown"),
+      output_contract_logged_(false)
 {
     std::memset(hazard_latched_, 0, sizeof(hazard_latched_));
     std::memset(hazard_clear_count_, 0, sizeof(hazard_clear_count_));
@@ -113,7 +152,7 @@ bool SurfaceSegmenter::Initialize(const std::string& model_path,
     }
     available_ = true;
     std::cout << "[SURFACE_DEPTH][INFO] model=" << model_path << " id=" << model_id_
-              << " input=1x1x256x256 outputs=seg(3x64x64)+depth(16x64x64)"
+              << " input=1x1x256x256 outputs=seg(4x64x64)+depth(16x64x64)"
               << " roi=" << roi_[0] << "," << roi_[1] << "," << roi_[2] << "," << roi_[3]
               << " alloc=dynamic dtype=" << dtype << std::endl;
     return true;
@@ -151,6 +190,7 @@ bool SurfaceSegmenter::BindOutputs(bool* hwc_layout)
 
 bool SurfaceSegmenter::ReadOutputLogits(const ssne_tensor_t& tensor,
                                         int channels,
+                                        float quant_scale,
                                         std::vector<float>* logits) const
 {
     if (logits == NULL || get_data(tensor) == NULL) return false;
@@ -163,11 +203,14 @@ bool SurfaceSegmenter::ReadOutputLogits(const ssne_tensor_t& tensor,
         std::copy(data, data + expected, logits->begin());
     } else if (dtype == SSNE_INT8) {
         const int8_t* data = reinterpret_cast<const int8_t*>(get_data(tensor));
-        for (size_t i = 0; i < expected; ++i) (*logits)[i] = static_cast<float>(data[i]);
-    } else if (dtype == SSNE_UINT8) {
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(get_data(tensor));
-        for (size_t i = 0; i < expected; ++i) (*logits)[i] = static_cast<float>(data[i]);
+        if (!(quant_scale > 0.0f) || !std::isfinite(quant_scale)) return false;
+        for (size_t i = 0; i < expected; ++i) {
+            (*logits)[i] = static_cast<float>(data[i]) * quant_scale;
+        }
     } else {
+        // The formal E3 model uses symmetric INT8 outputs.  UINT8 would need a
+        // zero point that the public SSNE tensor API does not expose, so fail
+        // closed instead of interpreting bytes as logits.
         return false;
     }
     return true;
@@ -180,15 +223,18 @@ void SurfaceSegmenter::MajorityFilter(
     if (output == NULL) return;
     for (int y = 0; y < kGrid; ++y) {
         for (int x = 0; x < kGrid; ++x) {
-            int counts[kClasses] = {0, 0, 0};
+            std::array<int, SURFACE_CLASS_COUNT> counts{};
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     const int xx = std::max(0, std::min(kGrid - 1, x + dx));
                     const int yy = std::max(0, std::min(kGrid - 1, y + dy));
-                    ++counts[input[yy * kGrid + xx]];
+                    const int cls = input[yy * kGrid + xx];
+                    if (cls >= 0 && cls < kClasses) ++counts[cls];
                 }
             }
-            int best = input[y * kGrid + x];
+            int best = input[y * kGrid + x] < kClasses
+                ? static_cast<int>(input[y * kGrid + x])
+                : static_cast<int>(UNKNOWN_OTHER);
             for (int cls = 0; cls < kClasses; ++cls) if (counts[cls] > counts[best]) best = cls;
             (*output)[y * kGrid + x] = static_cast<uint8_t>(best);
         }
@@ -211,6 +257,7 @@ SurfaceSegmenter::CorridorStats SurfaceSegmenter::MeasureCorridor(
     for (int y = 0; y < kGrid; ++y) for (int x = 0; x < kGrid; ++x) {
         if (!CellInCorridor(x, y, corridor_index)) continue;
         const int cls = labels[y * kGrid + x];
+        if (cls < 0 || cls >= kClasses) continue;
         ++stats.counts[cls];
         ++stats.total;
         if (cls == STEP_OR_DROP && y > stats.lowest_hazard_y) stats.lowest_hazard_y = y;
@@ -250,10 +297,12 @@ SurfaceCorridor SurfaceSegmenter::BuildCorridor(const CorridorStats& stats)
     corridor.ground_ratio = stats.counts[GROUND_CANDIDATE] * inv;
     corridor.blocked_ratio = stats.counts[BLOCKED_SURFACE] * inv;
     corridor.step_ratio = stats.counts[STEP_OR_DROP] * inv;
+    corridor.unknown_ratio = stats.counts[UNKNOWN_OTHER] * inv;
     corridor.persistent_hazard = corridor.step_ratio >= 0.02f &&
                                  stats.largest_components[STEP_OR_DROP] >= 12;
     corridor.safe_candidate = corridor.ground_ratio >= 0.55f &&
-        corridor.blocked_ratio < 0.35f && corridor.step_ratio < 0.02f;
+        corridor.blocked_ratio < 0.35f && corridor.step_ratio < 0.02f &&
+        corridor.unknown_ratio < kUnknownMaxRatio;
     return corridor;
 }
 
@@ -297,12 +346,53 @@ std::string SurfaceSegmenter::DepthLevel(float depth_m, float confidence)
     return "far";
 }
 
+std::string SurfaceSegmenter::StabilizeDepthLevel(const std::string& candidate,
+                                                   float confidence,
+                                                   float margin)
+{
+    if (candidate == "unknown") {
+        center_depth_level_history_.clear();
+        center_depth_history_.clear();
+        stable_depth_level_ = "unknown";
+        return stable_depth_level_;
+    }
+
+    center_depth_level_history_.push_back(candidate);
+    while (center_depth_level_history_.size() > 3U) {
+        center_depth_level_history_.pop_front();
+    }
+
+    if (stable_depth_level_ == "unknown") {
+        const bool strong_single_frame = candidate == "near" ||
+            (confidence >= 0.65f && margin >= 0.35f);
+        const bool repeated = center_depth_level_history_.size() >= 2U &&
+            center_depth_level_history_[center_depth_level_history_.size() - 1U] == candidate &&
+            center_depth_level_history_[center_depth_level_history_.size() - 2U] == candidate;
+        if (strong_single_frame || repeated) stable_depth_level_ = candidate;
+        return stable_depth_level_;
+    }
+
+    // Moving toward a more dangerous level is immediate.  Moving farther away
+    // needs two matching SurfaceDepth frames so the demo does not flicker.
+    if (depth_severity(candidate) > depth_severity(stable_depth_level_)) {
+        stable_depth_level_ = candidate;
+        return stable_depth_level_;
+    }
+    if (candidate == stable_depth_level_) return stable_depth_level_;
+    if (center_depth_level_history_.size() >= 2U &&
+        center_depth_level_history_[center_depth_level_history_.size() - 1U] == candidate &&
+        center_depth_level_history_[center_depth_level_history_.size() - 2U] == candidate) {
+        stable_depth_level_ = candidate;
+    }
+    return stable_depth_level_;
+}
+
 void SurfaceSegmenter::DecodeDepth(
     const float* logits, bool hwc_layout,
     const std::array<uint8_t, SURFACE_GRID_CELLS>& labels, SurfaceResult* result)
 {
     std::vector<float> center_depths;
-    std::vector<float> center_confidences;
+    std::array<std::vector<float>, 3> center_group_probabilities;
     for (int y = 0; y < kGrid; ++y) for (int x = 0; x < kGrid; ++x) {
         float maximum = -1e30f;
         for (int bin = 0; bin < kDepthBins; ++bin) {
@@ -311,7 +401,9 @@ void SurfaceSegmenter::DecodeDepth(
                 : static_cast<size_t>(bin * kGridCells + y * kGrid + x);
             maximum = std::max(maximum, logits[index]);
         }
-        float denom = 0.0f, weighted = 0.0f, top = 0.0f;
+        float denom = 0.0f;
+        float weighted = 0.0f;
+        std::array<float, 3> grouped = {0.0f, 0.0f, 0.0f};
         for (int bin = 0; bin < kDepthBins; ++bin) {
             const size_t index = hwc_layout
                 ? static_cast<size_t>((y * kGrid + x) * kDepthBins + bin)
@@ -319,22 +411,78 @@ void SurfaceSegmenter::DecodeDepth(
             const float probability = std::exp(logits[index] - maximum);
             denom += probability;
             weighted += probability * depth_center(bin);
-            top = std::max(top, probability);
+            grouped[depth_group_for_bin(bin)] += probability;
         }
         const int cell = y * kGrid + x;
         result->depth_m[cell] = denom > 0.0f ? weighted / denom : -1.0f;
-        result->depth_cell_confidence[cell] = denom > 0.0f ? top / denom : 0.0f;
-        if (CellInCorridor(x, y, 1) && y >= kGrid / 3 &&
-            result->depth_cell_confidence[cell] >= 0.12f) {
+        if (denom > 0.0f) {
+            for (int group = 0; group < 3; ++group) grouped[group] /= denom;
+        }
+        float top_group = -1.0f;
+        float second_group = -1.0f;
+        for (int group = 0; group < 3; ++group) {
+            if (grouped[group] > top_group) {
+                second_group = top_group;
+                top_group = grouped[group];
+            } else if (grouped[group] > second_group) {
+                second_group = grouped[group];
+            }
+        }
+        result->depth_cell_confidence[cell] =
+            std::max(0.0f, top_group - std::max(0.0f, second_group));
+        // UNKNOWN_OTHER is deliberately excluded from the corridor depth vote.
+        // A visually unresolved region must not produce a confident FAR result.
+        if (labels[cell] != UNKNOWN_OTHER && CellInCorridor(x, y, 1) &&
+            y >= kGrid / 3 && top_group >= 0.34f) {
             center_depths.push_back(result->depth_m[cell]);
-            center_confidences.push_back(result->depth_cell_confidence[cell]);
+            for (int group = 0; group < 3; ++group) {
+                center_group_probabilities[group].push_back(grouped[group]);
+            }
         }
     }
     result->center_depth_m = Median(&center_depths);
-    result->depth_confidence = Median(&center_confidences);
-    result->depth_level = DepthLevel(result->center_depth_m, result->depth_confidence);
-    result->depth_source = result->depth_level == "unknown" ? "unknown" : "learned_unscaled";
-    if (result->center_depth_m > 0.0f) {
+    float group_sum = 0.0f;
+    for (int group = 0; group < 3; ++group) {
+        result->depth_group_probabilities[group] = Median(&center_group_probabilities[group]);
+        group_sum += std::max(0.0f, result->depth_group_probabilities[group]);
+    }
+    if (group_sum > 0.0f) {
+        for (int group = 0; group < 3; ++group) {
+            result->depth_group_probabilities[group] /= group_sum;
+        }
+    }
+
+    int best_group = -1;
+    float best_probability = -1.0f;
+    float second_probability = -1.0f;
+    for (int group = 0; group < 3; ++group) {
+        const float probability = result->depth_group_probabilities[group];
+        if (probability > best_probability) {
+            second_probability = best_probability;
+            best_probability = probability;
+            best_group = group;
+        } else if (probability > second_probability) {
+            second_probability = probability;
+        }
+    }
+    result->depth_confidence = std::max(0.0f, best_probability);
+    result->depth_margin = std::max(0.0f, best_probability - std::max(0.0f, second_probability));
+    std::string candidate = "unknown";
+    if (center_depths.size() >= 12U &&
+        result->depth_confidence >= kDepthGroupMinProbability &&
+        result->depth_margin >= kDepthAmbiguityMargin) {
+        candidate = depth_group_name(best_group);
+    }
+    result->depth_ambiguous = candidate == "unknown";
+    result->depth_level = StabilizeDepthLevel(
+        candidate, result->depth_confidence, result->depth_margin);
+    if (result->depth_level == "unknown") {
+        result->depth_source = result->depth_ambiguous
+            ? "learned_ambiguous" : "learned_pending";
+    } else {
+        result->depth_source = "learned_grouped";
+    }
+    if (result->center_depth_m > 0.0f && !result->depth_ambiguous) {
         center_depth_history_.push_back(result->center_depth_m);
         while (center_depth_history_.size() > 4) center_depth_history_.pop_front();
     }
@@ -377,7 +525,8 @@ bool SurfaceSegmenter::PostprocessLogits(
     result->left = stable[0]; result->center = stable[1]; result->right = stable[2];
     result->labels = filtered;
     result->confidence = std::max(result->center.ground_ratio,
-        std::max(result->center.blocked_ratio, result->center.step_ratio));
+        std::max(result->center.blocked_ratio,
+            std::max(result->center.step_ratio, result->center.unknown_ratio)));
     DecodeDepth(depth_logits, hwc_layout, filtered, result);
     int primary = -1;
     for (int candidate : {1, 0, 2}) {
@@ -386,18 +535,29 @@ bool SurfaceSegmenter::PostprocessLogits(
         }
     }
     if (primary >= 0) {
-        result->primary_hazard = stable[primary].step_ratio >= 0.02f
+        result->primary_hazard = stable[primary].persistent_hazard
             ? "step_or_drop" : "blocked_surface";
         result->primary_sector = primary == 0 ? "left" : (primary == 1 ? "center" : "right");
         result->proximity = result->depth_level;
     } else if (!result->center.safe_candidate) {
-        result->primary_hazard = "unknown";
+        result->primary_hazard = result->center.unknown_ratio >= kUnknownMaxRatio
+            ? "unknown_other" : "unknown";
         result->primary_sector = "center";
         result->proximity = result->depth_level;
     } else {
         result->primary_hazard = "none";
         result->primary_sector = "unknown";
         result->proximity = result->depth_level;
+    }
+    if ((result->primary_hazard == "unknown_other" || result->primary_hazard == "unknown") &&
+        !result->center.persistent_hazard && result->center.blocked_ratio < 0.35f) {
+        // A semantic UNKNOWN region must not be paired with a confident FAR
+        // label in Aurora or speech.  The raw probabilities remain in the
+        // diagnostic fields for later threshold tuning.
+        result->depth_level = "unknown";
+        result->depth_ambiguous = true;
+        result->depth_source = "surface_unknown";
+        result->proximity = "unknown";
     }
     return true;
 }
@@ -422,9 +582,26 @@ bool SurfaceSegmenter::Predict(ssne_tensor_t* image, SurfaceResult* result)
     last_timing_.output_ms = elapsed(start);
     bool hwc = true;
     if (!BindOutputs(&hwc)) return false;
+    if (!output_contract_logged_) {
+        std::cout << "[SURFACE_DEPTH][CONTRACT] seg_index=" << seg_output_index_
+                  << " seg_dtype=" << dtype_name(get_data_type(outputs_[seg_output_index_]))
+                  << " seg_elements=" << tensor_elements(outputs_[seg_output_index_])
+                  << " seg_scale=" << kSegOutputScale
+                  << " depth_index=" << depth_output_index_
+                  << " depth_dtype=" << dtype_name(get_data_type(outputs_[depth_output_index_]))
+                  << " depth_elements=" << tensor_elements(outputs_[depth_output_index_])
+                  << " depth_scale=" << kDepthOutputScale
+                  << " layout=" << (hwc ? "HWC" : "CHW")
+                  << std::endl;
+        output_contract_logged_ = true;
+    }
     std::vector<float> seg, depth;
-    if (!ReadOutputLogits(outputs_[seg_output_index_], kClasses, &seg) ||
-        !ReadOutputLogits(outputs_[depth_output_index_], kDepthBins, &depth)) return false;
+    if (!ReadOutputLogits(outputs_[seg_output_index_], kClasses, kSegOutputScale, &seg) ||
+        !ReadOutputLogits(outputs_[depth_output_index_], kDepthBins, kDepthOutputScale, &depth)) {
+        std::cout << "[SURFACE_DEPTH][ERROR] unsupported output dtype or quantization contract"
+                  << std::endl;
+        return false;
+    }
     start = std::chrono::steady_clock::now();
     const bool ok = PostprocessLogits(seg.data(), seg.size(), depth.data(), depth.size(),
                                       hwc, monotonic_ms(), result);
@@ -442,6 +619,11 @@ void SurfaceSegmenter::Release()
         ReleaseAIPreprocessPipe(preprocess_pipe_); preprocess_pipe_ = NULL;
     }
     available_ = false;
+    output_contract_logged_ = false;
+    history_.clear();
+    center_depth_history_.clear();
+    center_depth_level_history_.clear();
+    stable_depth_level_ = "unknown";
 }
 
 }  // namespace obstacle
