@@ -9,26 +9,26 @@ GrayNav 是面向视障辅助导航场景的边缘端感知原型，运行平台
 | 模块 | 状态 | 说明 |
 |---|---|---|
 | 板上回退版本 | 已部署、受保护 | 真单通道 ROD25 YOLOv8n 检测、跟踪、几何测距、避障决策、Aurora OSD 和 SYN6288 语音 |
-| SurfaceDepth E3 | 已训练并完成 A1 INT8 转换 | `4` 类道路分割 + `16` 级相对深度，等待 C++ 后处理契约升级与双模型上板验证 |
-| SurfaceDepth 板端后处理 | 已构建、未烧录 | 已对齐 E3 四类输出、INT8 量化尺度、三走廊统计、深度分组、不确定性、时序与降级策略；COCO80 + E3 候选镜像已生成，等待归档和上板 |
-| COCO80 检测 | 已选定首轮上板模型 | 使用现有 A1 `yolov8n80_graycopy_head6.m1model`，由 Y8 明确复制为 `[G,G,G]`；保留 80 类 raw head，CPU 完成 DFL、NMS、语义筛选和跟踪 |
-| Aurora | 不修改客户端 | 所有展示由板端灰度 OSD 生成，使用边界、符号、文字和风险条表达状态 |
+| COCO80 + SurfaceDepth 双模型候选 | 已烧录、板测失败 | 人体检测可运行，但 SurfaceDepth 进入降级状态；道路/墙面/台阶没有有效结果，分时调度与现有 OSD 不再作为目标架构 |
+| SurfaceDepth E3 | 已训练并完成 A1 INT8 转换 | 训练与转换证据保留，作为统一模型道路/深度分支的设计基线；独立双模型部署停止推进 |
+| 统一感知模型 | 设计中 | 计划以单个真单通道共享骨干同时输出 COCO80 raw 检测头、4 类道路分割头和 16 级相对深度头 |
+| 板端后处理 | 待重构 | 统一单模型输出绑定、目标/道路时序、保守决策、限量灰度 OSD、单行串口与事件驱动语音 |
+| Aurora | 不修改客户端 | 取消密集动态点阵文字和风险条；板端只输出少量检测框、静态状态贴图和必要道路形状 |
 
-当前板子仍烧录优化前的 ROD25 版本。SurfaceDepth 转换完成不等同于已经上板；只有完成 SDK 构建、烧录和实景验收后，才会把新镜像标记为候选部署版本。
+2026-08-11 双模型候选已经烧录并实测。串口持续报告 `perception=DETECTION_DEGRADED_SURFACE_DEPTH`、`degraded=1` 和 `hazard=UNKNOWN`，说明板端实际运行的是 detector-only 降级链路，而不是完整道路感知。Aurora 同时出现密集黑点、文字重叠和难以理解的高频串口输出。该镜像被判定为失败实验，不得标记为可用候选。
 
-第一轮双模型候选直接替换为 COCO80，CMake 默认契约固定为 `80` 类、`3` 通道灰度复制输入。相机源仍是单通道 Y8；只有检测支路在 A1 预处理管道中生成 `[G,G,G]`，SurfaceDepth 支路始终保持真单通道。后续若完成真单通道首层折叠 COCO80 的正式 A1 转换，再作为独立候选替换，禁止只改通道宏而复用不匹配的模型。
+下一阶段改为单一共享骨干模型。相机输入、训练、ONNX、量化校准和板端张量必须全部保持真单通道；不再通过 `[G,G,G]` 灰度复制运行检测器，也不再常驻两个 `model_id` 或采用 `D/D/D/SD` 双模型分时调度。
 
 ## 目标系统架构
 
 ```mermaid
 flowchart LR
-    CAM["SC132GS Mono<br/>720 x 1280 Y8"] --> PRE["单通道 ROI 预处理<br/>灰度增强与分时调度"]
+    CAM["SC132GS Mono<br/>720 x 1280 Y8"] --> PRE["单通道 ROI<br/>1 x 1 x 384 x 384"]
+    PRE --> NET["GrayNav Unified Perception<br/>Mono-YOLOv8n 共享骨干与颈部"]
 
-    PRE -->|"D / D / D"| DET["Mono-YOLOv8n<br/>目标检测 raw heads"]
-    PRE -->|"SD"| ENC["SurfaceDepth E3<br/>Fast-SCNN detail64 共享编码器"]
-
-    ENC --> SEG["4 类分割头<br/>1 x 4 x 64 x 64"]
-    ENC --> DEP["16 级深度头<br/>1 x 16 x 64 x 64"]
+    NET --> DET["COCO80 raw 检测头<br/>P3 / P4 / P5"]
+    NET --> SEG["4 类道路分割头<br/>1 x 4 x 48 x 48"]
+    NET --> DEP["16 级深度头<br/>1 x 16 x 48 x 48"]
 
     DET --> DPOST["CPU: DFL / NMS / Tracker<br/>几何距离与 TTC"]
     SEG --> SPOST["CPU: ArgMax / 多数滤波<br/>走廊比例与时序投票"]
@@ -39,10 +39,12 @@ flowchart LR
     ZPOST --> FUSE
 
     FUSE --> DEC["统一 AvoidanceDecision<br/>clear / slow / stop / turn_left / turn_right"]
-    DEC --> OSD["Aurora 灰度 OSD"]
-    DEC --> SERIAL["串口诊断 / JSON"]
-    DEC --> VOICE["SYN6288 异步语音"]
+    DEC --> OSD["Aurora 限量灰度 OSD"]
+    DEC --> SERIAL["1 Hz 单行状态串口"]
+    DEC --> VOICE["SYN6288 事件驱动语音"]
 ```
+
+统一模型详细契约、训练门控和板端重构边界见 [单模型重构设计](docs/GRAYNAV_UNIFIED_PERCEPTION_REDESIGN_2026-08-11.md)。
 
 ### SurfaceDepth E3 契约
 
@@ -139,16 +141,17 @@ docker exec A1_Builder sh -lc `
 E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk\output\images\zImage.smartsens-m1-evb
 ```
 
-构建成功不代表板测通过。烧录前还要核对 CMakeCache、两个模型的名称/哈希、`zImage < 15 MiB`，并为新候选单独建立归档。
+构建成功不代表板测通过。烧录前还要核对 CMakeCache、统一模型的名称/哈希、`zImage < 15 MiB`，并为新候选单独建立归档。
 
 ## 运行与演示原则
 
-- NPU 默认按 `D -> D -> D -> SD` 分时运行；SD 帧只更新 tracker 预测，不把空检测当作目标消失。
+- NPU 每个调度帧只运行一个统一模型，不进行模型切换；上方 ROI 使用检测输出，下方 ROI 同时使用检测、道路与深度输出。
 - `step_or_drop` 持续成立时优先于深度头给出的 `FAR`。
 - 深度 NEAR/MID/FAR 分组最高与次高概率差小于 `0.20` 时输出 `UNKNOWN`，决策至少为 `slow`。
 - `unknown_other` 不能作为可通行地面；检测与道路理解均稳定无风险时才允许 `clear`。
-- SurfaceDepth 连续推理失败后进入降级模式，只播报一次；检测框、串口和语音链路继续运行。
-- Aurora 不依赖颜色：PATH 使用空心走廊，WALL 使用双线和 X，STEP/DROP 使用平行横线和箭头，UNKNOWN 使用虚线和问号。
+- 任一输出契约或推理失败时进入统一感知降级，显示一个静态 `AI_FAIL` 状态，不得用失效深度驱动 `NEAR` 或反复刷屏。
+- Aurora 每帧最多显示三个稳定目标框、一个动作贴图和一个道路符号；禁止动态绘制物体单词、风险点阵条或大面积掩膜。
+- 正常串口默认每秒一行面向演示的状态；张量、比例和时序细节只在显式诊断模式输出。
 
 ## 回退保护
 
@@ -166,7 +169,7 @@ E:\jichuang\files\zImage.smartsens-m1-evb
 E:\jichuang\firmware_archive\GrayNav_B3_1ch_DCE_25class_A7976710\zImage.smartsens-m1-evb
 ```
 
-新构建禁止覆盖以上文件。只有完成双模型加载、30 分钟稳定性、降级回退和功能场景测试后，才可通过 `board/obstacle_detect/scripts/archive_candidate.ps1` 归档为新候选。
+新构建禁止覆盖以上文件。只有完成统一模型加载、30 分钟稳定性、降级回退和功能场景测试后，才可通过 `board/obstacle_detect/scripts/archive_candidate.ps1` 归档为新候选。
 
 ## 提交规则
 
