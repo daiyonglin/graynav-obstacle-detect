@@ -1,0 +1,147 @@
+{
+  "passed": true,
+  "threshold": 0.9,
+  "m1model": {
+    "member": "model/0d5372e3-4182-4da3-8fe3-d8188f8e3b96_graynav_unified_indoor8_scene21_gray1.m1model",
+    "bytes": 4150950,
+    "sha256": "33eec832710706b1153f468f219c08389a52ba3d21cbdffcde32ca5e25d66da8"
+  },
+  "official_report": "model/0d5372e3-4182-4da3-8fe3-d8188f8e3b96_graynav_unified_indoor8_scene21_gray1_evaluate/0d5372e3-4182-4da3-8fe3-d8188f8e3b96_graynav_unified_indoor8_scene21_gray1_evaluate_report.json",
+  "official_samples": 10,
+  "official_aggregate": {
+    "cls_p3": 0.9945854663848877,
+    "reg_p3": 0.9637060284614563,
+    "cls_p4": 0.991130268573761,
+    "reg_p4": 0.9412578463554382,
+    "cls_p5": 0.9906339883804322,
+    "reg_p5": 0.9683737516403198,
+    "scene_logits": 0.9697354972362519
+  },
+  "official_per_output": {
+    "cls_p3": {
+      "min": 0.9911131858825684,
+      "mean": 0.9945854663848877,
+      "max": 0.9978033304214478
+    },
+    "reg_p3": {
+      "min": 0.949597954750061,
+      "mean": 0.9637060284614563,
+      "max": 0.9822335243225098
+    },
+    "cls_p4": {
+      "min": 0.9861595034599304,
+      "mean": 0.991130268573761,
+      "max": 0.9981555938720703
+    },
+    "reg_p4": {
+      "min": 0.9160173535346985,
+      "mean": 0.9412578463554382,
+      "max": 0.981002926826477
+    },
+    "cls_p5": {
+      "min": 0.9863070249557495,
+      "mean": 0.9906339883804322,
+      "max": 0.996988832950592
+    },
+    "reg_p5": {
+      "min": 0.9351837635040283,
+      "mean": 0.9683737516403198,
+      "max": 0.9883803129196167
+    },
+    "scene_logits": {
+      "min": 0.9508895874023438,
+      "mean": 0.9697354972362519,
+      "max": 0.9900750517845154
+    }
+  },
+  "independent_per_output": {
+    "cls_p3": {
+      "min": 0.9911131947741038,
+      "mean": 0.9945855076697334,
+      "max": 0.9978034817203381
+    },
+    "reg_p3": {
+      "min": 0.9495974535142856,
+      "mean": 0.9637053844377288,
+      "max": 0.982232799225367
+    },
+    "cls_p4": {
+      "min": 0.9861593645909307,
+      "mean": 0.9911302040418363,
+      "max": 0.9981555548135008
+    },
+    "reg_p4": {
+      "min": 0.916017540929667,
+      "mean": 0.9412582313696062,
+      "max": 0.9810035766936902
+    },
+    "cls_p5": {
+      "min": 0.9863069682733779,
+      "mean": 0.9906339490352195,
+      "max": 0.9969887904497063
+    },
+    "reg_p5": {
+      "min": 0.9351837862038388,
+      "mean": 0.968373703930086,
+      "max": 0.9883801796490704
+    },
+    "scene_logits": {
+      "min": 0.9508891132696965,
+      "mean": 0.9697352502134355,
+      "max": 0.9900749049235833
+    }
+  },
+  "global_min": {
+    "official_aggregate": 0.9412578463554382,
+    "official_per_sample": 0.9160173535346985,
+    "independent_per_sample": 0.916017540929667
+  },
+  "input_order_scale": [
+    {
+      "name": "images",
+      "scale": 0.003921568859368563,
+      "order": 0
+    }
+  ],
+  "output_order_scale": [
+    {
+      "name": "cls_p3",
+      "scale": 0.3329733610153198,
+      "order": 0
+    },
+    {
+      "name": "reg_p3",
+      "scale": 0.10155150294303894,
+      "order": 1
+    },
+    {
+      "name": "cls_p4",
+      "scale": 0.21653613448143005,
+      "order": 2
+    },
+    {
+      "name": "reg_p4",
+      "scale": 0.07785206288099289,
+      "order": 3
+    },
+    {
+      "name": "cls_p5",
+      "scale": 0.3593141436576843,
+      "order": 4
+    },
+    {
+      "name": "reg_p5",
+      "scale": 0.09339208155870438,
+      "order": 5
+    },
+    {
+      "name": "scene_logits",
+      "scale": 0.6104978919029236,
+      "order": 6
+    }
+  ],
+  "independent_report_mismatches": [],
+  "errors": [],
+  "package": "C:\\Users\\daiyo\\Downloads\\6cc4c93b0f2e4bd3b1424c943a31c948.zip",
+  "package_sha256": "b2b7444eeb66f29a38318165277c656194332be63e694e162d1f811c7b58ae41"
+}

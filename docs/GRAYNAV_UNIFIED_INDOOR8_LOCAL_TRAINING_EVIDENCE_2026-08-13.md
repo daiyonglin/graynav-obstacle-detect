@@ -185,3 +185,34 @@ E:\jichuang\graynav_local_training\env\Scripts\python.exe `
 - 独立重算值与官方报告一致。
 
 转换审计通过前，不更新 C++ 模型契约，不构建或烧录新镜像。
+# Official A1 INT8 conversion
+
+The selected epoch-29 unified checkpoint was converted once with the official
+A1 compiler. The deployable model is tracked as
+`board/obstacle_detect/app_assets/models/graynav_unified_indoor8_scene21.m1model`.
+
+| Artifact | Value |
+|---|---|
+| Official conversion ZIP SHA256 | `B2B7444EEB66F29A38318165277C656194332BE63E694E162D1F811C7B58AE41` |
+| Deployable m1model bytes | `4,150,950` |
+| Deployable m1model SHA256 | `33EEC832710706B1153F468F219C08389A52BA3D21CBDFFCDE32CA5E25D66DA8` |
+| Input | `images`, order 0, scale 0.003921568859368563 |
+| Output count | 7 |
+| Official evaluation samples | 10 |
+
+Official aggregate cosine similarities:
+
+| Output | Shape | Order | Quantization scale | Cosine similarity |
+|---|---:|---:|---:|---:|
+| `cls_p3` | `1x8x48x48` | 0 | 0.3329733610 | 0.9945854664 |
+| `reg_p3` | `1x64x48x48` | 1 | 0.1015515029 | 0.9637060285 |
+| `cls_p4` | `1x8x24x24` | 2 | 0.2165361345 | 0.9911302686 |
+| `reg_p4` | `1x64x24x24` | 3 | 0.0778520629 | 0.9412578464 |
+| `cls_p5` | `1x8x12x12` | 4 | 0.3593141437 | 0.9906339884 |
+| `reg_p5` | `1x64x12x12` | 5 | 0.0933920816 | 0.9683737516 |
+| `scene_logits` | `1x21x48x48` | 6 | 0.6104978919 | 0.9697354972 |
+
+All aggregate and per-sample outputs pass the required 0.90 gate. The global
+per-sample minimum is `reg_p4=0.9160173535`; therefore the first board test must
+check medium-scale box decode, NMS and tracker stability carefully. The minimum
+`scene_logits` similarity is `0.9508895874`.
