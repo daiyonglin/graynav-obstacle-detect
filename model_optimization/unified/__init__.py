@@ -2,7 +2,11 @@
 
 from .graynav_unified_perception import (
     DEPTH_BINS,
+    INDOOR_CLASS_NAMES,
+    INDOOR_COCO_CLASS_IDS,
     OUTPUT_NAMES,
+    SCENE_CHANNELS,
+    STAIR_EDGE_CHANNEL,
     SURFACE_CLASSES,
     GrayNavUnifiedPerception,
     build_random_unified_yolov8n,
@@ -11,7 +15,11 @@ from .graynav_unified_perception import (
 
 __all__ = [
     "DEPTH_BINS",
+    "INDOOR_CLASS_NAMES",
+    "INDOOR_COCO_CLASS_IDS",
     "OUTPUT_NAMES",
+    "SCENE_CHANNELS",
+    "STAIR_EDGE_CHANNEL",
     "SURFACE_CLASSES",
     "GrayNavUnifiedPerception",
     "build_random_unified_yolov8n",

@@ -17,6 +17,8 @@ sys.path.insert(0, str(ROOT))
 
 from unified.graynav_unified_perception import (  # noqa: E402
     OUTPUT_NAMES,
+    INDOOR_CLASS_NAMES,
+    SCENE_CHANNELS,
     SURFACE_CLASSES,
     build_random_unified_yolov8n,
     build_unified_from_yolo_weights,
@@ -71,6 +73,7 @@ def main() -> None:
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--surface-e3", type=Path)
+    parser.add_argument("--checkpoint", type=Path, help="trained unified checkpoint")
     parser.add_argument("--opset", type=int, default=12)
     args = parser.parse_args()
     if args.opset != 12:
@@ -93,6 +96,18 @@ def main() -> None:
         init_report["detector_initialization"] = "folded_official_coco80"
     if args.surface_e3 is not None:
         init_report["surface_e3_import"] = model.import_surface_e3_heads(args.surface_e3)
+    if args.checkpoint is not None:
+        if args.weights is None:
+            raise ValueError("--checkpoint export requires --weights to rebuild the exact detector graph")
+        payload = torch.load(args.checkpoint, map_location="cpu")
+        if not isinstance(payload, dict) or "model" not in payload:
+            raise RuntimeError("unified checkpoint must contain a model state dictionary")
+        model.load_state_dict(payload["model"], strict=True)
+        init_report["trained_checkpoint"] = {
+            "path": str(args.checkpoint),
+            "epoch": int(payload.get("epoch", -1)),
+            "metrics": payload.get("metrics", {}),
+        }
 
     model.eval()
     sample = torch.zeros(1, 1, 384, 384, dtype=torch.float32)
@@ -102,10 +117,10 @@ def main() -> None:
         name: list(tensor.shape) for name, tensor in zip(OUTPUT_NAMES, outputs)
     }
     expected = {
-        "cls_p3": [1, 80, 48, 48], "reg_p3": [1, 64, 48, 48],
-        "cls_p4": [1, 80, 24, 24], "reg_p4": [1, 64, 24, 24],
-        "cls_p5": [1, 80, 12, 12], "reg_p5": [1, 64, 12, 12],
-        "seg_logits": [1, 4, 48, 48], "depth_logits": [1, 16, 48, 48],
+        "cls_p3": [1, 8, 48, 48], "reg_p3": [1, 64, 48, 48],
+        "cls_p4": [1, 8, 24, 24], "reg_p4": [1, 64, 24, 24],
+        "cls_p5": [1, 8, 12, 12], "reg_p5": [1, 64, 12, 12],
+        "scene_logits": [1, SCENE_CHANNELS, 48, 48],
     }
     if output_shapes != expected:
         raise RuntimeError(f"unified output contract mismatch: {output_shapes}")
@@ -128,13 +143,17 @@ def main() -> None:
     removed_identities = strip_identity_nodes(args.onnx)
     contract = {
         "model": "graynav_unified_perception_gray1",
-        "random_init_preflight": args.weights is None,
+        "random_init_preflight": args.weights is None and args.checkpoint is None,
         "input": {"images": [1, 1, 384, 384]},
         "outputs": expected,
         "surface_classes": list(SURFACE_CLASSES),
+        "indoor_classes": list(INDOOR_CLASS_NAMES),
         "depth_bins": 16,
+        "scene_channel_ranges": {
+            "surface": [0, 4], "depth": [4, 20], "stair_edge": [20, 21]
+        },
         "depth_range_m": [0.3, 8.0],
-        "cpu_postprocess": "sigmoid, DFL, NMS, argmax, depth grouping, temporal fusion",
+        "cpu_postprocess": "sigmoid, DFL, NMS, scene split, argmax, depth grouping, stair-edge and temporal fusion",
         "initialization": init_report,
         "removed_identity_nodes": removed_identities,
         "onnx": {

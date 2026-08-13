@@ -1,0 +1,13 @@
+numpy>=1.24,<2
+opencv-python-headless>=4.8,<4.11
+onnx>=1.16,<2
+onnxruntime>=1.18,<2
+onnxscript>=0.1,<1
+h5py>=3.10,<4
+scipy>=1.11,<2
+tensorboard>=2.16,<3
+tqdm>=4.66,<5
+pyyaml>=6,<7
+pycocotools>=2.0.7,<3
+ijson>=3.2,<4
+ultralytics==8.3.0
