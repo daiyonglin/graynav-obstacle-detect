@@ -66,14 +66,44 @@ def input_tensor(
     return gray, tensor, scale, pad_x, pad_y
 
 
-def save_scene_outputs(root: Path, stem: str, gray: np.ndarray, scene: torch.Tensor) -> None:
+def unletterbox_grid(
+    grid: np.ndarray,
+    gray_shape: tuple[int, int],
+    scale: float,
+    pad_x: int,
+    pad_y: int,
+) -> np.ndarray:
+    """Crop model padding in grid coordinates before restoring image size."""
+
+    grid_h, grid_w = grid.shape[:2]
+    resized_w = int(round(gray_shape[1] * scale))
+    resized_h = int(round(gray_shape[0] * scale))
+    x1 = int(round(pad_x * grid_w / 384.0))
+    y1 = int(round(pad_y * grid_h / 384.0))
+    x2 = int(round((pad_x + resized_w) * grid_w / 384.0))
+    y2 = int(round((pad_y + resized_h) * grid_h / 384.0))
+    return grid[max(0, y1) : min(grid_h, y2), max(0, x1) : min(grid_w, x2)]
+
+
+def save_scene_outputs(
+    root: Path,
+    stem: str,
+    gray: np.ndarray,
+    scene: torch.Tensor,
+    scale: float,
+    pad_x: int,
+    pad_y: int,
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     seg = scene[0, :4].argmax(0).cpu().numpy().astype(np.uint8)
+    seg = unletterbox_grid(seg, gray.shape, scale, pad_x, pad_y)
     seg = cv2.resize(COLORS[seg], (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
     depth = (torch.softmax(scene[0, 4:20], 0) * depth_bin_centers(scene.device)[:, None, None]).sum(0).cpu().numpy()
+    depth = unletterbox_grid(depth, gray.shape, scale, pad_x, pad_y)
     depth = cv2.resize(depth, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_LINEAR)
     depth_u8 = np.clip((depth - 0.3) / 7.7 * 255.0, 0, 255).astype(np.uint8)
     edge = torch.sigmoid(scene[0, 20]).cpu().numpy()
+    edge = unletterbox_grid(edge, gray.shape, scale, pad_x, pad_y)
     edge = cv2.resize(edge, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_LINEAR)
     cv2.imwrite(str(root / f"{stem}_mono.png"), gray)
     cv2.imwrite(str(root / f"{stem}_seg.png"), cv2.cvtColor(seg, cv2.COLOR_RGB2BGR))
@@ -128,11 +158,13 @@ def main() -> None:
         selected = rng.sample(rows, min(args.samples_per_source, len(rows)))
         for row in selected:
             path = args.scene / str(row["image"])
-            gray, tensor, _, _, _ = input_tensor(path, device)
-            scene = model(tensor)[-1]
+            gray, tensor, scale, pad_x, pad_y = input_tensor(path, device)
+            scene = model.forward_scene(tensor)
             stem = str(row["source_id"]).replace(":", "_").replace("/", "_")
             folder = args.output / source
-            save_scene_outputs(folder, stem, gray, scene)
+            save_scene_outputs(
+                folder, stem, gray, scene, scale, pad_x, pad_y
+            )
             save_scene_ground_truth(folder, stem, gray, row, args.scene)
             report["samples"].append({"source": source, "source_id": row["source_id"], "stem": stem})
 
@@ -144,7 +176,7 @@ def main() -> None:
         gray, tensor, scale, pad_x, pad_y = input_tensor(
             Path(str(row["image"])), device
         )
-        outputs = model(tensor)
+        outputs = model.forward_detection(tensor)
         features = [torch.cat((outputs[1], outputs[0]), 1), torch.cat((outputs[3], outputs[2]), 1), torch.cat((outputs[5], outputs[4]), 1)]
         prediction = model.detect_head._inference(features)
         from ultralytics.utils.ops import non_max_suppression
@@ -177,12 +209,16 @@ def main() -> None:
             cv2.rectangle(canvas, (ox1, oy1), (ox2, oy2), (255, 255, 255), 2)
             cv2.putText(canvas, f"{INDOOR_CLASS_NAMES[int(cls)]} {score:.2f}", (ox1, max(16, oy1)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         stem = str(row["source_id"]).replace(":", "_")
-        folder = args.output / "coco"
+        folder = args.output / "detection"
         folder.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(folder / f"{stem}_mono.png"), gray)
         cv2.imwrite(str(folder / f"{stem}_detections_gt.png"), gt_canvas)
         cv2.imwrite(str(folder / f"{stem}_detections.png"), canvas)
-        report["samples"].append({"source": "coco2017", "source_id": row["source_id"], "stem": stem})
+        report["samples"].append({
+            "source": row.get("source", "detection"),
+            "source_id": row["source_id"],
+            "stem": stem,
+        })
 
     (args.output / "visualization_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"output": str(args.output), "sample_count": len(report["samples"])}, ensure_ascii=False, indent=2))

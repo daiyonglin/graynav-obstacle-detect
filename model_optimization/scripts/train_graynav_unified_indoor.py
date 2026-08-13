@@ -686,7 +686,13 @@ def main() -> None:
             raise RuntimeError(
                 f"resume history/checkpoint mismatch: history={len(history)} start={start_epoch}"
             )
-    best = {"overall": -float("inf"), "detection": -float("inf"), "stair": -float("inf"), "scene": -float("inf")}
+    best = {
+        "overall": -float("inf"),
+        "detection": -float("inf"),
+        "stair": -float("inf"),
+        "scene": -float("inf"),
+        "safety": -float("inf"),
+    }
     for previous in history:
         previous_metrics = previous["metrics"]
         previous_scene = 0.5 * previous_metrics["ground_iou"] + 0.5 * previous_metrics["blocked_iou"]
@@ -696,9 +702,17 @@ def main() -> None:
             + 0.25 * previous_metrics["person_ap50"]
             + 0.20 * previous_metrics["partial_person_recall"]
         )
+        previous_safety = (
+            0.45 * previous_metrics["step_f1"]
+            + 0.20 * previous_metrics["edge_f1"]
+            + 0.20 * previous_scene
+            + 0.15 * previous_metrics["near_far_order_accuracy"]
+            - 0.35 * previous_metrics["no_step_false_image_rate"]
+        )
         best["scene"] = max(best["scene"], previous_scene)
         best["stair"] = max(best["stair"], previous_stair)
         best["detection"] = max(best["detection"], previous_detection)
+        best["safety"] = max(best["safety"], previous_safety)
         best["overall"] = max(best["overall"], previous["selection_score"])
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 
@@ -791,6 +805,13 @@ def main() -> None:
             + 0.20 * metrics["partial_person_recall"]
         )
         overall = 0.35 * scene_score + 0.30 * stair_score + 0.35 * detection_score
+        safety_score = (
+            0.45 * metrics["step_f1"]
+            + 0.20 * metrics["edge_f1"]
+            + 0.20 * scene_score
+            + 0.15 * metrics["near_far_order_accuracy"]
+            - 0.35 * metrics["no_step_false_image_rate"]
+        )
         record = {
             "epoch": epoch,
             "lr": learning_rate,
@@ -799,6 +820,7 @@ def main() -> None:
             "scene_loss": scene_loss_mean,
             "metrics": metrics,
             "selection_score": overall,
+            "safety_score": safety_score,
         }
         if device.type == "cuda":
             record["gpu_peak_allocated_mib"] = (
@@ -810,7 +832,18 @@ def main() -> None:
         history.append(record)
         for key, value in {"lr": learning_rate, "loss/total": epoch_loss, "loss/detection": detection_loss, **{f"metrics/{k}": v for k, v in metrics.items()}, "metrics/selection_score": overall, **{f"resources/{k}": v for k, v in record.items() if k.startswith("gpu_peak_")}}.items():
             writer.add_scalar(key, value, epoch)
-        payload = checkpoint_payload(model, optimizer, epoch, {**metrics, "detection_loss": detection_loss, "selection_score": overall}, config)
+        payload = checkpoint_payload(
+            model,
+            optimizer,
+            epoch,
+            {
+                **metrics,
+                "detection_loss": detection_loss,
+                "selection_score": overall,
+                "safety_score": safety_score,
+            },
+            config,
+        )
         torch.save(payload, args.output / "last.pt")
         if detection_score > best["detection"]:
             best["detection"] = detection_score
@@ -821,6 +854,9 @@ def main() -> None:
         if stair_score > best["stair"]:
             best["stair"] = stair_score
             torch.save(payload, args.output / "best_stair.pt")
+        if safety_score > best["safety"]:
+            best["safety"] = safety_score
+            torch.save(payload, args.output / "best_safety.pt")
         if overall > best["overall"]:
             best["overall"] = overall
             torch.save(payload, args.output / "best_overall.pt")
