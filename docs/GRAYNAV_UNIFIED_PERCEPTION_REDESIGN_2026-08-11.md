@@ -25,13 +25,12 @@ flowchart LR
     B --> P3["P3: 48 x 48"]
     B --> P4["P4: 24 x 24"]
     B --> P5["P5: 12 x 12"]
-    P3 --> D3["COCO80 cls + DFL reg"]
-    P4 --> D4["COCO80 cls + DFL reg"]
-    P5 --> D5["COCO80 cls + DFL reg"]
+    P3 --> D3["Indoor8 cls + DFL reg"]
+    P4 --> D4["Indoor8 cls + DFL reg"]
+    P5 --> D5["Indoor8 cls + DFL reg"]
     P3 --> F["detail + semantic 融合"]
     P4 --> F
-    F --> S["4 类道路分割<br/>4 x 48 x 48"]
-    F --> Z["16 级相对深度<br/>16 x 48 x 48"]
+    F --> S["packed scene_logits<br/>4 类场景 + 16 级深度 + 台阶边缘"]
 ```
 
 固定输入：
@@ -43,14 +42,13 @@ images  float32  1 x 1 x 384 x 384  range [0, 1]
 固定 raw 输出：
 
 ```text
-cls_p3       1 x 80 x 48 x 48
+cls_p3       1 x  8 x 48 x 48
 reg_p3       1 x 64 x 48 x 48
-cls_p4       1 x 80 x 24 x 24
+cls_p4       1 x  8 x 24 x 24
 reg_p4       1 x 64 x 24 x 24
-cls_p5       1 x 80 x 12 x 12
+cls_p5       1 x  8 x 12 x 12
 reg_p5       1 x 64 x 12 x 12
-seg_logits   1 x  4 x 48 x 48
-depth_logits 1 x 16 x 48 x 48
+scene_logits 1 x 21 x 48 x 48
 ```
 
 道路类别保持：
@@ -62,9 +60,10 @@ depth_logits 1 x 16 x 48 x 48
 3 unknown_other
 ```
 
-部署图不包含 DFL decode、NMS、Softmax、ArgMax、连通域、时序投票或决策。这些操作
-统一放到 CPU。检测只让 person、chair、bench、couch、table、bag、dog、plant、bicycle、
-motorcycle、car、bus 和 truck 等避障相关 COCO 类进入跟踪、规划与语音。
+`scene_logits` 的 0..3 为场景分割、4..19 为 16 级相对深度、20 为台阶边缘。
+室内检测顺序固定为 person、chair、dining_table、backpack、handbag、suitcase、couch、
+bench。部署图不包含 DFL decode、NMS、Softmax、ArgMax、连通域、时序投票或决策，
+这些操作统一放到 CPU。
 
 ## 3. 网络与 A1 约束
 
@@ -78,8 +77,8 @@ motorcycle、car、bus 和 truck 等避障相关 COCO 类进入跟踪、规划�
 - 静态 batch 1、NCHW、opset 12，不允许动态 shape；
 - 主要算子限定为 Conv、BN、ReLU、Add、Concat、Mul、Pool、Resize、Constant；
 - 禁止 Softmax、ArgMax、NMS、通用 Transpose、动态 Reshape、Gather、Slice、Sub 和 Div；
-- 正式训练前先导出随机权重 ONNX，执行输入输出、算子、卷积参数和图大小审计；
-- 随机图本地预审通过后才租用 4090，正式 `.m1model` 只转换最终模型一次。
+- 正式训练前只做本地随机权重 ONNX 静态审计，不提交 A1 正式转换；
+- 用户确认最终训练可视化后，正式 `.m1model` 只转换最终模型一次。
 
 目标是单个 INT8 模型不超过 5 MiB；最终约束以官方 A1 编译器和实板 SSNE 为准。
 
@@ -90,21 +89,14 @@ motorcycle、car、bus 和 truck 等避障相关 COCO 类进入跟踪、规划�
 
 ```text
 input          images 1 x 1 x 384 x 384
-outputs        3 x COCO80 cls + 3 x DFL64 reg
-               seg 1 x 4 x 48 x 48
-               depth 1 x 16 x 48 x 48
-FP32 ONNX      9,680,416 bytes
-SHA256         CDF215168C59B4BCF233BD5C410FBB544292B2E225AA86C6BD89A7AB95E1D5F0
-forbidden ops  none
-constraint     none
+outputs        3 x Indoor8 cls + 3 x DFL64 reg
+               packed scene 1 x 21 x 48 x 48
+status         结构已更新，须在训练主机重新导出并审计
 ```
 
-算子计数为 Conv 81、Sigmoid 44、Mul 44、ReLU 28、Concat 13、Split 8、Add 7、
-Constant 6、MaxPool 3、Resize 3。该结果只是本地静态门槛，不替代官方 A1 转换器。
-
-权重迁移烟雾测试也已通过：COCO80 首层由 `(16,3,3,3)` 折叠为 `(16,1,3,3)`，
-三个 A1-safe 检测头保留 12 个最终 raw projection 权重/偏置张量；SurfaceDepth E3 的
-semantic projection、detail refinement、seg head 和 depth head 共 22/22 个兼容张量可导入。
+此前随机图结果只证明基础 YOLO/FPN 路径可导出，不作为当前 Indoor8 + scene21 图的
+最终证据。当前实现仍保留首层折叠、静态 C2f split、A1-safe 检测头和 E3 兼容层，
+但必须在云端环境重新生成审计报告。
 
 ## 4. 训练方案
 
@@ -112,7 +104,7 @@ semantic projection、detail refinement、seg head 和 depth head 共 22/22 个�
 
 | 数据源 | 监督任务 |
 |---|---|
-| COCO train/val | 80 类目标检测 |
+| COCO train/val | 筛选室内 8 类检测与自动局部人体增强 |
 | ADE20K prepared-v2 | ground / blocked / step / unknown 分割 |
 | StairNetV3 prepared-v2 | 台阶与非台阶负监督 |
 | NYUv2 | 16 级深度、相对顺序和近中远监督 |
@@ -122,15 +114,14 @@ semantic projection、detail refinement、seg head 和 depth head 共 22/22 个�
 
 训练分两段：
 
-1. `U1`：从 COCO YOLOv8n 单通道初始化开始，冻结大部分检测骨干和检测头，训练道路/
-   深度分支约 10 epoch，验证多任务数据管道与输出不会破坏检测；
-2. `U2`：低学习率联合训练约 50 epoch，检测、分割和深度样本按固定比例混合，分别记录
-   COCO mAP、四类分割指标、误报统计、NYUv2 深度等级与近远顺序。
+1. 前 5 epoch 冻结共享骨干，只恢复 A1-safe Indoor8 检测头；
+2. 随后 35 epoch 联合训练，按 45% COCO、20% ADE、20% StairNet、15% NYUv2 采样，
+   分别记录 Indoor8 AP50、局部人体 recall、场景指标、台阶边缘和深度顺序。
 
 联合损失初始定义：
 
 ```text
-L = 1.0 * L_detect + 1.0 * L_seg + 0.6 * L_depth
+L = 1.0 * L_detect + 1.0 * L_seg + 0.4 * L_depth + 1.2 * L_stair_edge
 ```
 
 若共享骨干梯度冲突导致 COCO 检测明显下降，优先调整任务采样和 loss 权重；首轮不增加
@@ -142,7 +133,7 @@ L = 1.0 * L_detect + 1.0 * L_seg + 0.6 * L_depth
 
 - 上方 720x720 ROI：主要服务远处和完整目标检测，道路输出不进入决策；
 - 下方 720x720 ROI：同时服务近场目标、道路分割和相对深度；
-- 上下 ROI 可以按帧交替，但每帧都是同一个输入、同一个 `model_id` 和同一组八个输出；
+- ROI 固定按 LOWER、LOWER、UPPER 循环；每帧都是同一个输入、同一个 `model_id` 和同一组七个输出；
 - tracker 每帧更新；道路结果只在下方 ROI 帧更新并带时间戳；
 - 输出数量、名称、shape、dtype、量化 scale 或 layout 任一不符即拒绝推理结果。
 
@@ -208,15 +199,15 @@ L = 1.0 * L_detect + 1.0 * L_seg + 0.6 * L_depth
 ## 8. 实施门控
 
 1. 保存本次失败截图、启动日志和失败镜像哈希，确认 SurfaceDepth 降级发生位置；
-2. 实现统一 PyTorch 模型和随机 ONNX，完成 A1 静态预审；
-3. 完成 U1/U2 训练、固定可视化和检测/道路/深度分项评估；
+2. 实现统一 PyTorch 模型、Indoor8 数据管道和 scene21 本地静态审计；
+3. 完成 5+35 epoch 训练、固定独立可视化和检测/道路/深度分项评估；
 4. 锁定一个 checkpoint，导出 ONNX并做 PyTorch/ONNX 一致性；
 5. 生成平衡校准集，执行唯一一次正式 A1 INT8 转换；
-6. C++ 改为一个模型、八输出绑定和全新后处理；
+6. C++ 使用一个模型、七输出 shape 绑定和 packed scene 后处理；
 7. 主机测试、同步 SDK、Docker 完整构建、归档、烧录和实板验证。
 
 板端验收至少包括：单个 `model_id`、输出契约正确、人体/椅子/墙面/台阶功能场景、
-检测刷新率不低于 5 Hz、道路刷新率不低于 2.5 Hz、推理 P95 小于 200 ms、30 分钟无
+检测刷新率不低于 5 Hz、道路刷新率不低于 3 Hz、推理 P95 小于 200 ms、30 分钟无
 崩溃或持续内存增长、串口可读、语音不刷屏、最终 `zImage < 15 MiB`。阈值用于识别
 明显失效，不用于宣称医疗级或独立出行安全能力。
 

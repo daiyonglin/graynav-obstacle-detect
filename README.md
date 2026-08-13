@@ -11,8 +11,10 @@ GrayNav 是面向视障辅助导航场景的边缘端感知原型，运行平台
 | 板上回退版本 | 已部署、受保护 | 真单通道 ROD25 YOLOv8n 检测、跟踪、几何测距、避障决策、Aurora OSD 和 SYN6288 语音 |
 | COCO80 + SurfaceDepth 双模型候选 | 已烧录、板测失败 | 人体检测可运行，但 SurfaceDepth 进入降级状态；道路/墙面/台阶没有有效结果，分时调度与现有 OSD 不再作为目标架构 |
 | SurfaceDepth E3 | 已训练并完成 A1 INT8 转换 | 训练与转换证据保留，作为统一模型道路/深度分支的设计基线；独立双模型部署停止推进 |
-| 统一感知模型 | 随机图 A1 静态预审通过 | 单个真单通道共享骨干同时输出 COCO80 raw 检测头、4 类道路分割头和 16 级相对深度头；尚未联合训练或正式转换 |
-| 板端后处理 | 待重构 | 统一单模型输出绑定、目标/道路时序、保守决策、限量灰度 OSD、单行串口与事件驱动语音 |
+| 室内单模型 | 已训练、已导出 | 使用 COCO 稀疏室内子集与既有 ADE20K、StairNetV3、NYUv2；室内 8 类检测、4 类场景、16 级相对深度和台阶边缘联合训练 |
+| 板端单模型后处理 | 已实现并通过交叉编译 | 一个 `model_id`、一次 NPU 推理、7 个输出按固定顺序和 shape 校验；packed scene 在 CPU 解码并进入统一决策 |
+| 最终统一 `.m1model` | 已完成官方 A1 INT8 转换 | 4,150,950 bytes，SHA256 `33EEC832...5D66DA8`；7 个输出整体余弦相似度均大于 0.94，最低单样本为 0.9160 |
+| 统一候选镜像 | 已完成 Docker 构建、待烧录 | rootfs 仅含一个统一模型；构建通过不等于实板验收通过，仍需 Aurora、串口和 SYN6288 场景测试 |
 | Aurora | 不修改客户端 | 取消密集动态点阵文字和风险条；板端只输出少量检测框、静态状态贴图和必要道路形状 |
 
 2026-08-11 双模型候选已经烧录并实测。串口持续报告 `perception=DETECTION_DEGRADED_SURFACE_DEPTH`、`degraded=1` 和 `hazard=UNKNOWN`，说明板端实际运行的是 detector-only 降级链路，而不是完整道路感知。Aurora 同时出现密集黑点、文字重叠和难以理解的高频串口输出。该镜像被判定为失败实验，不得标记为可用候选。
@@ -26,13 +28,17 @@ flowchart LR
     CAM["SC132GS Mono<br/>720 x 1280 Y8"] --> PRE["单通道 ROI<br/>1 x 1 x 384 x 384"]
     PRE --> NET["GrayNav Unified Perception<br/>Mono-YOLOv8n 共享骨干与颈部"]
 
-    NET --> DET["COCO80 raw 检测头<br/>P3 / P4 / P5"]
-    NET --> SEG["4 类道路分割头<br/>1 x 4 x 48 x 48"]
-    NET --> DEP["16 级深度头<br/>1 x 16 x 48 x 48"]
+    NET --> DET["室内 8 类 raw 检测头<br/>P3 / P4 / P5"]
+    NET --> PACK["packed scene_logits<br/>1 x 21 x 48 x 48"]
+
+    PACK --> SEG["0..3 场景分割"]
+    PACK --> DEP["4..19 相对深度"]
+    PACK --> EDGE["20 台阶边缘"]
 
     DET --> DPOST["CPU: DFL / NMS / Tracker<br/>几何距离与 TTC"]
     SEG --> SPOST["CPU: ArgMax / 多数滤波<br/>走廊比例与时序投票"]
     DEP --> ZPOST["CPU: 分组概率 / 中位数<br/>NEAR / MID / FAR / UNKNOWN"]
+    EDGE --> SPOST
 
     DPOST --> FUSE["保守多源避障融合"]
     SPOST --> FUSE
@@ -46,7 +52,46 @@ flowchart LR
 
 统一模型详细契约、训练门控和板端重构边界见 [单模型重构设计](docs/GRAYNAV_UNIFIED_PERCEPTION_REDESIGN_2026-08-11.md)。
 
-### SurfaceDepth E3 契约
+### 最终统一模型契约
+
+```text
+input
+  images        float32  1 x 1 x 384 x 384  range [0, 1]
+
+detection outputs
+  cls_p3 / reg_p3   1 x 8 x 48 x 48 / 1 x 64 x 48 x 48
+  cls_p4 / reg_p4   1 x 8 x 24 x 24 / 1 x 64 x 24 x 24
+  cls_p5 / reg_p5   1 x 8 x 12 x 12 / 1 x 64 x 12 x 12
+
+packed scene output
+  scene_logits      1 x 21 x 48 x 48
+  channels 0..3     ground / blocked / step_or_drop / unknown_other
+  channels 4..19    16 ordinal relative-depth levels
+  channel 20        stair edge
+
+indoor detection order
+  person / chair / dining_table / backpack / handbag / suitcase / couch / bench
+```
+
+七个输出张量来自同一次推理，并不代表七个模型。场景、深度与台阶边缘打包到一个
+`scene_logits`，用于规避失败镜像中 E3 双输出绑定不完整的问题。普通纸箱不建立缺少
+预训练来源的新类别，而由 `blocked_surface + depth` 形成 `GENERIC_OBSTACLE`。
+
+正式统一模型的官方 A1 转换输出与整体余弦相似度如下（输出顺序也是板端启动时的硬契约）：
+
+| order | 输出 | shape | cosine |
+|---:|---|---|---:|
+| 0 | `cls_p3` | `1×8×48×48` | 0.99459 |
+| 1 | `reg_p3` | `1×64×48×48` | 0.96371 |
+| 2 | `cls_p4` | `1×8×24×24` | 0.99113 |
+| 3 | `reg_p4` | `1×64×24×24` | 0.94126 |
+| 4 | `cls_p5` | `1×8×12×12` | 0.99063 |
+| 5 | `reg_p5` | `1×64×12×12` | 0.96837 |
+| 6 | `scene_logits` | `1×21×48×48` | 0.96974 |
+
+`reg_p4` 是量化一致性最弱的分支，实板演示时需要重点观察中等尺寸目标的框稳定性；但它仍通过了本次最低 `0.90` 的转换门槛。
+
+### SurfaceDepth E3 基线契约
 
 ```text
 input
@@ -107,6 +152,7 @@ board/
 
 model_optimization/
   segmentation/             单通道 Fast-SCNN / SurfaceDepth 模型
+  unified/                  室内单模型网络与固定 7 输出契约
   scripts/                  数据准备、训练、评估、导出和审计
   configs/                  A1 转换预处理配置
   tests/                    数据映射、模型和实验门控测试
