@@ -714,6 +714,12 @@ def main() -> None:
         best["detection"] = max(best["detection"], previous_detection)
         best["safety"] = max(best["safety"], previous_safety)
         best["overall"] = max(best["overall"], previous["selection_score"])
+    # Older/resumed runs may predate the dedicated safety checkpoint.  In
+    # that case, force the first newly evaluated epoch to materialize one;
+    # otherwise the historical scalar maximum could prevent best_safety.pt
+    # from ever being written even though selection is enabled now.
+    if history and not (args.output / "best_safety.pt").is_file():
+        best["safety"] = -float("inf")
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 
     for epoch in range(start_epoch, args.epochs):
