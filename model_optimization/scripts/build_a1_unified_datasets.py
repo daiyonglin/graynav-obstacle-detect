@@ -14,12 +14,26 @@ import cv2
 import numpy as np
 
 
-SOURCES = ("coco2017", "ade20k", "stairnetv3", "nyuv2")
+SOURCES = (
+    "voc2007",
+    "coco128_smoke_only",
+    "ade20k",
+    "stairnetv3",
+    "nyuv2",
+)
 CALIBRATE_COUNTS = {
-    "coco2017": 64, "ade20k": 32, "stairnetv3": 40, "nyuv2": 24,
+    "voc2007": 52,
+    "coco128_smoke_only": 12,
+    "ade20k": 32,
+    "stairnetv3": 40,
+    "nyuv2": 24,
 }
 EVALUATE_COUNTS = {
-    "coco2017": 16, "ade20k": 8, "stairnetv3": 10, "nyuv2": 6,
+    "voc2007": 13,
+    "coco128_smoke_only": 3,
+    "ade20k": 8,
+    "stairnetv3": 10,
+    "nyuv2": 6,
 }
 
 

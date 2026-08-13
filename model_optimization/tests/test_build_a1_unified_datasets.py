@@ -16,7 +16,13 @@ class A1UnifiedDatasetsTest(unittest.TestCase):
         self.assertEqual(sum(EVALUATE_COUNTS.values()), 40)
         self.assertEqual(
             CALIBRATE_COUNTS,
-            {"coco2017": 64, "ade20k": 32, "stairnetv3": 40, "nyuv2": 24},
+            {
+                "voc2007": 52,
+                "coco128_smoke_only": 12,
+                "ade20k": 32,
+                "stairnetv3": 40,
+                "nyuv2": 24,
+            },
         )
 
     def test_selection_is_deterministic_balanced_and_disjoint(self) -> None:
