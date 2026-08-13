@@ -131,7 +131,10 @@ private:
     void HandleStatusByte(uint8_t code);
 
     /** 建立一次原子语音事务；提交后由 ACK/空闲码或兼容定时器判定播放完成。 */
-    bool StartProtocolSpeech(int frame_id, const std::string& action, bool preempt);
+    bool StartProtocolSpeech(int frame_id,
+                             const std::string& action,
+                             const std::string& transaction_key,
+                             bool preempt);
 
     /** 处理 ACK/播放超时、兼容定时完成和必要的 UART 重同步。 */
     void HandleProtocolTimeouts();
@@ -222,6 +225,7 @@ private:
     std::string pending_action_;
     std::string pending_key_;
     std::string pending_reason_;
+    std::string in_flight_action_;
     std::string in_flight_key_;
     std::deque<uint8_t> rx_queue_;
     std::vector<uint8_t> transaction_frame_;

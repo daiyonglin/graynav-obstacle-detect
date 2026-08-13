@@ -35,6 +35,11 @@ const uint8_t kPromptSurfacePothole[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xC2, 0xB7, 0xC
 const uint8_t kPromptSurfaceBlocked[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xB5, 0xC0, 0xC2, 0xB7, 0xCA, 0xDC, 0xD7, 0xE8};
 const uint8_t kPromptSurfaceUnknown[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xC2, 0xB7, 0xBF, 0xF6, 0xB2, 0xBB, 0xC7, 0xE5, 0xA3, 0xAC, 0xC7, 0xEB, 0xC2, 0xFD, 0xD0, 0xD0};
 const uint8_t kPromptSurfaceDegraded[] = {0xC2, 0xB7, 0xBF, 0xF6, 0xB8, 0xD0, 0xD6, 0xAA, 0xBD, 0xB5, 0xBC, 0xB6};
+const uint8_t kPromptPersonStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xC8, 0xCB, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
+const uint8_t kPromptObstacleSlow[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xD5, 0xCF, 0xB0, 0xAD, 0xA3, 0xAC, 0xC7, 0xEB, 0xBC, 0xF5, 0xCB, 0xD9, 0xA1, 0xA3};
+const uint8_t kPromptObstacleStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xD5, 0xCF, 0xB0, 0xAD, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
+const uint8_t kPromptStairSlow[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xC2, 0xFD, 0xD0, 0xD0, 0xA1, 0xA3};
+const uint8_t kPromptStairStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
 
 const std::vector<uint8_t> kFixedClearFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD6, 0xB1, 0xD0, 0xD0, 0x9D};
 const std::vector<uint8_t> kFixedSlowFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xBC, 0xF5, 0xCB, 0xD9, 0xA1};
@@ -224,6 +229,11 @@ bool VoiceNotifier::InitializeFromEnv()
      * 运行参数分为三组：动作稳定/重复周期、UART 发送节拍、SYN6288 状态兼容策略。
      * 默认固定帧和 latest-action mailbox 是已上板验证的生产路径。
      */
+    if (!getenv_bool("A1_VOICE_ENABLE", true)) {
+        mode_ = Mode::Disabled;
+        std::cout << "[VOICE][INFO] disabled by A1_VOICE_ENABLE=0" << std::endl;
+        return false;
+    }
     const std::string mode = getenv_string("A1_OUTPUT_MODE", "both");
     if (mode == "voice") {
         mode_ = Mode::VoiceOnly;
@@ -238,7 +248,9 @@ bool VoiceNotifier::InitializeFromEnv()
     stable_needed_ = std::max(1, getenv_int("A1_VOICE_STABLE_FRAMES", 2));
     clear_stable_needed_ = std::max(stable_needed_, getenv_int("A1_VOICE_CLEAR_STABLE_FRAMES", 3));
     cooldown_ms_ = std::max(600, getenv_int("A1_VOICE_COOLDOWN_MS", 1200));
-    clear_repeat_ms_ = std::max(600, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 1200));
+    // Zero disables periodic CLEAR prompts.  A clear state is still announced
+    // once when the transaction key changes (for example after a hazard ends).
+    clear_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 0));
     stop_repeat_ms_ = std::max(1000, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1600));
     fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 1800));
     fault_hold_ms_ = std::max(1000, getenv_int("A1_VOICE_FAULT_HOLD_MS", 2500));
@@ -821,7 +833,8 @@ std::string VoiceNotifier::BuildVoiceKey(const DetectionResult& result,
                                          const AvoidanceDecision& decision) const
 {
     (void)result;
-    return decision.action.empty() ? "clear" : decision.action;
+    return (decision.action.empty() ? "clear" : decision.action) + "|" +
+           decision.cause + "|" + decision.hazard_sector;
 }
 
 std::vector<uint8_t> VoiceNotifier::BuildPromptPayload(const std::string& action) const
@@ -830,6 +843,26 @@ std::vector<uint8_t> VoiceNotifier::BuildPromptPayload(const std::string& action
     payload.reserve(16);
     if (use_prompt_prefix_) {
         append_bytes(&payload, kPromptPrefix, sizeof(kPromptPrefix));
+    }
+    if (action == "person_stop") {
+        append_bytes(&payload, kPromptPersonStop, sizeof(kPromptPersonStop));
+        return payload;
+    }
+    if (action == "obstacle_stop") {
+        append_bytes(&payload, kPromptObstacleStop, sizeof(kPromptObstacleStop));
+        return payload;
+    }
+    if (action == "obstacle_slow") {
+        append_bytes(&payload, kPromptObstacleSlow, sizeof(kPromptObstacleSlow));
+        return payload;
+    }
+    if (action == "stair_stop") {
+        append_bytes(&payload, kPromptStairStop, sizeof(kPromptStairStop));
+        return payload;
+    }
+    if (action == "stair_slow") {
+        append_bytes(&payload, kPromptStairSlow, sizeof(kPromptStairSlow));
+        return payload;
     }
     if (action == "surface_step") {
         append_bytes(&payload, kPromptSurfaceStep, sizeof(kPromptSurfaceStep));
@@ -897,7 +930,10 @@ std::vector<uint8_t> VoiceNotifier::BuildSyn6288Frame(const std::vector<uint8_t>
 std::vector<uint8_t> VoiceNotifier::BuildFixedPromptFrame(const std::string& action) const
 {
     // 生产模式直接返回离线核验过的短词帧，避免板端字符编码转换差异。
-    if (action.compare(0, 8, "surface_") == 0) {
+    if (action.compare(0, 8, "surface_") == 0 ||
+        action == "person_stop" || action == "obstacle_stop" ||
+        action == "obstacle_slow" || action == "stair_stop" ||
+        action == "stair_slow") {
         return BuildSyn6288Frame(BuildPromptPayload(action));
     }
     if (action == "stop") {
@@ -998,6 +1034,10 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
         return true;
     }
 
+    if (action == "clear" && clear_repeat_ms_ == 0) {
+        if (reason != nullptr) *reason = "clear_repeat_disabled";
+        return false;
+    }
     const int repeat_ms = (action == "clear") ? clear_repeat_ms_ : cooldown_ms_;
     if (key == last_key_ && since_ms < repeat_ms) {
         if (reason != nullptr) *reason = "cooldown";
@@ -1017,7 +1057,8 @@ void VoiceNotifier::CommitSent(const std::string& action, const std::string& key
 int VoiceNotifier::ActionPriority(const std::string& action) const
 {
     if (action == "system_fault") return 100;
-    if (action == "stop") return 90;
+    if (action == "stop" || action == "person_stop" ||
+        action == "obstacle_stop" || action == "stair_stop") return 90;
     if (action == "turn_left" || action == "turn_right") return 70;
     if (action == "slow") return 50;
     if (action == "surface_degraded") return 65;
@@ -1028,8 +1069,13 @@ int VoiceNotifier::ActionPriority(const std::string& action) const
 int VoiceNotifier::RepeatIntervalMs(const std::string& action) const
 {
     if (action == "system_fault") return fault_repeat_ms_;
-    if (action == "stop") return stop_repeat_ms_;
-    if (action == "clear") return clear_repeat_ms_;
+    if (action == "stop" || action == "person_stop" ||
+        action == "obstacle_stop" || action == "stair_stop") return stop_repeat_ms_;
+    if (action == "clear") {
+        // Keep the worker's pending transaction dormant when periodic CLEAR
+        // announcements are disabled.  Key changes still transmit immediately.
+        return clear_repeat_ms_ > 0 ? clear_repeat_ms_ : 86400000;
+    }
     if (action.compare(0, 8, "surface_") == 0) return 60000;
     return cooldown_ms_;
 }
@@ -1113,9 +1159,10 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
             ++rx_completed_count_;
             {
                 std::lock_guard<std::mutex> lock(worker_mutex_);
-                CommitSent(in_flight_key_, in_flight_key_);
+                CommitSent(in_flight_action_, in_flight_key_);
                 last_sent_frame_ = transaction_frame_id_;
                 tx_in_flight_ = false;
+                in_flight_action_.clear();
                 in_flight_key_.clear();
             }
             std::cout << "[VOICE] seq=" << transaction_seq_.load()
@@ -1130,7 +1177,10 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
     }
 }
 
-bool VoiceNotifier::StartProtocolSpeech(int frame_id, const std::string& action, bool preempt)
+bool VoiceNotifier::StartProtocolSpeech(int frame_id,
+                                        const std::string& action,
+                                        const std::string& transaction_key,
+                                        bool preempt)
 {
     // 发送成功后只标记 in-flight；播放完成时才 CommitSent，保证冷却基于真实事务边界。
     const auto now = std::chrono::steady_clock::now();
@@ -1165,7 +1215,8 @@ bool VoiceNotifier::StartProtocolSpeech(int frame_id, const std::string& action,
     {
         std::lock_guard<std::mutex> lock(worker_mutex_);
         tx_in_flight_ = true;
-        in_flight_key_ = action;
+        in_flight_action_ = action;
+        in_flight_key_ = transaction_key;
     }
     std::cout << "[VOICE] seq=" << transaction_seq_.load()
               << (preempt ? " PREEMPT" : " TX")
@@ -1183,6 +1234,7 @@ void VoiceNotifier::RecoverProtocol(const char* reason)
     {
         std::lock_guard<std::mutex> lock(worker_mutex_);
         tx_in_flight_ = false;
+        in_flight_action_.clear();
         in_flight_key_.clear();
     }
     status_query_pending_ = false;
@@ -1267,9 +1319,10 @@ void VoiceNotifier::HandleProtocolTimeouts()
             ++rx_completed_count_;
             {
                 std::lock_guard<std::mutex> lock(worker_mutex_);
-                CommitSent(in_flight_key_, in_flight_key_);
+                CommitSent(in_flight_action_, in_flight_key_);
                 last_sent_frame_ = transaction_frame_id_;
                 tx_in_flight_ = false;
+                in_flight_action_.clear();
                 in_flight_key_.clear();
             }
             module_state_ = ModuleState::Idle;
@@ -1313,6 +1366,7 @@ void VoiceNotifier::WorkerLoop()
 
         int frame_id = 0;
         std::string action;
+        std::string key;
         bool have_action = false;
         bool active = false;
         std::string active_action;
@@ -1321,8 +1375,9 @@ void VoiceNotifier::WorkerLoop()
             have_action = pending_ready_;
             frame_id = pending_frame_id_;
             action = pending_action_;
+            key = pending_key_;
             active = tx_in_flight_;
-            active_action = in_flight_key_;
+            active_action = in_flight_action_;
         }
         if (!have_action) continue;
 
@@ -1333,7 +1388,7 @@ void VoiceNotifier::WorkerLoop()
                 (action == "turn_left" || action == "turn_right") && action != active_action;
             if (require_ack_ && action != active_action &&
                 (ActionPriority(action) > ActionPriority(active_action) || direction_switch)) {
-                StartProtocolSpeech(frame_id, action, true);
+                StartProtocolSpeech(frame_id, action, key, true);
             }
             continue;
         }
@@ -1342,12 +1397,13 @@ void VoiceNotifier::WorkerLoop()
         const auto now = std::chrono::steady_clock::now();
         const int since_complete = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sent_time_).count());
-        const bool changed = action != last_key_;
+        const bool changed = key != last_key_;
         if (changed) {
             int followup_hold_ms = 0;
-            if (last_key_ == "stop") {
+            if (last_action_ == "stop" || last_action_ == "person_stop" ||
+                last_action_ == "obstacle_stop" || last_action_ == "stair_stop") {
                 followup_hold_ms = stop_followup_hold_ms_;
-            } else if (last_key_ == "turn_left" || last_key_ == "turn_right") {
+            } else if (last_action_ == "turn_left" || last_action_ == "turn_right") {
                 followup_hold_ms = turn_followup_hold_ms_;
             }
 
@@ -1355,13 +1411,14 @@ void VoiceNotifier::WorkerLoop()
             // 立即覆盖，STOP 也可立即覆盖转向；降低风险或反向转向才受保持门控。
             const bool safety_upgrade =
                 action == "system_fault" ||
-                (action == "stop" && ActionPriority(action) > ActionPriority(last_key_));
+                (ActionPriority(action) >= 90 &&
+                 ActionPriority(action) > ActionPriority(last_action_));
             if (!safety_upgrade && since_complete < followup_hold_ms) {
                 continue;
             }
         }
         if (changed || since_complete >= RepeatIntervalMs(action)) {
-            StartProtocolSpeech(frame_id, action, false);
+            StartProtocolSpeech(frame_id, action, key, false);
         }
     }
 }
@@ -1374,9 +1431,8 @@ void VoiceNotifier::Update(int frame_id,
     if (mode_ == Mode::Disabled) {
         return;
     }
-    (void)result;
     std::string action = decision.action.empty() ? "clear" : decision.action;
-    const bool hazard_changed = decision.hazard_type != last_surface_hazard_;
+    const bool hazard_changed = decision.cause != last_surface_hazard_;
     if (!decision.perception_degraded) {
         surface_degraded_announced_ = false;
     }
@@ -1384,14 +1440,20 @@ void VoiceNotifier::Update(int frame_id,
     if (!safety_action && decision.perception_degraded && !surface_degraded_announced_) {
         action = "surface_degraded";
         surface_degraded_announced_ = true;
-    } else if (!safety_action && !decision.perception_degraded &&
-               decision.hazard_type != "none" &&
-               hazard_changed) {
-        if (decision.hazard_type == "step_or_drop") action = "surface_step";
-        else if (decision.hazard_type == "blocked_surface") action = "surface_blocked";
-        else action = "surface_unknown";
+    } else if (!decision.perception_degraded && decision.cause == "STAIR") {
+        action = decision.action == "stop" ? "stair_stop" : "stair_slow";
+    } else if (!decision.perception_degraded && decision.cause == "OBJECT") {
+        if (decision.object_label == "PERSON" && decision.action == "stop") {
+            action = "person_stop";
+        } else {
+            action = decision.action == "stop" ? "obstacle_stop" : "obstacle_slow";
+        }
+    } else if (!decision.perception_degraded && decision.cause == "BLOCKED") {
+        action = decision.action == "stop" ? "obstacle_stop" : "obstacle_slow";
+    } else if (!decision.perception_degraded && decision.cause == "UNKNOWN") {
+        action = "surface_unknown";
     }
-    last_surface_hazard_ = decision.hazard_type;
+    last_surface_hazard_ = decision.cause;
     const auto now = std::chrono::steady_clock::now();
     if (action == "system_fault") {
         last_fault_seen_time_ = now;
@@ -1400,7 +1462,8 @@ void VoiceNotifier::Update(int frame_id,
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fault_seen_time_).count());
         if (since_fault_ms < fault_hold_ms_) action = "system_fault";
     }
-    const bool critical = action == "stop" || action == "system_fault";
+    const bool critical = action == "stop" || action == "system_fault" ||
+        action == "person_stop" || action == "obstacle_stop" || action == "stair_stop";
     const bool action_changed = action != last_requested_action_;
     // A depth-level transition is only a speech event when it also changes the
     // conservative motion advice.  Otherwise floor depth jitter would enqueue
@@ -1416,7 +1479,7 @@ void VoiceNotifier::Update(int frame_id,
     if (decision.depth_level != "unknown") {
         last_announced_depth_level_ = decision.depth_level;
     }
-    if (action != "stop" && action != "system_fault" && frame_id % frame_interval_ != 0) {
+    if (!critical && frame_id % frame_interval_ != 0) {
         return;
     }
     std::lock_guard<std::mutex> lock(worker_mutex_);
@@ -1437,7 +1500,7 @@ void VoiceNotifier::Update(int frame_id,
     }
     pending_frame_id_ = frame_id;
     pending_action_ = action;
-    pending_key_ = action;
+    pending_key_ = BuildVoiceKey(result, decision);
     pending_ready_ = true;
     worker_cv_.notify_one();
 }

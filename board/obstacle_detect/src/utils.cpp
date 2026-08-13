@@ -660,24 +660,24 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
      * 图层残留，又避免每帧重载文字纹理造成显示延迟。
      */
     std::vector<sst::device::osd::OsdQuadRangle> box_quads;
-    box_quads.reserve(result.items.size());
+    box_quads.reserve(3);
 
     // OSD 图层约定：layer 0 为停用的旧风险条；layer 1 为动作文字位图；
     // layer 2 为方向/风险辅助位图；layer 3 预留；layer 4 绘制目标框。
-    if (!static_layers_cleaned_) {
+    if (true) {
         osd_device.CleanLayer(0);
         osd_device.CleanLayer(3);
         static_layers_cleaned_ = true;
     }
 
-    const size_t max_display_boxes = std::min<size_t>(result.items.size(), 6);
+    const size_t max_display_boxes = std::min<size_t>(result.items.size(), 3);
     for (size_t i = 0; i < max_display_boxes; ++i) {
         const auto& item = result.items[i];
 
         sst::device::osd::OsdQuadRangle q;
         q.box = item.box;
         q.border = 4;
-        q.layer_id = 0;
+        q.layer_id = 4;
         q.type = fdevice::TYPE_HOLLOW;
         q.alpha = fdevice::TYPE_ALPHA75;
         // Aurora receives a monochrome preview.  Keep every dynamic box at one
@@ -689,18 +689,10 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
 
     const std::string action_name = action_text(decision.action);
     int primary_idx = find_primary_index(result);
-    std::string dir_name = "C";
-    std::string risk_name = "UNK";
-    if (primary_idx >= 0) {
-        dir_name = dir_text(result.items[primary_idx].sector);
-        const std::string& depth = result.items[primary_idx].depth_level;
-        risk_name = depth == "near" ? "NEAR" :
-                    depth == "mid" ? "WARN" :
-                    depth == "far" ? "FAR" :
-                    risk_text(result.items[primary_idx].distance_m);
-    }
+    const std::string primary_label = primary_idx >= 0
+        ? object_hud_text(result.items[primary_idx]) : "UNKNOWN";
     const std::string action_asset = hud_asset_path(action_name);
-    const std::string info_asset = hud_asset_path(dir_name + "_" + risk_name);
+    const std::string info_asset = hud_asset_path(primary_label);
     if (action_asset != last_action_asset_) {
         if (osd_device.DrawTexture(action_asset, 24, 36, 1)) {
             last_action_asset_ = action_asset;
@@ -718,6 +710,102 @@ void VISUALIZER::Draw(const DetectionResult& result,
                       const AvoidanceDecision& decision,
                       const SurfaceResult& surface)
 {
+    // Fixed-budget monochrome HUD. Layer 0 stays empty, layers 1/2 each hold
+    // one static bitmap, layer 3 holds at most eight scene primitives and
+    // layer 4 at most three stable object boxes.
+    osd_device.CleanLayer(0);
+    osd_device.CleanLayer(3);
+    static_layers_cleaned_ = true;
+
+    std::vector<sst::device::osd::OsdQuadRangle> box_quads;
+    box_quads.reserve(3);
+    const size_t max_display_boxes = std::min<size_t>(result.items.size(), 3);
+    for (size_t i = 0; i < max_display_boxes; ++i) {
+        sst::device::osd::OsdQuadRangle q;
+        q.box = result.items[i].box;
+        q.border = 4;
+        q.layer_id = 4;
+        q.type = fdevice::TYPE_HOLLOW;
+        q.alpha = fdevice::TYPE_ALPHA75;
+        q.color = 2;
+        box_quads.push_back(q);
+    }
+    const std::string action_asset = hud_asset_path(action_text(decision.action));
+    if (action_asset != last_action_asset_ &&
+        osd_device.DrawTexture(action_asset, 24, 36, 1)) {
+        last_action_asset_ = action_asset;
+    }
+    std::vector<sst::device::osd::OsdQuadRangle> scene_quads;
+    scene_quads.reserve(8);
+    const float width = static_cast<float>(image_shape_[0]);
+    const float height = static_cast<float>(image_shape_[1]);
+    const float roi_top = std::max(0.0f, height - width);
+    std::string primary_label = "UNKNOWN";
+    if (surface.perception_degraded) {
+        primary_label = "AI_FAIL";
+    } else if (surface.valid && !surface.stale &&
+               (surface.stair_edge_persistent ||
+                surface.primary_hazard == "step_or_drop")) {
+        primary_label = "STAIR";
+    } else if (surface.valid && !surface.stale &&
+               surface.primary_hazard == "blocked_surface") {
+        primary_label = "BLOCKED";
+    } else {
+        const int object_index = find_primary_index(result);
+        if (object_index >= 0) primary_label = object_hud_text(result.items[object_index]);
+        else if (surface.valid && !surface.stale && surface.center.safe_candidate) primary_label = "PATH";
+    }
+    const std::string label_asset = hud_asset_path(primary_label);
+    if (label_asset != last_info_asset_ &&
+        osd_device.DrawTexture(label_asset, 24, 128, 2)) {
+        last_info_asset_ = label_asset;
+    }
+
+    if (!surface.perception_degraded && surface.valid && !surface.stale) {
+        const float x1 = width * 0.30f;
+        const float x2 = width * 0.70f;
+        const float y1 = roi_top + 120.0f;
+        const float y2 = height - 16.0f;
+        if (primary_label == "STAIR") {
+            for (int i = 0; i < surface.stair_edge_count && i < 2; ++i) {
+                const float edge_y = roi_top +
+                    width * surface.stair_edge_rows[i] / SURFACE_GRID_SIZE;
+                push_solid(&scene_quads, x1, edge_y, x2, edge_y + 6.0f);
+            }
+            const float edge_y = surface.stair_edge_count > 0
+                ? roi_top + width * surface.stair_edge_rows[0] / SURFACE_GRID_SIZE
+                : y1 + 0.58f * (y2 - y1);
+            const float cx = 0.5f * (x1 + x2);
+            push_solid(&scene_quads, cx - 4.0f, edge_y + 18.0f,
+                       cx + 4.0f, edge_y + 70.0f);
+            push_solid(&scene_quads, cx - 20.0f, edge_y + 52.0f,
+                       cx, edge_y + 62.0f);
+            push_solid(&scene_quads, cx, edge_y + 52.0f,
+                       cx + 20.0f, edge_y + 62.0f);
+        } else if (primary_label == "BLOCKED") {
+            push_hollow(&scene_quads, x1, y1, x2, y2, 6);
+            for (int k = 1; k <= 3; ++k) {
+                const float t = static_cast<float>(k) / 4.0f;
+                const float x = x1 + t * (x2 - x1);
+                push_solid(&scene_quads, x - 5.0f,
+                           y1 + t * (y2 - y1) - 10.0f,
+                           x + 5.0f, y1 + t * (y2 - y1) + 10.0f);
+                push_solid(&scene_quads, x - 5.0f,
+                           y2 - t * (y2 - y1) - 10.0f,
+                           x + 5.0f, y2 - t * (y2 - y1) + 10.0f);
+            }
+        } else if (primary_label == "PATH") {
+            push_hollow(&scene_quads, x1, y1, x2, y2, 3);
+        } else if (primary_label == "UNKNOWN") {
+            push_hollow(&scene_quads, x1, y1, x2, y2, 2);
+        }
+    }
+    if (scene_quads.size() > 8U) scene_quads.resize(8U);
+    osd_device.Draw(scene_quads, 3);
+    osd_device.Draw(box_quads, 4);
+    return;
+
+#if 0
     Draw(result, decision);
     std::vector<sst::device::osd::OsdQuadRangle> corridors;
     std::vector<sst::device::osd::OsdQuadRangle> status;
@@ -806,4 +894,5 @@ void VISUALIZER::Draw(const DetectionResult& result,
     }
     osd_device.Draw(corridors, 3);
     osd_device.Draw(status, 0);
+#endif
 }

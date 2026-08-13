@@ -2,14 +2,15 @@
 # 生产路径为 a1_uart + 固定 GBK 帧。ACK/主动 busy 查询默认关闭，是因为当前
 # 载板回传不稳定；被动 RX 只用于统计，不作为持续播报的硬前提。
 export A1_OUTPUT_MODE="${A1_OUTPUT_MODE:-both}"
+export A1_VOICE_ENABLE="${A1_VOICE_ENABLE:-1}"
 export A1_VOICE_BACKEND="${A1_VOICE_BACKEND:-a1_uart}"
 export A1_VOICE_BAUD="${A1_VOICE_BAUD:-9600}"
 export A1_VOICE_INTERVAL_FRAMES="${A1_VOICE_INTERVAL_FRAMES:-2}"
 export A1_VOICE_STABLE_FRAMES="${A1_VOICE_STABLE_FRAMES:-1}"
 export A1_VOICE_CLEAR_STABLE_FRAMES="${A1_VOICE_CLEAR_STABLE_FRAMES:-3}"
-export A1_VOICE_COOLDOWN_MS="${A1_VOICE_COOLDOWN_MS:-1200}"
-export A1_VOICE_CLEAR_REPEAT_MS="${A1_VOICE_CLEAR_REPEAT_MS:-1200}"
-export A1_VOICE_STOP_REPEAT_MS="${A1_VOICE_STOP_REPEAT_MS:-1600}"
+export A1_VOICE_COOLDOWN_MS="${A1_VOICE_COOLDOWN_MS:-5000}"
+export A1_VOICE_CLEAR_REPEAT_MS="${A1_VOICE_CLEAR_REPEAT_MS:-0}"
+export A1_VOICE_STOP_REPEAT_MS="${A1_VOICE_STOP_REPEAT_MS:-2000}"
 export A1_VOICE_FAULT_REPEAT_MS="${A1_VOICE_FAULT_REPEAT_MS:-1800}"
 export A1_VOICE_FAULT_HOLD_MS="${A1_VOICE_FAULT_HOLD_MS:-2500}"
 export A1_VOICE_SWITCH_MIN_MS="${A1_VOICE_SWITCH_MIN_MS:-0}"
@@ -43,7 +44,7 @@ export A1_VOICE_SELFTEST="${A1_VOICE_SELFTEST:-0}"
 export A1_DEBUG_POSTPROCESS="${A1_DEBUG_POSTPROCESS:-0}"
 export A1_DEBUG_POSTPROCESS_INTERVAL="${A1_DEBUG_POSTPROCESS_INTERVAL:-60}"
 export A1_OUTPUT_SERIAL_DIAG="${A1_OUTPUT_SERIAL_DIAG:-0}"
-export A1_OUTPUT_INTERVAL_FRAMES="${A1_OUTPUT_INTERVAL_FRAMES:-5}"
+export A1_OUTPUT_INTERVAL_FRAMES="${A1_OUTPUT_INTERVAL_FRAMES:-90}"
 export A1_CAPTURE_AUTO_RESTART="${A1_CAPTURE_AUTO_RESTART:-1}"
 export A1_COVER_SCORE_THRESHOLD="${A1_COVER_SCORE_THRESHOLD:-5}"
 export A1_COVER_TRIGGER_FRAMES="${A1_COVER_TRIGGER_FRAMES:-3}"
@@ -69,12 +70,10 @@ export A1_OSD_INTERVAL_FRAMES="${A1_OSD_INTERVAL_FRAMES:-2}"
 export A1_PERF_INTERVAL_FRAMES="${A1_PERF_INTERVAL_FRAMES:-60}"
 export A1_SENSOR_FPS="${A1_SENSOR_FPS:-90}"
 
-# ===== D/D/D/S single-channel road-surface perception =====
-export A1_SEG_MODEL_PATH="${A1_SEG_MODEL_PATH:-/app_demo/app_assets/models/graynav_surface_depth_e3_gray1.m1model}"
-export A1_SURFACE_PERIOD="${A1_SURFACE_PERIOD:-4}"
-export A1_SURFACE_SLOT="${A1_SURFACE_SLOT:-3}"
-export A1_SURFACE_STALE_MS="${A1_SURFACE_STALE_MS:-1500}"
-export A1_SEG_OUTPUT_LAYOUT="${A1_SEG_OUTPUT_LAYOUT:-HWC}"
+# ===== One-model indoor detection + scene/depth/stair perception =====
+export A1_MODEL_PATH="${A1_MODEL_PATH:-/app_demo/app_assets/models/graynav_unified_indoor8_scene21.m1model}"
+export A1_SURFACE_STALE_MS="${A1_SURFACE_STALE_MS:-1000}"
+export A1_MODEL_OUTPUT_LAYOUT="${A1_MODEL_OUTPUT_LAYOUT:-HWC}"
 export A1_YOLO_DYNAMIC_ALLOC="${A1_YOLO_DYNAMIC_ALLOC:-0}"
 
 # ===== 相机安装参数、测距不确定度与三走廊规划 =====
@@ -95,11 +94,14 @@ export A1_WIDE_BOX_RATIO="${A1_WIDE_BOX_RATIO:-0.88}"
 export A1_CENTER_HALF_WIDTH_M="${A1_CENTER_HALF_WIDTH_M:-0.22}"
 
 # ===== 仅在暗光且仍有纹理时启用的局部灰度增强 =====
-export A1_ADAPTIVE_GRAY="${A1_ADAPTIVE_GRAY:-1}"
+# The unified model was trained with grayscale photometric augmentation. Keep
+# sensor pixels unchanged for the first board qualification; enable the LUT
+# only as a controlled dark-room experiment after the baseline is recorded.
+export A1_ADAPTIVE_GRAY="${A1_ADAPTIVE_GRAY:-0}"
 export A1_ADAPTIVE_GRAY_DARK_MEAN="${A1_ADAPTIVE_GRAY_DARK_MEAN:-75}"
 export A1_ADAPTIVE_GRAY_BLEND="${A1_ADAPTIVE_GRAY_BLEND:-60}"
 export A1_ADAPTIVE_GRAY_BRIGHT_MEAN="${A1_ADAPTIVE_GRAY_BRIGHT_MEAN:-195}"
-export A1_ADAPTIVE_GRAY_DIAG="${A1_ADAPTIVE_GRAY_DIAG:-1}"
+export A1_ADAPTIVE_GRAY_DIAG="${A1_ADAPTIVE_GRAY_DIAG:-0}"
 
 chmod +x ./ssne_ai_demo
 # ===== 进程监督 =====
