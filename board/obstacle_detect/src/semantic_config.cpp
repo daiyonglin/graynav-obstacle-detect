@@ -84,6 +84,16 @@ const int kRod25SemanticMap[] = {
     GENERIC_OBSTACLE   // bicycle_rack
 };
 
+const char* const kIndoor8Names[] = {
+    "person", "chair", "dining_table", "backpack",
+    "handbag", "suitcase", "couch", "bench"
+};
+
+const int kIndoor8SemanticMap[] = {
+    PERSON, CHAIR_SEAT, TABLE_DESK, BAG_SUITCASE,
+    BAG_SUITCASE, BAG_SUITCASE, SOFA_BED, CHAIR_SEAT
+};
+
 const char* const kSemanticNames[] = {
     "person",
     "chair/seat",
@@ -157,8 +167,9 @@ bool IsSupportedRawClass(int raw_class_id)
 int SemanticClassFromRaw(int raw_class_id)
 {
     // ROD25 原始类别可细分展示，但动作决策统一落入 8 个稳定导航语义。
-    if (ModelClassCount() == NUM_SEMANTIC_CLASSES) {
-        return IsSupportedRawClass(raw_class_id) ? raw_class_id : GENERIC_OBSTACLE;
+    if (ModelClassCount() == 8) {
+        return raw_class_id >= 0 && raw_class_id < 8
+            ? kIndoor8SemanticMap[raw_class_id] : GENERIC_OBSTACLE;
     }
 
     if (ModelClassCount() == 25) {
@@ -199,6 +210,10 @@ bool IsObstacleClass(int semantic_class_id)
 
 bool IsFurnitureLikeRawClass(int raw_class_id)
 {
+    if (ModelClassCount() == 8) {
+        return raw_class_id == 1 || raw_class_id == 2 ||
+               raw_class_id == 6 || raw_class_id == 7;
+    }
     if (ModelClassCount() == 25) {
         return IsFurnitureLikeSemantic(SemanticClassFromRaw(raw_class_id));
     }
@@ -242,6 +257,12 @@ float CandidateThreshold(int raw_class_id)
         if (sem == VEHICLE_BICYCLE) return 0.28f;
         if (sem == SMALL_OBJECT) return 0.22f;
         return 0.24f;
+    }
+    if (ModelClassCount() == 8) {
+        if (raw_class_id == 0) return 0.12f;
+        if (raw_class_id == 1 || raw_class_id == 2 ||
+            raw_class_id == 6 || raw_class_id == 7) return 0.16f;
+        return 0.18f;
     }
     if (sem == PERSON || IsFurnitureLikeSemantic(sem)) return 0.16f;
     if (sem == BAG_SUITCASE || sem == SMALL_OBJECT) return 0.18f;
@@ -342,8 +363,9 @@ std::string SemanticShortLabel(int semantic_class_id)
 
 std::string RawLabel(int raw_class_id)
 {
-    if (ModelClassCount() == NUM_SEMANTIC_CLASSES) {
-        return SemanticLabel(raw_class_id);
+    if (ModelClassCount() == 8) {
+        return raw_class_id >= 0 && raw_class_id < 8
+            ? kIndoor8Names[raw_class_id] : "unknown";
     }
     if (ModelClassCount() == 25) {
         const int n = static_cast<int>(sizeof(kRod25Names) / sizeof(kRod25Names[0]));

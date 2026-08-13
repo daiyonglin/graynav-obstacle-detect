@@ -17,8 +17,8 @@ std::vector<float> segmentation_logits(bool hazard)
         }
     }
     if (hazard) {
-        for (int y = 40; y < 49; ++y) {
-            for (int x = 27; x < 37; ++x) {
+        for (int y = SURFACE_GRID_SIZE * 2 / 3; y < SURFACE_GRID_SIZE * 5 / 6; ++y) {
+            for (int x = SURFACE_GRID_SIZE * 2 / 5; x < SURFACE_GRID_SIZE * 3 / 5; ++x) {
                 const int base = (y * SURFACE_GRID_SIZE + x) * SURFACE_CLASS_COUNT;
                 logits[base] = -4.0f;
                 logits[base + STEP_OR_DROP] = 4.0f;
@@ -56,6 +56,19 @@ std::vector<float> uniform_segmentation_logits(int active_class)
     return logits;
 }
 
+std::vector<float> blocked_segmentation_logits()
+{
+    std::vector<float> logits = segmentation_logits(false);
+    for (int y = SURFACE_GRID_SIZE / 3; y < SURFACE_GRID_SIZE; ++y) {
+        for (int x = SURFACE_GRID_SIZE * 2 / 5; x < SURFACE_GRID_SIZE * 3 / 5; ++x) {
+            const int base = (y * SURFACE_GRID_SIZE + x) * SURFACE_CLASS_COUNT;
+            logits[base] = -4.0f;
+            logits[base + BLOCKED_SURFACE] = 4.0f;
+        }
+    }
+    return logits;
+}
+
 std::vector<float> hwc_to_chw(const std::vector<float>& hwc, int channels)
 {
     std::vector<float> chw(hwc.size(), 0.0f);
@@ -67,10 +80,47 @@ std::vector<float> hwc_to_chw(const std::vector<float>& hwc, int channels)
     return chw;
 }
 
+std::vector<float> packed_scene_logits(bool hazard, int depth_bin, bool edge)
+{
+    const std::vector<float> seg = segmentation_logits(hazard);
+    const std::vector<float> depth = depth_logits(depth_bin);
+    std::vector<float> packed(SURFACE_GRID_CELLS * UNIFIED_SCENE_CHANNELS, -8.0f);
+    for (int cell = 0; cell < SURFACE_GRID_CELLS; ++cell) {
+        for (int c = 0; c < SURFACE_CLASS_COUNT; ++c) {
+            packed[cell * UNIFIED_SCENE_CHANNELS + c] =
+                seg[cell * SURFACE_CLASS_COUNT + c];
+        }
+        for (int c = 0; c < DEPTH_BIN_COUNT; ++c) {
+            packed[cell * UNIFIED_SCENE_CHANNELS + SURFACE_CLASS_COUNT + c] =
+                depth[cell * DEPTH_BIN_COUNT + c];
+        }
+    }
+    if (edge) {
+        const int row = SURFACE_GRID_SIZE * 3 / 4;
+        for (int y = row - 1; y <= row + 1; ++y) {
+            for (int x = SURFACE_GRID_SIZE / 3; x < SURFACE_GRID_SIZE * 2 / 3; ++x) {
+                packed[(y * SURFACE_GRID_SIZE + x) * UNIFIED_SCENE_CHANNELS +
+                       STAIR_EDGE_CHANNEL] = 8.0f;
+            }
+        }
+    }
+    return packed;
+}
+
 }  // namespace
 
 int main()
 {
+    // The unified head uses the fixed indoor8 order, not ROD25 or COCO80 IDs.
+    assert(obstacle::semantic::RawLabel(0) == "person");
+    assert(obstacle::semantic::RawLabel(1) == "chair");
+    assert(obstacle::semantic::RawLabel(2) == "dining_table");
+    assert(obstacle::semantic::RawLabel(3) == "backpack");
+    assert(obstacle::semantic::SemanticClassFromRaw(0) == obstacle::semantic::PERSON);
+    assert(obstacle::semantic::SemanticClassFromRaw(1) == obstacle::semantic::CHAIR_SEAT);
+    assert(obstacle::semantic::SemanticClassFromRaw(2) == obstacle::semantic::TABLE_DESK);
+    assert(obstacle::semantic::SemanticClassFromRaw(3) == obstacle::semantic::BAG_SUITCASE);
+
     obstacle::SurfaceDecisionFusion fusion;
     AvoidanceDecision detection;
     detection.action = "clear";
@@ -91,15 +141,38 @@ int main()
     assert(segmenter.PostprocessLogits(hazard.data(), hazard.size(),
                                        depth.data(), depth.size(), true, 100, &surface));
     assert(!surface.center.persistent_hazard);
+
+    // A wall/blocked surface is also temporal: it must not redirect the user
+    // from a single noisy frame, but three of four observations latch it.
+    obstacle::SurfaceSegmenter blocked_segmenter;
+    SurfaceResult blocked_surface;
+    const std::vector<float> blocked = blocked_segmentation_logits();
+    for (int i = 0; i < 3; ++i) {
+        assert(blocked_segmenter.PostprocessLogits(
+            blocked.data(), blocked.size(), depth.data(), depth.size(), true,
+            3000 + i * 100, &blocked_surface));
+        assert(!blocked_surface.center.blocked_persistent);
+    }
+    assert(blocked_segmenter.PostprocessLogits(
+        blocked.data(), blocked.size(), depth.data(), depth.size(), true,
+        3300, &blocked_surface));
+    assert(blocked_surface.center.blocked_persistent);
+    assert(blocked_surface.primary_hazard == "blocked_surface");
     assert(segmenter.PostprocessLogits(hazard.data(), hazard.size(),
                                        depth.data(), depth.size(), true, 200, &surface));
+    assert(!surface.center.persistent_hazard);
+    assert(segmenter.PostprocessLogits(hazard.data(), hazard.size(),
+                                       depth.data(), depth.size(), true, 300, &surface));
+    assert(!surface.center.persistent_hazard);
+    assert(segmenter.PostprocessLogits(hazard.data(), hazard.size(),
+                                       depth.data(), depth.size(), true, 400, &surface));
     assert(surface.center.persistent_hazard);
     assert(surface.primary_hazard == "step_or_drop");
     assert(surface.depth_level != "unknown");
 
     surface.left.safe_candidate = true;
     surface.right.safe_candidate = false;
-    AvoidanceDecision fused = fusion.Fuse(detection, surface, 200);
+    AvoidanceDecision fused = fusion.Fuse(detection, surface, 400);
     assert(fused.action == "turn_left");
     assert(fused.perception_source == "detection+surface_depth");
     assert(fused.depth_level == "unknown");
@@ -109,12 +182,25 @@ int main()
     for (int i = 0; i < 3; ++i) {
         assert(segmenter.PostprocessLogits(clear.data(), clear.size(),
                                            depth.data(), depth.size(), true,
-                                           300 + i * 100, &surface));
+                                           500 + i * 100, &surface));
         assert(surface.center.persistent_hazard);
     }
     assert(segmenter.PostprocessLogits(clear.data(), clear.size(),
-                                       depth.data(), depth.size(), true, 600, &surface));
+                                       depth.data(), depth.size(), true, 800, &surface));
     assert(!surface.center.persistent_hazard);
+
+    // A whole-frame/all-corridor STEP prediction is a known coarse-mask
+    // failure mode. Segmentation alone must not latch it as a real stair.
+    obstacle::SurfaceSegmenter overfill_segmenter;
+    SurfaceResult overfill_surface;
+    const std::vector<float> overfill = uniform_segmentation_logits(STEP_OR_DROP);
+    for (int i = 0; i < 6; ++i) {
+        assert(overfill_segmenter.PostprocessLogits(
+            overfill.data(), overfill.size(), depth.data(), depth.size(), true,
+            900 + i * 100, &overfill_surface));
+        assert(!overfill_surface.center.persistent_hazard);
+        assert(overfill_surface.primary_hazard != "step_or_drop");
+    }
 
     // The final E3 segmentation contract has four classes.  UNKNOWN_OTHER is
     // never a traversable path and must conservatively slow a clear detector.
@@ -158,9 +244,11 @@ int main()
 
     obstacle::SurfaceSegmenter confident_segmenter;
     SurfaceResult confident_surface;
-    assert(confident_segmenter.PostprocessLogits(
-        clear.data(), clear.size(), depth.data(), depth.size(), true, 900,
-        &confident_surface));
+    for (int i = 0; i < 5; ++i) {
+        assert(confident_segmenter.PostprocessLogits(
+            clear.data(), clear.size(), depth.data(), depth.size(), true,
+            1600 + i * 100, &confident_surface));
+    }
     assert(confident_surface.depth_level == "far");
     assert(!confident_surface.depth_ambiguous);
     assert(confident_surface.depth_margin >= 0.20f);
@@ -170,14 +258,32 @@ int main()
     SurfaceResult chw_surface;
     const std::vector<float> clear_chw = hwc_to_chw(clear, SURFACE_CLASS_COUNT);
     const std::vector<float> depth_chw = hwc_to_chw(depth, DEPTH_BIN_COUNT);
-    assert(chw_segmenter.PostprocessLogits(
-        clear_chw.data(), clear_chw.size(), depth_chw.data(), depth_chw.size(), false, 1000,
-        &chw_surface));
+    for (int i = 0; i < 5; ++i) {
+        assert(chw_segmenter.PostprocessLogits(
+            clear_chw.data(), clear_chw.size(), depth_chw.data(), depth_chw.size(), false,
+            2200 + i * 100, &chw_surface));
+    }
     assert(chw_surface.center.safe_candidate == confident_surface.center.safe_candidate);
     assert(chw_surface.depth_level == confident_surface.depth_level);
     assert(!chw_segmenter.PostprocessLogits(
         clear_chw.data(), clear_chw.size() - 1U,
         depth_chw.data(), depth_chw.size(), false, 1100, &chw_surface));
+
+    // The production model packs segmentation, depth and stair edge into one
+    // 21-channel output; two of three lower-ROI observations latch an edge that
+    // corroborates a bounded step region, faster than segmentation-only 3/4.
+    obstacle::SurfaceSegmenter packed_segmenter;
+    SurfaceResult packed_surface;
+    const std::vector<float> packed = packed_scene_logits(true, 10, true);
+    assert(packed_segmenter.PostprocessPackedLogits(
+        packed.data(), packed.size(), true, 1200, &packed_surface));
+    assert(!packed_surface.stair_edge_persistent);
+    assert(packed_segmenter.PostprocessPackedLogits(
+        packed.data(), packed.size(), true, 1300, &packed_surface));
+    assert(packed_segmenter.PostprocessPackedLogits(
+        packed.data(), packed.size(), true, 1400, &packed_surface));
+    assert(packed_surface.stair_edge_persistent);
+    assert(packed_surface.stair_edge_count > 0);
 
     // Three reliable anchors establish a scale.  The public depth grid may then
     // affect an internal safe distance, while the UI still exposes only levels.

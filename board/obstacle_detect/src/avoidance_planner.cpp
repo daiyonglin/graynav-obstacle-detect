@@ -89,10 +89,14 @@ void AvoidancePlanner::Initialize(const std::array<int, 2>& image_shape)
 bool AvoidancePlanner::IsActionHazard(const DetectionItem& item) const
 {
     // road 不作为障碍；建筑/标志等场景结构必须有可靠近场几何证据才干预。
-    if (item.raw_class_id == 7 || item.raw_label == "road") return false;
-    const bool scene_structure = item.raw_class_id == 1 || item.raw_class_id == 5 ||
-                                 item.raw_class_id == 6 || item.raw_class_id == 12 ||
-                                 item.raw_class_id == 22;
+    const bool legacy_rod25 = semantic::ModelClassCount() == 25;
+    if (legacy_rod25 && (item.raw_class_id == 7 || item.raw_label == "road")) {
+        return false;
+    }
+    const bool scene_structure = legacy_rod25 &&
+        (item.raw_class_id == 1 || item.raw_class_id == 5 ||
+         item.raw_class_id == 6 || item.raw_class_id == 12 ||
+         item.raw_class_id == 22);
     if (scene_structure) {
         return item.distance_confidence >= 0.35f ||
                item.distance_source == "nearfield_bound" ||

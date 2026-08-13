@@ -1,13 +1,10 @@
 #include "../include/surface_segmentation.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <queue>
-#include <sys/stat.h>
 
 namespace obstacle {
 namespace {
@@ -18,38 +15,9 @@ const int kClasses = SURFACE_CLASS_COUNT;
 const int kDepthBins = DEPTH_BIN_COUNT;
 const float kDepthMinM = 0.30f;
 const float kDepthMaxM = 8.0f;
-const float kSegOutputScale = 0.0690593868494f;
-const float kDepthOutputScale = 0.367095053196f;
 const float kUnknownMaxRatio = 0.30f;
 const float kDepthGroupMinProbability = 0.45f;
 const float kDepthAmbiguityMargin = 0.20f;
-
-int64_t monotonic_ms()
-{
-    return static_cast<int64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-}
-
-bool env_hwc()
-{
-    const char* value = std::getenv("A1_SEG_OUTPUT_LAYOUT");
-    if (value == NULL) return true;
-    return std::strcmp(value, "CHW") != 0 && std::strcmp(value, "chw") != 0;
-}
-
-size_t tensor_elements(const ssne_tensor_t& tensor)
-{
-    size_t total = static_cast<size_t>(get_total_size(tensor));
-    if (get_data_type(tensor) == SSNE_FLOAT32 && total % sizeof(float) == 0) {
-        const size_t as_elements = total / sizeof(float);
-        if (as_elements == static_cast<size_t>(kGridCells * kClasses) ||
-            as_elements == static_cast<size_t>(kGridCells * kDepthBins)) {
-            return as_elements;
-        }
-    }
-    return total;
-}
 
 float depth_center(int bin)
 {
@@ -82,138 +50,15 @@ int depth_severity(const std::string& level)
     return 0;
 }
 
-const char* dtype_name(uint8_t dtype)
-{
-    if (dtype == SSNE_FLOAT32) return "float32";
-    if (dtype == SSNE_INT8) return "int8";
-    if (dtype == SSNE_UINT8) return "uint8";
-    return "unknown";
-}
-
 }  // namespace
 
 SurfaceSegmenter::SurfaceSegmenter()
-    : model_id_(0),
-      available_(false),
-      input_created_(false),
-      output_created_{false, false},
-      input_{},
-      outputs_{},
-      seg_output_index_(-1),
-      depth_output_index_(-1),
-      preprocess_pipe_(NULL),
-      image_shape_{720, 1280},
-      input_shape_{256, 256},
-      roi_{0, 560, 720, 1280},
-      stable_depth_level_("unknown"),
-      output_contract_logged_(false)
+    : stable_depth_level_("unknown")
 {
     std::memset(hazard_latched_, 0, sizeof(hazard_latched_));
     std::memset(hazard_clear_count_, 0, sizeof(hazard_clear_count_));
-}
-
-bool SurfaceSegmenter::Initialize(const std::string& model_path,
-                                  const std::array<int, 2>& image_shape,
-                                  const std::array<int, 2>& input_shape)
-{
-    image_shape_ = image_shape;
-    input_shape_ = input_shape;
-    const int roi_size = std::min(image_shape_[0], image_shape_[1]);
-    const int lower_y = std::max(0, image_shape_[1] - roi_size);
-    roi_ = {0, lower_y, roi_size, lower_y + roi_size};
-    struct stat file_info;
-    if (stat(model_path.c_str(), &file_info) != 0 || file_info.st_size <= 0) {
-        std::cout << "[SURFACE_DEPTH][WARN] model missing; detector-only fallback path="
-                  << model_path << std::endl;
-        return false;
-    }
-    char* path = const_cast<char*>(model_path.c_str());
-    model_id_ = ssne_loadmodel(path, SSNE_DYNAMIC_ALLOC);
-    int dtype = -1;
-    ssne_get_model_input_dtype(model_id_, &dtype);
-    if (dtype < 0) {
-        std::cout << "[SURFACE_DEPTH][ERROR] cannot read input dtype=" << dtype << std::endl;
-        return false;
-    }
-    input_ = create_tensor(static_cast<uint32_t>(input_shape_[0]),
-                           static_cast<uint32_t>(input_shape_[1]),
-                           SSNE_Y_8, SSNE_BUF_AI);
-    input_created_ = get_data(input_) != NULL;
-    preprocess_pipe_ = GetAIPreprocessPipe();
-    if (!input_created_ || preprocess_pipe_ == NULL) return false;
-    Clear(preprocess_pipe_);
-    int ret = SetCrop(preprocess_pipe_, static_cast<uint16_t>(roi_[0]),
-                      static_cast<uint16_t>(roi_[1]), static_cast<uint16_t>(roi_[2]),
-                      static_cast<uint16_t>(roi_[3]));
-    if (ret == 0) ret = SetNormalize(preprocess_pipe_, model_id_);
-    if (ret != 0) {
-        std::cout << "[SURFACE_DEPTH][ERROR] preprocess setup ret=" << ret << std::endl;
-        return false;
-    }
-    available_ = true;
-    std::cout << "[SURFACE_DEPTH][INFO] model=" << model_path << " id=" << model_id_
-              << " input=1x1x256x256 outputs=seg(4x64x64)+depth(16x64x64)"
-              << " roi=" << roi_[0] << "," << roi_[1] << "," << roi_[2] << "," << roi_[3]
-              << " alloc=dynamic dtype=" << dtype << std::endl;
-    return true;
-}
-
-bool SurfaceSegmenter::Preprocess(ssne_tensor_t* image)
-{
-    return image != NULL && preprocess_pipe_ != NULL &&
-           RunAiPreprocessPipe(preprocess_pipe_, *image, input_) == 0;
-}
-
-bool SurfaceSegmenter::BindOutputs(bool* hwc_layout)
-{
-    if (hwc_layout == NULL) return false;
-    seg_output_index_ = depth_output_index_ = -1;
-    for (int index = 0; index < 2; ++index) {
-        if (get_data(outputs_[index]) == NULL || get_width(outputs_[index]) != kGrid ||
-            get_height(outputs_[index]) != kGrid) {
-            continue;
-        }
-        const size_t elements = tensor_elements(outputs_[index]);
-        if (elements == static_cast<size_t>(kGridCells * kClasses)) seg_output_index_ = index;
-        if (elements == static_cast<size_t>(kGridCells * kDepthBins)) depth_output_index_ = index;
-    }
-    *hwc_layout = env_hwc();
-    if (seg_output_index_ < 0 || depth_output_index_ < 0 ||
-        seg_output_index_ == depth_output_index_) {
-        std::cout << "[SURFACE_DEPTH][ERROR] cannot bind two outputs totals="
-                  << tensor_elements(outputs_[0]) << "/" << tensor_elements(outputs_[1])
-                  << std::endl;
-        return false;
-    }
-    return true;
-}
-
-bool SurfaceSegmenter::ReadOutputLogits(const ssne_tensor_t& tensor,
-                                        int channels,
-                                        float quant_scale,
-                                        std::vector<float>* logits) const
-{
-    if (logits == NULL || get_data(tensor) == NULL) return false;
-    const size_t expected = static_cast<size_t>(kGridCells * channels);
-    if (tensor_elements(tensor) != expected) return false;
-    logits->assign(expected, 0.0f);
-    const uint8_t dtype = get_data_type(tensor);
-    if (dtype == SSNE_FLOAT32) {
-        const float* data = reinterpret_cast<const float*>(get_data(tensor));
-        std::copy(data, data + expected, logits->begin());
-    } else if (dtype == SSNE_INT8) {
-        const int8_t* data = reinterpret_cast<const int8_t*>(get_data(tensor));
-        if (!(quant_scale > 0.0f) || !std::isfinite(quant_scale)) return false;
-        for (size_t i = 0; i < expected; ++i) {
-            (*logits)[i] = static_cast<float>(data[i]) * quant_scale;
-        }
-    } else {
-        // The formal E3 model uses symmetric INT8 outputs.  UINT8 would need a
-        // zero point that the public SSNE tensor API does not expose, so fail
-        // closed instead of interpreting bytes as logits.
-        return false;
-    }
-    return true;
+    std::memset(blocked_latched_, 0, sizeof(blocked_latched_));
+    std::memset(blocked_clear_count_, 0, sizeof(blocked_clear_count_));
 }
 
 void SurfaceSegmenter::MajorityFilter(
@@ -298,10 +143,16 @@ SurfaceCorridor SurfaceSegmenter::BuildCorridor(const CorridorStats& stats)
     corridor.blocked_ratio = stats.counts[BLOCKED_SURFACE] * inv;
     corridor.step_ratio = stats.counts[STEP_OR_DROP] * inv;
     corridor.unknown_ratio = stats.counts[UNKNOWN_OTHER] * inv;
-    corridor.persistent_hazard = corridor.step_ratio >= 0.02f &&
+    // A full-corridor STEP mask is a known failure mode on dark or repetitive
+    // indoor textures.  Segmentation alone may only nominate a bounded,
+    // connected step region; a larger region needs edge/depth corroboration.
+    corridor.persistent_hazard = corridor.step_ratio >= 0.03f &&
+                                 corridor.step_ratio <= 0.55f &&
                                  stats.largest_components[STEP_OR_DROP] >= 12;
-    corridor.safe_candidate = corridor.ground_ratio >= 0.55f &&
-        corridor.blocked_ratio < 0.35f && corridor.step_ratio < 0.02f &&
+    corridor.blocked_persistent = corridor.blocked_ratio >= 0.40f &&
+                                  stats.largest_components[BLOCKED_SURFACE] >= 12;
+    corridor.safe_candidate = corridor.ground_ratio >= 0.60f &&
+        corridor.blocked_ratio < 0.25f && corridor.step_ratio < 0.02f &&
         corridor.unknown_ratio < kUnknownMaxRatio;
     return corridor;
 }
@@ -310,12 +161,19 @@ void SurfaceSegmenter::UpdateTemporalState(const std::array<SurfaceCorridor, 3>&
                                             std::array<SurfaceCorridor, 3>* stable)
 {
     history_.push_back(current);
-    while (history_.size() > 3) history_.pop_front();
+    while (history_.size() > 5) history_.pop_front();
     *stable = current;
     for (int corridor = 0; corridor < 3; ++corridor) {
-        int votes = 0;
-        for (const auto& item : history_) if (item[corridor].persistent_hazard) ++votes;
-        if (!hazard_latched_[corridor] && history_.size() >= 2 && votes >= 2) {
+        int step_votes = 0;
+        int blocked_votes = 0;
+        int safe_votes = 0;
+        const size_t step_begin = history_.size() > 4U ? history_.size() - 4U : 0U;
+        for (size_t i = 0; i < history_.size(); ++i) {
+            if (i >= step_begin && history_[i][corridor].persistent_hazard) ++step_votes;
+            if (i >= step_begin && history_[i][corridor].blocked_persistent) ++blocked_votes;
+            if (history_[i][corridor].safe_candidate) ++safe_votes;
+        }
+        if (!hazard_latched_[corridor] && history_.size() >= 4U && step_votes >= 3) {
             hazard_latched_[corridor] = true;
             hazard_clear_count_[corridor] = 0;
         } else if (hazard_latched_[corridor]) {
@@ -325,8 +183,22 @@ void SurfaceSegmenter::UpdateTemporalState(const std::array<SurfaceCorridor, 3>&
                 hazard_clear_count_[corridor] = 0;
             }
         }
+        if (!blocked_latched_[corridor] && history_.size() >= 4U && blocked_votes >= 3) {
+            blocked_latched_[corridor] = true;
+            blocked_clear_count_[corridor] = 0;
+        } else if (blocked_latched_[corridor]) {
+            if (current[corridor].blocked_persistent) blocked_clear_count_[corridor] = 0;
+            else if (++blocked_clear_count_[corridor] >= 4) {
+                blocked_latched_[corridor] = false;
+                blocked_clear_count_[corridor] = 0;
+            }
+        }
         (*stable)[corridor].persistent_hazard = hazard_latched_[corridor];
-        if (hazard_latched_[corridor]) (*stable)[corridor].safe_candidate = false;
+        (*stable)[corridor].blocked_persistent = blocked_latched_[corridor];
+        // CLEAR/PATH is deliberately slower than hazard onset.  Three of five
+        // lower-ROI observations must agree and no hazard latch may remain.
+        (*stable)[corridor].safe_candidate = history_.size() >= 5U && safe_votes >= 3 &&
+            !hazard_latched_[corridor] && !blocked_latched_[corridor];
     }
 }
 
@@ -530,7 +402,7 @@ bool SurfaceSegmenter::PostprocessLogits(
     DecodeDepth(depth_logits, hwc_layout, filtered, result);
     int primary = -1;
     for (int candidate : {1, 0, 2}) {
-        if (stable[candidate].persistent_hazard || stable[candidate].blocked_ratio >= 0.35f) {
+        if (stable[candidate].persistent_hazard || stable[candidate].blocked_persistent) {
             primary = candidate; break;
         }
     }
@@ -550,7 +422,7 @@ bool SurfaceSegmenter::PostprocessLogits(
         result->proximity = result->depth_level;
     }
     if ((result->primary_hazard == "unknown_other" || result->primary_hazard == "unknown") &&
-        !result->center.persistent_hazard && result->center.blocked_ratio < 0.35f) {
+        !result->center.persistent_hazard && !result->center.blocked_persistent) {
         // A semantic UNKNOWN region must not be paired with a confident FAR
         // label in Aurora or speech.  The raw probabilities remain in the
         // diagnostic fields for later threshold tuning.
@@ -562,68 +434,130 @@ bool SurfaceSegmenter::PostprocessLogits(
     return true;
 }
 
-bool SurfaceSegmenter::Predict(ssne_tensor_t* image, SurfaceResult* result)
+void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
+                                       bool hwc_layout,
+                                       SurfaceResult* result)
 {
-    if (!available_ || result == NULL) return false;
-    const auto elapsed = [](const std::chrono::steady_clock::time_point& start) {
-        return std::chrono::duration_cast<std::chrono::duration<float, std::milli> >(
-            std::chrono::steady_clock::now() - start).count();
-    };
-    auto start = std::chrono::steady_clock::now();
-    if (!Preprocess(image)) return false;
-    last_timing_.preprocess_ms = elapsed(start);
-    start = std::chrono::steady_clock::now();
-    if (ssne_inference(model_id_, 1, &input_) != 0) return false;
-    last_timing_.inference_ms = elapsed(start);
-    start = std::chrono::steady_clock::now();
-    if (ssne_getoutput(model_id_, 2, outputs_) != 0) return false;
-    output_created_[0] = get_data(outputs_[0]) != NULL;
-    output_created_[1] = get_data(outputs_[1]) != NULL;
-    last_timing_.output_ms = elapsed(start);
-    bool hwc = true;
-    if (!BindOutputs(&hwc)) return false;
-    if (!output_contract_logged_) {
-        std::cout << "[SURFACE_DEPTH][CONTRACT] seg_index=" << seg_output_index_
-                  << " seg_dtype=" << dtype_name(get_data_type(outputs_[seg_output_index_]))
-                  << " seg_elements=" << tensor_elements(outputs_[seg_output_index_])
-                  << " seg_scale=" << kSegOutputScale
-                  << " depth_index=" << depth_output_index_
-                  << " depth_dtype=" << dtype_name(get_data_type(outputs_[depth_output_index_]))
-                  << " depth_elements=" << tensor_elements(outputs_[depth_output_index_])
-                  << " depth_scale=" << kDepthOutputScale
-                  << " layout=" << (hwc ? "HWC" : "CHW")
-                  << std::endl;
-        output_contract_logged_ = true;
+    if (scene_logits == NULL || result == NULL) return;
+    std::array<float, SURFACE_GRID_SIZE> row_scores{};
+    int evidence_cells = 0;
+    int corridor_cells = 0;
+    for (int y = kGrid / 5; y < kGrid; ++y) {
+        float row_sum = 0.0f;
+        int row_count = 0;
+        for (int x = 0; x < kGrid; ++x) {
+            if (!CellInCorridor(x, y, 1)) continue;
+            const size_t index = hwc_layout
+                ? static_cast<size_t>((y * kGrid + x) * UNIFIED_SCENE_CHANNELS + STAIR_EDGE_CHANNEL)
+                : static_cast<size_t>(STAIR_EDGE_CHANNEL * kGridCells + y * kGrid + x);
+            const float logit = scene_logits[index];
+            const float probability = 1.0f / (1.0f + std::exp(-std::max(-20.0f, std::min(20.0f, logit))));
+            row_sum += probability;
+            ++row_count;
+            ++corridor_cells;
+            if (probability >= 0.50f) ++evidence_cells;
+        }
+        row_scores[y] = row_count > 0 ? row_sum / static_cast<float>(row_count) : 0.0f;
     }
-    std::vector<float> seg, depth;
-    if (!ReadOutputLogits(outputs_[seg_output_index_], kClasses, kSegOutputScale, &seg) ||
-        !ReadOutputLogits(outputs_[depth_output_index_], kDepthBins, kDepthOutputScale, &depth)) {
-        std::cout << "[SURFACE_DEPTH][ERROR] unsupported output dtype or quantization contract"
-                  << std::endl;
-        return false;
+    result->stair_edge_score = corridor_cells > 0
+        ? static_cast<float>(evidence_cells) / static_cast<float>(corridor_cells) : 0.0f;
+
+    for (int selected = 0; selected < 2; ++selected) {
+        int best_row = -1;
+        float best_score = 0.08f;
+        for (int y = kGrid / 5; y < kGrid; ++y) {
+            if (result->stair_edge_rows[0] >= 0 &&
+                std::abs(y - result->stair_edge_rows[0]) < 3) continue;
+            if (row_scores[y] > best_score) {
+                best_score = row_scores[y];
+                best_row = y;
+            }
+        }
+        if (best_row >= 0) {
+            result->stair_edge_rows[result->stair_edge_count++] = best_row;
+        }
     }
-    start = std::chrono::steady_clock::now();
-    const bool ok = PostprocessLogits(seg.data(), seg.size(), depth.data(), depth.size(),
-                                      hwc, monotonic_ms(), result);
-    last_timing_.postprocess_ms = elapsed(start);
-    return ok;
+
+    float upper_depth = 0.0f;
+    float lower_depth = 0.0f;
+    int upper_count = 0;
+    int lower_count = 0;
+    if (result->stair_edge_count > 0) {
+        const int row = result->stair_edge_rows[0];
+        for (int y = std::max(0, row - 2); y <= std::min(kGrid - 1, row + 2); ++y) {
+            for (int x = 0; x < kGrid; ++x) {
+                if (!CellInCorridor(x, y, 1)) continue;
+                const float value = result->depth_m[y * kGrid + x];
+                if (!(value > 0.0f) || !std::isfinite(value)) continue;
+                if (y < row) { upper_depth += value; ++upper_count; }
+                if (y > row) { lower_depth += value; ++lower_count; }
+            }
+        }
+    }
+    const float depth_bins = (upper_count > 0 && lower_count > 0)
+        ? std::fabs(std::log((upper_depth / upper_count) / (lower_depth / lower_count))) /
+              std::log(kDepthMaxM / kDepthMinM) * kDepthBins
+        : 0.0f;
+    const bool bounded_step_region = result->center.step_ratio >= 0.03f &&
+                                     result->center.step_ratio <= 0.55f;
+    const bool current_candidate =
+        (bounded_step_region && result->stair_edge_score >= 0.08f) ||
+        (result->stair_edge_score >= 0.12f && depth_bins >= 1.5f);
+    stair_edge_history_.push_back(current_candidate);
+    while (stair_edge_history_.size() > 3U) stair_edge_history_.pop_front();
+    int hits = 0;
+    for (bool value : stair_edge_history_) if (value) ++hits;
+    result->stair_edge_persistent = stair_edge_history_.size() == 3U && hits >= 2;
+    if (result->stair_edge_persistent) {
+        result->center.persistent_hazard = true;
+        result->center.safe_candidate = false;
+        result->primary_hazard = "step_or_drop";
+        result->primary_sector = "center";
+        result->proximity = result->depth_level;
+    }
 }
 
-void SurfaceSegmenter::Release()
+bool SurfaceSegmenter::PostprocessPackedLogits(const float* scene_logits,
+                                               size_t scene_count,
+                                               bool hwc_layout,
+                                               int64_t timestamp_ms,
+                                               SurfaceResult* result)
 {
-    if (input_created_) { release_tensor(input_); input_created_ = false; }
-    for (int i = 0; i < 2; ++i) if (output_created_[i]) {
-        release_tensor(outputs_[i]); output_created_[i] = false;
+    if (scene_logits == NULL || result == NULL ||
+        scene_count != static_cast<size_t>(kGridCells * UNIFIED_SCENE_CHANNELS)) {
+        return false;
     }
-    if (preprocess_pipe_ != NULL) {
-        ReleaseAIPreprocessPipe(preprocess_pipe_); preprocess_pipe_ = NULL;
+    std::vector<float> seg(static_cast<size_t>(kGridCells * kClasses));
+    std::vector<float> depth(static_cast<size_t>(kGridCells * kDepthBins));
+    for (int y = 0; y < kGrid; ++y) {
+        for (int x = 0; x < kGrid; ++x) {
+            for (int channel = 0; channel < kClasses; ++channel) {
+                const size_t source = hwc_layout
+                    ? static_cast<size_t>((y * kGrid + x) * UNIFIED_SCENE_CHANNELS + channel)
+                    : static_cast<size_t>(channel * kGridCells + y * kGrid + x);
+                const size_t target = hwc_layout
+                    ? static_cast<size_t>((y * kGrid + x) * kClasses + channel)
+                    : static_cast<size_t>(channel * kGridCells + y * kGrid + x);
+                seg[target] = scene_logits[source];
+            }
+            for (int bin = 0; bin < kDepthBins; ++bin) {
+                const int channel = kClasses + bin;
+                const size_t source = hwc_layout
+                    ? static_cast<size_t>((y * kGrid + x) * UNIFIED_SCENE_CHANNELS + channel)
+                    : static_cast<size_t>(channel * kGridCells + y * kGrid + x);
+                const size_t target = hwc_layout
+                    ? static_cast<size_t>((y * kGrid + x) * kDepthBins + bin)
+                    : static_cast<size_t>(bin * kGridCells + y * kGrid + x);
+                depth[target] = scene_logits[source];
+            }
+        }
     }
-    available_ = false;
-    output_contract_logged_ = false;
-    history_.clear();
-    center_depth_history_.clear();
-    center_depth_level_history_.clear();
-    stable_depth_level_ = "unknown";
+    if (!PostprocessLogits(seg.data(), seg.size(), depth.data(), depth.size(),
+                           hwc_layout, timestamp_ms, result)) {
+        return false;
+    }
+    DecodeStairEdge(scene_logits, hwc_layout, result);
+    return true;
 }
 
 }  // namespace obstacle

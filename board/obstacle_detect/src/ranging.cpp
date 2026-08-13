@@ -121,7 +121,7 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
      * 一致时才可视为脚点。上半身、腿部或人脸框的 visible_fraction 明显偏小，
      * 此时跳过地面测距，转交部分人体尺寸先验，避免得到虚假的 FAR。
      */
-    if (item.raw_class_id == 3) {
+    if (item.class_id == semantic::PERSON) {
         const float expected_full_height = fy_ * 1.70f / std::max(0.20f, z);
         const float visible_fraction = box_height(item) /
             std::max(1.0f, expected_full_height);
@@ -184,6 +184,16 @@ bool RangingEstimator::SizePrior(int raw_class_id, float* size_m, float* relativ
             default: return false;
         }
     }
+    if (semantic::ModelClassCount() == 8) {
+        switch (raw_class_id) {
+            case 0: *size_m = 1.70f; *relative_sigma = 0.28f; return true;
+            case 1: *size_m = 0.85f; *relative_sigma = 0.30f; return true;
+            case 2: *size_m = 0.75f; *relative_sigma = 0.28f; return true;
+            case 6: *size_m = 0.80f; *relative_sigma = 0.35f; return true;
+            case 7: *size_m = 0.80f; *relative_sigma = 0.35f; return true;
+            default: return false;
+        }
+    }
     return false;
 }
 
@@ -211,6 +221,9 @@ RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionIt
         }
 
         if (visible_fraction < 0.52f) {
+            // Indoor8 is explicitly trained on partial people. Their visible
+            // height/width is not a stable metric prior; use learned depth only.
+            if (semantic::ModelClassCount() == 8) return out;
             /*
              * 方形区域更接近头部，较窄高框更接近躯干/腿部。宽度先验仅用于
              * 部分人体，并赋予 35%~45% 的较大不确定度；规划最终使用 mean-sigma。
@@ -266,6 +279,10 @@ float RangingEstimator::NearFieldUpperBound(const DetectionItem& item) const
     }
     const int person_raw_id = semantic::ModelClassCount() == 25 ? 3 : 0;
     if (item.raw_class_id == person_raw_id) {
+        // Indoor8 is trained on incomplete people. A box that may contain only
+        // a head, torso or legs has no reliable metric extent; use packed
+        // learned-depth evidence instead of a hard centimetre-scale cap.
+        if (semantic::ModelClassCount() == 8) return -1.0f;
         const float aspect = box_width(item) / box_height(item);
         const bool head_like = bottom < 0.78f && aspect > 0.55f && aspect < 1.65f;
         if (head_like && wr > 0.30f) return 0.70f;

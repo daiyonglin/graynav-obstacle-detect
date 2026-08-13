@@ -416,8 +416,9 @@ void ObstacleTracker::UpdateTrack(Track* track,
     if (track == NULL) return;
     DetectionItem effective_detection = detection;
     if (IsPersonPartBridge(*track, detection)) {
-        effective_detection.raw_class_id = 3;
-        effective_detection.raw_label = semantic::RawLabel(3);
+        const int person_raw_id = semantic::ModelClassCount() == 25 ? 3 : 0;
+        effective_detection.raw_class_id = person_raw_id;
+        effective_detection.raw_label = semantic::RawLabel(person_raw_id);
         effective_detection.class_id = semantic::PERSON;
         effective_detection.label = semantic::SemanticLabel(semantic::PERSON);
         effective_detection.semantic_class = effective_detection.label;
@@ -573,10 +574,9 @@ void ObstacleTracker::Update(const DetectionResult& raw_result, int frame_id)
 void ObstacleTracker::PredictOnly(int frame_id, int64_t timestamp_ms)
 {
     /*
-     * A segmentation slot is deliberately not an empty detector frame.  Keep
-     * the last boxes and range state alive, age them by wall-clock time only,
-     * and leave the last detector/planner decision unchanged.  This prevents
-     * D/D/D/S scheduling from manufacturing a one-frame obstacle disappearance.
+     * A failed unified inference is not an empty scene. Keep the last boxes
+     * alive briefly for display continuity, but the caller separately forces
+     * AI_FAIL and never reuses stale scene/depth evidence for navigation.
      */
     if (timestamp_ms <= 0) timestamp_ms = static_cast<int64_t>(frame_id) * 67;
     for (size_t i = 0; i < tracks_.size(); ++i) {

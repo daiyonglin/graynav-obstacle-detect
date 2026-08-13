@@ -108,8 +108,8 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     const bool center_safe = IsSafe(surface.center);
     const bool right_safe = IsSafe(surface.right);
     const bool center_drop = surface.center.persistent_hazard &&
-                             surface.center.step_ratio >= 0.02f;
-    const bool center_blocked = surface.center.blocked_ratio >= 0.35f;
+        (surface.center.step_ratio >= 0.03f || surface.stair_edge_persistent);
+    const bool center_blocked = surface.center.blocked_persistent;
     const bool center_unknown = !center_drop && !center_blocked &&
         (surface.center.unknown_ratio >= 0.30f || !center_safe);
     const bool near_surface = surface.depth_level == "near";
@@ -212,6 +212,11 @@ bool DepthRangeFusion::IsReliableAnchor(const DetectionItem& item) const
     if (semantic::ModelClassCount() == 25) {
         return item.raw_class_id == 3 || item.raw_class_id == 17 ||
                item.raw_class_id == 23;
+    }
+    if (semantic::ModelClassCount() == 8) {
+        return item.raw_class_id == 0 || item.raw_class_id == 1 ||
+               item.raw_class_id == 2 || item.raw_class_id == 6 ||
+               item.raw_class_id == 7;
     }
     return false;
 }

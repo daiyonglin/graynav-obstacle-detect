@@ -8,9 +8,8 @@ namespace semantic {
 /**
  * @brief 板端避障语义层。
  *
- * 模型保留 ROD25 的 25 个原始类别以维持训练/导出一致性；决策层再把这些类别
- * 映射为 8 类导航语义。这样既能在日志中追溯 raw_label，又能用统一风险权重、
- * 显示名称和阈值处理功能相近的障碍物。
+ * 当前统一模型直接输出固定 Indoor8 顺序；决策层再映射为 8 类导航语义。
+ * 旧 ROD25/COCO80 分支仅保留为历史兼容代码，不进入新镜像。
  */
 enum SemanticClass {
     PERSON = 0,
@@ -27,7 +26,7 @@ enum SemanticClass {
 /** 当前部署模型分类头通道数，来自 CMake 编译宏，必须与 m1model 一致。 */
 int ModelClassCount();
 
-/** 判断 raw class 是否允许进入后处理；ROD25 的 road 在此统一屏蔽。 */
+/** 判断 raw class 是否允许进入后处理；Indoor8 的 0..7 全部有效。 */
 bool IsSupportedRawClass(int raw_class_id);
 
 /** 把模型原始类别映射到 8 类导航语义，不改变 raw_label。 */

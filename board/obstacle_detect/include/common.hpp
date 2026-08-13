@@ -30,10 +30,10 @@ struct DetectionItem {
     std::array<float, 4> box;  // [xmin,ymin,xmax,ymax]，完整传感器画面坐标。
     float score;               // sigmoid 后的模型分类置信度。
     int class_id;              // 导航语义类别，定义见 semantic_config.hpp。
-    int raw_class_id;          // ROD25 检测头的原始类别编号。
+    int raw_class_id;          // 当前模型检测头的原始类别编号（统一模型为 Indoor8）。
     std::string label;         // 对外显示的稳定语义名称。
     std::string semantic_class;// 与 label 同域，供 JSON/串口接口使用。
-    std::string raw_label;     // ROD25 原始类别名，便于诊断误分类。
+    std::string raw_label;     // 当前模型原始类别名，便于诊断误分类。
     float risk_weight;         // 类别风险权重，参与候选排序和规划。
     std::string sector;        // left/center/right/交叠区/wide。
     float distance_m;          // 融合后的期望距离；负值表示无可靠米级结果。
@@ -116,9 +116,12 @@ enum SurfaceClass {
     SURFACE_CLASS_COUNT = 4
 };
 
-static const int SURFACE_GRID_SIZE = 64;
+// The unified model emits scene_logits on its P3 grid: 384 / 8 = 48.
+static const int SURFACE_GRID_SIZE = 48;
 static const int SURFACE_GRID_CELLS = SURFACE_GRID_SIZE * SURFACE_GRID_SIZE;
 static const int DEPTH_BIN_COUNT = 16;
+static const int UNIFIED_SCENE_CHANNELS = SURFACE_CLASS_COUNT + DEPTH_BIN_COUNT + 1;
+static const int STAIR_EDGE_CHANNEL = UNIFIED_SCENE_CHANNELS - 1;
 
 /** @brief 分割网格投影到单条导航走廊后的面积比例和稳定风险。 */
 struct SurfaceCorridor {
@@ -128,6 +131,7 @@ struct SurfaceCorridor {
     float unknown_ratio;
     bool safe_candidate;
     bool persistent_hazard;
+    bool blocked_persistent;
 
     SurfaceCorridor()
         : ground_ratio(0.0f),
@@ -135,7 +139,8 @@ struct SurfaceCorridor {
           step_ratio(0.0f),
           unknown_ratio(0.0f),
           safe_candidate(false),
-          persistent_hazard(false) {}
+          persistent_hazard(false),
+          blocked_persistent(false) {}
 };
 
 /** @brief 一次分割推理经过多数滤波、走廊统计和时序投票后的道路风险。 */
@@ -159,6 +164,10 @@ struct SurfaceResult {
     std::string depth_source;
     bool depth_consistent;
     bool approaching;
+    float stair_edge_score;
+    std::array<int, 2> stair_edge_rows;
+    int stair_edge_count;
+    bool stair_edge_persistent;
     float center_depth_m;  // 内部融合使用，不对 Aurora/语音显示米数。
     std::array<uint8_t, SURFACE_GRID_CELLS> labels;
     std::array<float, SURFACE_GRID_CELLS> depth_m;
@@ -181,6 +190,10 @@ struct SurfaceResult {
           depth_source("unknown"),
           depth_consistent(false),
           approaching(false),
+          stair_edge_score(0.0f),
+          stair_edge_rows{-1, -1},
+          stair_edge_count(0),
+          stair_edge_persistent(false),
           center_depth_m(-1.0f),
           labels{},
           depth_m{},
@@ -212,6 +225,12 @@ struct AvoidanceDecision {
     std::string depth_source;
     bool depth_consistent;
     bool approaching;
+    std::string cause;
+    std::string range;
+    std::string object_label;
+    std::string scene_label;
+    float confidence;
+    bool ai_ok;
 
     AvoidanceDecision()
         : action("clear"),
@@ -228,7 +247,13 @@ struct AvoidanceDecision {
           depth_ambiguous(true),
           depth_source("unknown"),
           depth_consistent(false),
-          approaching(false) {
+          approaching(false),
+          cause("NONE"),
+          range("UNKNOWN"),
+          object_label("NONE"),
+          scene_label("UNKNOWN"),
+          confidence(0.0f),
+          ai_ok(true) {
         left.dir = "left";
         center.dir = "center";
         right.dir = "right";
@@ -282,6 +307,26 @@ struct DetectionResult {
     size_t Size() const {
         return items.size();
     }
+};
+
+/** One invocation of the unified network: detections and packed scene evidence. */
+struct UnifiedPerceptionResult {
+    DetectionResult detections;
+    SurfaceResult surface;
+    float stair_edge_score;
+    std::array<int, 2> stair_edge_rows;
+    std::string depth_level;
+    int64_t timestamp_ms;
+    bool valid;
+    bool degraded;
+
+    UnifiedPerceptionResult()
+        : stair_edge_score(0.0f),
+          stair_edge_rows{-1, -1},
+          depth_level("unknown"),
+          timestamp_ms(0),
+          valid(false),
+          degraded(true) {}
 };
 
 /** @brief ROI 等比例缩放到模型输入时的 scale 与 padding。 */
@@ -346,29 +391,33 @@ private:
 
 
 /**
- * @brief YOLOv8 head6 障碍检测器
+ * @brief 单模型 Indoor8 检测与 packed scene 感知器
  *
  * 输入：
  *   SC132GS 原始整幅灰度图，当前模型编译为真实 1 通道输入。
  *
  * 内部流程：
  *   1. AI preprocess pipe:
- *      - 奇偶帧选择上/下重叠 ROI；
+ *      - LOWER、LOWER、UPPER 三帧循环选择重叠 ROI；
  *      - 等比例 letterbox 到 384x384；
  *      - 需要时执行自适应灰度 LUT；
  *      - normalize 参数由 .m1model 的输入量化配置提供。
  *   2. NPU 推理：
- *      - B3 Gray1-DCE m1model，输出 6 个 raw branch。
+ *      - 一个统一 m1model，一次输出 6 个检测 raw branch 和 1 个 scene21 branch。
  *   3. CPU 后处理：
  *      - 自动识别输出分支顺序
- *      - 校验 3 个 25 通道分类头和 3 个 64 通道 DFL 回归头；
+ *      - 校验 3 个 8 通道分类头、3 个 64 通道 DFL 回归头和 scene21；
  *      - 依据 runtime layout 以 HWC/CHW 正确读取量化输出；
  *      - top-1 分类、sigmoid、DFL、anchor 解码和多目标 NMS；
  *      - 过滤饱和横框/粗框并映射回完整 Aurora 坐标。
  */
+namespace obstacle { class SurfaceSegmenter; }
+
 class YOLOV8GRAY {
 public:
-    std::string ModelName() const { return "yolov8_gray_head6"; }
+    YOLOV8GRAY();
+    ~YOLOV8GRAY();
+    std::string ModelName() const { return "graynav_unified_indoor8_scene21"; }
 
     void Initialize(std::string& model_path,
                     std::array<int, 2>* in_img_shape,
@@ -376,7 +425,8 @@ public:
 
     bool Predict(ssne_tensor_t* img_in,
                  DetectionResult* result,
-                 float conf_threshold = 0.35f);
+                 float conf_threshold = 0.35f,
+                 SurfaceResult* surface_result = NULL);
 
     void Release();
 
@@ -397,7 +447,7 @@ public:
 private:
     uint16_t model_id = 0;
     ssne_tensor_t inputs[1] = {};
-    ssne_tensor_t outputs[6] = {};
+    ssne_tensor_t outputs[7] = {};
 
     AiPreprocessPipe pipe_offline_[2] = {nullptr, nullptr};
     LetterboxInfo lb_info_[2];
@@ -408,6 +458,7 @@ private:
     DetectorTiming last_timing_;
 
     std::vector<std::string> class_names_;
+    obstacle::SurfaceSegmenter* scene_postprocessor_ = NULL;
 
 private:
     /** 从模型类别契约建立原始标签表。 */
@@ -416,12 +467,15 @@ private:
     /** 选择当前 ROI，并完成 crop、letterbox、normalize 和可选暗光增强。 */
     bool Preprocess(ssne_tensor_t* img_in, ssne_tensor_t* input_tensor);
 
-    /** 校验并解码 6 个 raw head，输出已经反映射到全图坐标的检测结果。 */
+    /** 校验并解码 6 个检测 raw head，输出映射到全图坐标的检测结果。 */
     bool Postprocess(DetectionResult* result, float conf_threshold);
+
+    /** Decode the packed 4+16+1 scene tensor produced with the detector heads. */
+    bool PostprocessScene(SurfaceResult* result, int64_t timestamp_ms);
 
     /** 将 384 模型坐标去 padding/scale 后加 ROI 原点，恢复为 Aurora 坐标。 */
     void MapBoxToOriginalImage(std::array<float, 4>& box);
 
-    /** 返回 ROD25 原始类别名；越界编号返回 unknown。 */
+    /** 返回 Indoor8 原始类别名；越界编号返回 unknown。 */
     std::string ClassIdToLabel(int class_id) const;
 };

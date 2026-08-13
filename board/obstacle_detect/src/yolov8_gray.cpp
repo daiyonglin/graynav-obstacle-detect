@@ -1,5 +1,6 @@
 #include "../include/utils.hpp"
 #include "../include/semantic_config.hpp"
+#include "../include/surface_segmentation.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -411,6 +412,9 @@ float distance_confidence_for_source(const std::array<float, 4>& box,
 // 只有通过时序稳定和几何质量检查后，才允许作为 generic_obstacle 证据。
 bool is_indoor_rigid_raw_class(int raw_cls)
 {
+    if (obstacle::semantic::ModelClassCount() == 8) {
+        return raw_cls == 1 || raw_cls == 2 || raw_cls == 6 || raw_cls == 7;
+    }
     if (obstacle::semantic::ModelClassCount() != 25) return false;
     return raw_cls == 9 ||   // dustbin / box-like container
            raw_cls == 17 ||  // bench / table-like furniture
@@ -715,7 +719,7 @@ bool infer_float_branch_shape(uint32_t raw_total,
 
     if (raw_total % hw == 0) {
         const uint32_t c = raw_total / hw;
-        if (c == NUM_CLASSES || c == REG_CHANNELS) {
+        if (c == NUM_CLASSES || c == REG_CHANNELS || c == UNIFIED_SCENE_CHANNELS) {
             *element_count = raw_total;
             *channels = static_cast<int>(c);
             return true;
@@ -726,7 +730,7 @@ bool infer_float_branch_shape(uint32_t raw_total,
     const uint32_t hw_bytes = hw * bytes_per_float;
     if (hw_bytes != 0 && raw_total % hw_bytes == 0) {
         const uint32_t c = raw_total / hw_bytes;
-        if (c == NUM_CLASSES || c == REG_CHANNELS) {
+        if (c == NUM_CLASSES || c == REG_CHANNELS || c == UNIFIED_SCENE_CHANNELS) {
             *element_count = raw_total / bytes_per_float;
             *channels = static_cast<int>(c);
             return true;
@@ -858,6 +862,33 @@ bool validate_paired_heads(const std::vector<BranchView>& cls_branches,
     return true;
 }
 
+bool validate_unified_output_order(const ssne_tensor_t* tensors,
+                                   int det_width)
+{
+    const int expected_channels[7] = {
+        NUM_CLASSES, REG_CHANNELS,
+        NUM_CLASSES, REG_CHANNELS,
+        NUM_CLASSES, REG_CHANNELS,
+        UNIFIED_SCENE_CHANNELS
+    };
+    const int expected_grids[7] = {48, 48, 24, 24, 12, 12, SURFACE_GRID_SIZE};
+    for (int i = 0; i < 7; ++i) {
+        BranchView branch;
+        if (!make_branch_view(tensors[i], i, det_width, &branch) ||
+            branch.c != expected_channels[i] ||
+            branch.w != expected_grids[i] || branch.h != expected_grids[i]) {
+            std::cout << "[UNIFIED][ERROR] output order/shape mismatch out=" << i
+                      << " expected=" << expected_grids[i] << "x"
+                      << expected_grids[i] << "x" << expected_channels[i]
+                      << " actual=" << branch.w << "x" << branch.h
+                      << "x" << branch.c << " elements=" << branch.element_count
+                      << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 bool box_center_inside(const std::array<float, 4>& inner,
                        const std::array<float, 4>& outer)
 {
@@ -930,13 +961,24 @@ int suppress_coarse_obstacle_boxes(DetectionResult* result, int img_w, int img_h
 
 } // namespace
 
+YOLOV8GRAY::YOLOV8GRAY()
+    : scene_postprocessor_(new obstacle::SurfaceSegmenter())
+{
+}
+
+YOLOV8GRAY::~YOLOV8GRAY()
+{
+    delete scene_postprocessor_;
+    scene_postprocessor_ = NULL;
+}
+
 void YOLOV8GRAY::BuildClassNames()
 {
     if (NUM_CLASSES == obstacle::semantic::NUM_SEMANTIC_CLASSES) {
-        class_names_.clear();
-        for (int i = 0; i < obstacle::semantic::NUM_SEMANTIC_CLASSES; ++i) {
-            class_names_.push_back(obstacle::semantic::SemanticLabel(i));
-        }
+        class_names_ = {
+            "person", "chair", "dining_table", "backpack",
+            "handbag", "suitcase", "couch", "bench"
+        };
         return;
     }
 
@@ -1033,7 +1075,7 @@ void YOLOV8GRAY::Initialize(std::string& model_path,
                               dynamic_alloc ? SSNE_DYNAMIC_ALLOC : SSNE_STATIC_ALLOC);
     std::cout << "[YOLOV8GRAY][INFO] model_id=" << model_id
               << " alloc=" << (dynamic_alloc ? "dynamic" : "static")
-              << " input_count=1 output_count=6" << std::endl;
+              << " input_count=1 output_count=7" << std::endl;
 
     int mean[3] = {0, 0, 0};
     int stdv[3] = {0, 0, 0};
@@ -1155,7 +1197,7 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
     static bool meta_printed = false;
     bool invalid_output = false;
 
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         BranchView b;
         const bool ok = make_branch_view(outputs[i], i, det_shape[0], &b);
 
@@ -1514,9 +1556,53 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
     return true;
 }
 
+bool YOLOV8GRAY::PostprocessScene(SurfaceResult* result, int64_t timestamp_ms)
+{
+    if (result == NULL || scene_postprocessor_ == NULL) return false;
+    BranchView scene;
+    int matches = 0;
+    for (int i = 0; i < 7; ++i) {
+        BranchView candidate;
+        if (!make_branch_view(outputs[i], i, det_shape[0], &candidate)) continue;
+        if (candidate.c == UNIFIED_SCENE_CHANNELS &&
+            candidate.w == SURFACE_GRID_SIZE && candidate.h == SURFACE_GRID_SIZE) {
+            scene = candidate;
+            ++matches;
+        }
+    }
+    if (matches != 1 || scene.data == NULL ||
+        scene.element_count != static_cast<uint32_t>(
+            SURFACE_GRID_CELLS * UNIFIED_SCENE_CHANNELS)) {
+        std::cout << "[UNIFIED][ERROR] scene output contract mismatch matches="
+                  << matches << " expected=1x" << UNIFIED_SCENE_CHANNELS
+                  << "x" << SURFACE_GRID_SIZE << "x" << SURFACE_GRID_SIZE
+                  << std::endl;
+        *result = SurfaceResult();
+        result->perception_degraded = true;
+        return false;
+    }
+    static bool logged = false;
+    if (!logged) {
+        std::cout << "[UNIFIED][CONTRACT] scene_out=" << scene.out_idx
+                  << " elements=" << scene.element_count
+                  << " dtype=" << static_cast<int>(scene.dtype)
+                  << " layout=" << (read_model_output_as_hwc() ? "HWC" : "CHW")
+                  << std::endl;
+        logged = true;
+    }
+    const bool ok = scene_postprocessor_->PostprocessPackedLogits(
+        scene.data, scene.element_count, read_model_output_as_hwc(), timestamp_ms, result);
+    if (!ok) {
+        *result = SurfaceResult();
+        result->perception_degraded = true;
+    }
+    return ok;
+}
+
 bool YOLOV8GRAY::Predict(ssne_tensor_t* img_in,
                          DetectionResult* result,
-                         float conf_threshold)
+                         float conf_threshold,
+                         SurfaceResult* surface_result)
 {
     /*
      * 单帧同步推理入口。每次只选择一个 ROI，依次执行预处理、NPU inference、
@@ -1531,7 +1617,8 @@ bool YOLOV8GRAY::Predict(ssne_tensor_t* img_in,
         return std::chrono::duration_cast<std::chrono::duration<float, std::milli> >(
             std::chrono::steady_clock::now() - start).count();
     };
-    active_view_ = dual_roi_ ? (predict_count_ & 1) : 0;
+    // LOWER -> LOWER -> UPPER keeps scene guidance fresh without a second model.
+    active_view_ = dual_roi_ ? ((predict_count_ % 3) == 2 ? 0 : 1) : 0;
     ++predict_count_;
     std::chrono::steady_clock::time_point stage_start = std::chrono::steady_clock::now();
     if (!Preprocess(img_in, &inputs[0])) {
@@ -1549,17 +1636,26 @@ bool YOLOV8GRAY::Predict(ssne_tensor_t* img_in,
     last_timing_.inference_ms = elapsed_ms(stage_start);
 
     stage_start = std::chrono::steady_clock::now();
-    if (ssne_getoutput(model_id, 6, outputs)) {
+    if (ssne_getoutput(model_id, 7, outputs)) {
         std::cout << "[YOLOV8GRAY][ERROR] ssne_getoutput failed" << std::endl;
         result->Clear();
         return false;
     }
     last_timing_.output_ms = elapsed_ms(stage_start);
 
+    if (!validate_unified_output_order(outputs, det_shape[0])) {
+        result->Clear();
+        if (surface_result != NULL) {
+            *surface_result = SurfaceResult();
+            surface_result->perception_degraded = true;
+        }
+        return false;
+    }
+
     static bool dumped_heads = false;
     if (getenv_flag("A1_DUMP_HEADS_ONCE", false) && !dumped_heads) {
         const std::string dump_dir = getenv_string("A1_HEAD_DUMP_PREFIX", "/tmp/yolov8_head");
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 7; ++i) {
             const std::string path = dump_dir + "_out" + std::to_string(i) + ".bin";
             const int save_ret = save_tensor_buffer(outputs[i], path.c_str());
             std::cout << "[YOLOV8GRAY][DEBUG] head dump out=" << i
@@ -1569,13 +1665,22 @@ bool YOLOV8GRAY::Predict(ssne_tensor_t* img_in,
     }
 
     stage_start = std::chrono::steady_clock::now();
-    const bool ok = Postprocess(result, conf_threshold);
+    const int64_t timestamp_ms = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    const bool detection_ok = Postprocess(result, conf_threshold);
+    // Only LOWER advances the stateful road/step history.  Decoding the UPPER
+    // ROI into a scratch result would still mutate SurfaceSegmenter histories
+    // and make road decisions oscillate every third inference.
+    const bool scene_ok = active_view_ == 1
+        ? PostprocessScene(surface_result, timestamp_ms)
+        : true;
+    const bool ok = detection_ok && scene_ok;
+    if (!ok) result->Clear();
     last_timing_.postprocess_ms = elapsed_ms(stage_start);
     result->view_id = active_view_;
     result->roi = roi_[active_view_];
-    result->timestamp_ms = static_cast<int64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
+    result->timestamp_ms = timestamp_ms;
     return ok;
 }
 
@@ -1583,7 +1688,7 @@ void YOLOV8GRAY::Release()
 {
     if (get_data(inputs[0]) != NULL) release_tensor(inputs[0]);
 
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         if (get_data(outputs[i]) != NULL) release_tensor(outputs[i]);
     }
 
