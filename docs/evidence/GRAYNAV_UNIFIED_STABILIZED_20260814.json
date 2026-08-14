@@ -2,9 +2,10 @@
   "artifact_status": "built_pending_board_validation",
   "build_date": "2026-08-14",
   "zimage": {
-    "bytes": 8145744,
-    "sha256": "9C5D03B54A4376480F12DC75679785873CBB8AD50E97EFA883E2CCACE442D02A",
-    "flash_limit_bytes": 15728640
+    "bytes": 8129616,
+    "sha256": "FAF46AF9ECCD371D2DB10CD10D7A83BB28DFC409E6DF1CA926D1AE2F381F3102",
+    "flash_limit_bytes": 15728640,
+    "archive": "E:\\jichuang\\firmware_archive\\GrayNav_Unified_Guidance_20260814_FAF46AF9\\zImage.smartsens-m1-evb"
   },
   "model": {
     "filename": "graynav_unified_indoor8_scene21.m1model",
@@ -13,10 +14,14 @@
     "sha256": "33EEC832710706B1153F468F219C08389A52BA3D21CBDFFCDE32CA5E25D66DA8"
   },
   "hud": {
-    "combined_asset_count": 144,
-    "combined_asset_bytes_in_source": 4084074,
+    "installed_asset_count": 25,
+    "action_asset_count": 5,
+    "navigation_asset_count": 20,
+    "navigation_asset_bytes_in_source": 192448,
+    "object_names_visible": false,
     "layer_0_enabled": false,
-    "layer_3_enabled": false,
+    "layer_3_mode": "stair_geometry_only",
+    "maximum_layer_3_primitives": 3,
     "maximum_detection_boxes": 2
   },
   "runtime_defaults": {
@@ -27,6 +32,7 @@
   },
   "verification": {
     "host_surface_guidance_tests": "pass",
+    "python_demo_contract_tests": "pass",
     "osd_asset_audit": "pass",
     "git_diff_check": "pass",
     "arm_compile_link": "pass",
@@ -36,11 +42,12 @@
   "protected_rollback": {
     "bytes": 8214488,
     "sha256": "A7976710ECB456CB312D18F0195DCAE496ED652EFC582AB698EBC3EB7B055530",
+    "read_only": true,
     "modified": false
   },
   "limitations": [
     "This image has not yet completed Aurora, UART, SYN6288, and 30-minute board validation.",
-    "Relative depth is displayed only as NEAR, MID, FAR, or UNKNOWN.",
+    "The numeric UART distance is an uncalibrated monocular fusion estimate, not centimetre-accurate ground truth.",
     "The image is a flash candidate, not an accepted release."
   ]
 }
