@@ -12,6 +12,7 @@ uint32 value 0x5353424D, so the physical file bytes must be "MBSS".
 from __future__ import annotations
 
 import struct
+import argparse
 from pathlib import Path
 
 
@@ -37,6 +38,8 @@ FONT = {
     "U": ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
     "V": ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
     "W": ["10001", "10001", "10001", "10001", "10101", "11011", "10001"],
+    "X": ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
+    "Y": ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
     "_": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
 }
 
@@ -82,8 +85,64 @@ def write_ssbmp(path: Path, text: str, scale: int, pad_x: int, pad_y: int) -> No
         f.write(data)
 
 
+def write_multiline_ssbmp(
+    path: Path,
+    lines: list[str],
+    scale: int = 5,
+    pad_x: int = 7,
+    pad_y: int = 5,
+    line_gap: int = 5,
+) -> None:
+    rendered = [render_text(line, scale, pad_x, pad_y) for line in lines]
+    width = max(item[0] for item in rendered)
+    height = sum(item[1] for item in rendered) + line_gap * (len(rendered) - 1)
+    data = bytearray([31] * (width * height))
+    y_offset = 0
+    for line_width, line_height, line_data in rendered:
+        x_offset = (width - line_width) // 2
+        for y in range(line_height):
+            src = y * line_width
+            dst = (y_offset + y) * width + x_offset
+            data[dst:dst + line_width] = line_data[src:src + line_width]
+        y_offset += line_height + line_gap
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.write(struct.pack("<I", 0x5353424D))
+        handle.write(struct.pack("<III", width, height, 32))
+        handle.write(data)
+
+
+def generate_info_assets(root: Path) -> int:
+    labels = [
+        "PERSON", "CHAIR", "TABLE", "BAG", "COUCH", "BENCH",
+        "STAIR", "STEP_CHECK", "BLOCKED", "PATH", "UNKNOWN", "AI_FAIL",
+    ]
+    ranges = ["NEAR", "MID", "FAR", "UNKNOWN"]
+    directions = ["LEFT", "FRONT", "RIGHT"]
+    count = 0
+    for label in labels:
+        first_line = "STEP CHECK" if label == "STEP_CHECK" else label.replace("_", " ")
+        for range_name in ranges:
+            for direction in directions:
+                path = root / f"INFO_{label}_{range_name}_{direction}.ssbmp"
+                write_multiline_ssbmp(path, [first_line, f"{range_name} {direction}"])
+                count += 1
+    return count
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--info-only",
+        action="store_true",
+        help="Only generate the new two-line INFO_ assets; preserve legacy files.",
+    )
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / "app_assets" / "osd"
+    if args.info_only:
+        count = generate_info_assets(root)
+        print(f"generated_info_assets={count}")
+        return
     for word in ["STOP", "SLOW", "CLEAR", "LEFT", "RIGHT"]:
         write_ssbmp(root / f"{word}.ssbmp", word, scale=10, pad_x=8, pad_y=6)
 
@@ -98,6 +157,8 @@ def main() -> None:
     for d in dirs:
         for r in risks:
             write_ssbmp(root / f"{d}_{r}.ssbmp", f"{d} {r}", scale=7, pad_x=6, pad_y=5)
+    count = generate_info_assets(root)
+    print(f"generated_info_assets={count}")
 
 
 if __name__ == "__main__":

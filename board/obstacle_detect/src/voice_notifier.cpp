@@ -40,6 +40,7 @@ const uint8_t kPromptObstacleSlow[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xD5,
 const uint8_t kPromptObstacleStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xD5, 0xCF, 0xB0, 0xAD, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
 const uint8_t kPromptStairSlow[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xC2, 0xFD, 0xD0, 0xD0, 0xA1, 0xA3};
 const uint8_t kPromptStairStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
+const uint8_t kPromptPossibleStair[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD2, 0xC9, 0xCB, 0xC6, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xC2, 0xFD, 0xD0, 0xD0, 0xA1, 0xA3};
 
 const std::vector<uint8_t> kFixedClearFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD6, 0xB1, 0xD0, 0xD0, 0x9D};
 const std::vector<uint8_t> kFixedSlowFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xBC, 0xF5, 0xCB, 0xD9, 0xA1};
@@ -864,6 +865,10 @@ std::vector<uint8_t> VoiceNotifier::BuildPromptPayload(const std::string& action
         append_bytes(&payload, kPromptStairSlow, sizeof(kPromptStairSlow));
         return payload;
     }
+    if (action == "possible_stair") {
+        append_bytes(&payload, kPromptPossibleStair, sizeof(kPromptPossibleStair));
+        return payload;
+    }
     if (action == "surface_step") {
         append_bytes(&payload, kPromptSurfaceStep, sizeof(kPromptSurfaceStep));
         return payload;
@@ -933,7 +938,7 @@ std::vector<uint8_t> VoiceNotifier::BuildFixedPromptFrame(const std::string& act
     if (action.compare(0, 8, "surface_") == 0 ||
         action == "person_stop" || action == "obstacle_stop" ||
         action == "obstacle_slow" || action == "stair_stop" ||
-        action == "stair_slow") {
+        action == "stair_slow" || action == "possible_stair") {
         return BuildSyn6288Frame(BuildPromptPayload(action));
     }
     if (action == "stop") {
@@ -1110,8 +1115,10 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
             consecutive_no_rx_ = 0;
             const int latency = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_tx_time_).count());
-            std::cout << "[VOICE] seq=" << transaction_seq_.load()
-                      << " ACK code=0x41 latency_ms=" << latency << std::endl;
+            if (diagnostic_) {
+                std::cout << "[VOICE] seq=" << transaction_seq_.load()
+                          << " ACK code=0x41 latency_ms=" << latency << std::endl;
+            }
         }
         return;
     }
@@ -1165,8 +1172,10 @@ void VoiceNotifier::HandleStatusByte(uint8_t code)
                 in_flight_action_.clear();
                 in_flight_key_.clear();
             }
-            std::cout << "[VOICE] seq=" << transaction_seq_.load()
-                      << " DONE code=0x4F duration_ms=" << duration << std::endl;
+            if (diagnostic_) {
+                std::cout << "[VOICE] seq=" << transaction_seq_.load()
+                          << " DONE code=0x4F duration_ms=" << duration << std::endl;
+            }
         }
         module_state_ = ModuleState::Idle;
         return;
@@ -1218,11 +1227,13 @@ bool VoiceNotifier::StartProtocolSpeech(int frame_id,
         in_flight_action_ = action;
         in_flight_key_ = transaction_key;
     }
-    std::cout << "[VOICE] seq=" << transaction_seq_.load()
-              << (preempt ? " PREEMPT" : " TX")
-              << " frame=" << frame_id
-              << " action=" << action
-              << " bytes=" << frame.size() << std::endl;
+    if (diagnostic_) {
+        std::cout << "[VOICE] seq=" << transaction_seq_.load()
+                  << (preempt ? " PREEMPT" : " TX")
+                  << " frame=" << frame_id
+                  << " action=" << action
+                  << " bytes=" << frame.size() << std::endl;
+    }
     return true;
 }
 
@@ -1326,8 +1337,10 @@ void VoiceNotifier::HandleProtocolTimeouts()
                 in_flight_key_.clear();
             }
             module_state_ = ModuleState::Idle;
-            std::cout << "[VOICE] seq=" << transaction_seq_.load()
-                      << " DONE source=timer duration_ms=" << age << std::endl;
+            if (diagnostic_) {
+                std::cout << "[VOICE] seq=" << transaction_seq_.load()
+                          << " DONE source=timer duration_ms=" << age << std::endl;
+            }
             return;
         }
         if (!status_query_pending_ && age >= play_timeout_ms_) {
@@ -1442,6 +1455,8 @@ void VoiceNotifier::Update(int frame_id,
         surface_degraded_announced_ = true;
     } else if (!decision.perception_degraded && decision.cause == "STAIR") {
         action = decision.action == "stop" ? "stair_stop" : "stair_slow";
+    } else if (!decision.perception_degraded && decision.cause == "STEP_CHECK") {
+        action = "possible_stair";
     } else if (!decision.perception_degraded && decision.cause == "OBJECT") {
         if (decision.object_label == "PERSON" && decision.action == "stop") {
             action = "person_stop";
@@ -1483,7 +1498,7 @@ void VoiceNotifier::Update(int frame_id,
         return;
     }
     std::lock_guard<std::mutex> lock(worker_mutex_);
-    if (frame_id % 300 == 0) {
+    if (diagnostic_ && frame_id % 300 == 0) {
         std::cout << "[VOICE][HEALTH] frame=" << frame_id
                   << " state=" << module_state_name(module_state_.load())
                   << " current=" << (in_flight_key_.empty() ? "none" : in_flight_key_)

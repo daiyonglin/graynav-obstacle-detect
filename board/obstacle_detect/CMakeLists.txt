@@ -35,6 +35,7 @@ set(OBSTACLE_DETECT_SOURCES
     ${PROJECT_SOURCE_DIR}/src/osd-device.cpp
     ${PROJECT_SOURCE_DIR}/src/pipeline_image.cpp
     ${PROJECT_SOURCE_DIR}/src/avoidance_planner.cpp
+    ${PROJECT_SOURCE_DIR}/src/guidance_stabilizer.cpp
     ${PROJECT_SOURCE_DIR}/src/ranging.cpp
     ${PROJECT_SOURCE_DIR}/src/semantic_config.cpp
     ${PROJECT_SOURCE_DIR}/src/surface_fusion.cpp
@@ -56,6 +57,7 @@ add_executable(ssne_ai_demo
 if(A1_BUILD_SURFACE_TESTS)
     add_executable(surface_logic_test
         ${PROJECT_SOURCE_DIR}/tests/test_surface_logic.cpp
+        ${PROJECT_SOURCE_DIR}/src/guidance_stabilizer.cpp
         ${PROJECT_SOURCE_DIR}/src/surface_segmentation.cpp
         ${PROJECT_SOURCE_DIR}/src/surface_fusion.cpp
         ${PROJECT_SOURCE_DIR}/src/semantic_config.cpp
@@ -106,6 +108,13 @@ foreach(A1_HUD_NAME ${A1_HUD_ASSETS})
     install(FILES ${PROJECT_SOURCE_DIR}/app_assets/osd/${A1_HUD_NAME}.ssbmp
             DESTINATION app_assets/osd)
 endforeach()
+file(GLOB A1_HUD_INFO_ASSETS
+    "${PROJECT_SOURCE_DIR}/app_assets/osd/INFO_*.ssbmp")
+list(SORT A1_HUD_INFO_ASSETS)
+if(NOT A1_HUD_INFO_ASSETS)
+    message(FATAL_ERROR "Two-line INFO_ HUD assets are missing; run tools/generate_osd_ssbmp.py --info-only")
+endif()
+install(FILES ${A1_HUD_INFO_ASSETS} DESTINATION app_assets/osd)
 install(DIRECTORY DESTINATION app_assets/models)
 set(A1_MODEL_PATH ${PROJECT_SOURCE_DIR}/app_assets/models/${A1_MODEL_FILENAME})
 if(EXISTS ${A1_MODEL_PATH})

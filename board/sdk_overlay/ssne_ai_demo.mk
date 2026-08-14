@@ -37,6 +37,11 @@ define SSNE_AI_DEMO_INSTALL_TARGET_CMDS
 		$(INSTALL) -m 0644 $(@D)/app_assets/osd/$$name.ssbmp \
 			$(TARGET_DIR)/app_demo/app_assets/osd/$$name.ssbmp; \
 	done
+	for asset in $(@D)/app_assets/osd/INFO_*.ssbmp; do \
+		test -f $$asset || exit 1; \
+		$(INSTALL) -m 0644 $$asset \
+			$(TARGET_DIR)/app_demo/app_assets/osd/$$(basename $$asset); \
+	done
 	cp -r $(@D)/scripts/. $(TARGET_DIR)/app_demo/scripts/
 endef
 
