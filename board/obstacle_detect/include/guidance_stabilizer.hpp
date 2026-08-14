@@ -29,10 +29,12 @@ private:
     void UpdateRange(const std::string& candidate);
     void UpdateSector(const std::string& candidate);
     void UpdateObject(const AvoidanceDecision& raw, int64_t now_ms);
+    void UpdateDistance(const AvoidanceDecision& raw);
 
     StableGuidance stable_;
     bool initialized_;
     std::deque<std::string> range_history_;
+    std::deque<float> distance_history_;
     std::string pending_sector_;
     int pending_sector_count_;
     std::string pending_action_;

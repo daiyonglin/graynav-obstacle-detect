@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <map>
+#include <vector>
 
 namespace obstacle {
 namespace {
@@ -12,6 +14,56 @@ std::string upper_copy(std::string value)
     std::transform(value.begin(), value.end(), value.begin(),
         [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     return value;
+}
+
+std::string lower_copy(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string direction_for_action(const std::string& action)
+{
+    if (action == "turn_left") return "left";
+    if (action == "turn_right") return "right";
+    if (action == "stop" || action == "system_fault") return "hold";
+    return "forward";
+}
+
+std::string position_for_sector(const std::string& sector)
+{
+    const std::string upper = upper_copy(sector);
+    if (upper == "LEFT") return "LEFT";
+    if (upper == "RIGHT") return "RIGHT";
+    if (upper == "MULTI") return "MULTI";
+    if (upper == "BLOCKED" || upper == "WIDE") return "BLOCKED";
+    return "FRONT";
+}
+
+std::string risk_for(const AvoidanceDecision& raw, const std::string& action)
+{
+    if (!raw.ai_ok || action == "system_fault") return "FAULT";
+    if (action == "stop") return "URGENT";
+    if (action == "clear") return "SAFE";
+    if (upper_copy(raw.risk) == "UNKNOWN" || upper_copy(raw.cause) == "UNKNOWN") {
+        return "UNKNOWN";
+    }
+    return "WARNING";
+}
+
+GuidanceZone guidance_zone(const ZoneStatus& zone)
+{
+    GuidanceZone out;
+    out.occupied = zone.occupied;
+    out.object_class = zone.occupied
+        ? lower_copy(zone.raw_label.empty() ? zone.label : zone.raw_label) : "clear";
+    if (out.object_class.empty()) out.object_class = zone.occupied ? "obstacle" : "clear";
+    out.distance_estimate_m = zone.distance_estimate_m;
+    out.safe_distance_m = zone.safe_distance_m >= 0.0f
+        ? zone.safe_distance_m : zone.distance_m;
+    out.risk = zone.occupied ? upper_copy(zone.risk_level) : "SAFE";
+    return out;
 }
 
 }  // namespace
@@ -26,6 +78,7 @@ void GuidanceStabilizer::Reset()
     stable_ = StableGuidance();
     initialized_ = false;
     range_history_.clear();
+    distance_history_.clear();
     pending_sector_.clear();
     pending_sector_count_ = 0;
     pending_action_.clear();
@@ -47,6 +100,8 @@ std::string GuidanceStabilizer::NormalizeSector(const std::string& value)
     const std::string upper = upper_copy(value);
     if (upper == "LEFT") return "left";
     if (upper == "RIGHT") return "right";
+    if (upper == "MULTI") return "multi";
+    if (upper == "BLOCKED" || upper == "WIDE") return "blocked";
     return "center";
 }
 
@@ -177,6 +232,31 @@ void GuidanceStabilizer::UpdateObject(const AvoidanceDecision& raw, int64_t now_
     }
 }
 
+void GuidanceStabilizer::UpdateDistance(const AvoidanceDecision& raw)
+{
+    if (!raw.ai_ok || stable_.action == "clear" || stable_.action == "system_fault") {
+        stable_.distance_estimate_m = -1.0f;
+        distance_history_.clear();
+        return;
+    }
+    const float candidate = raw.distance_estimate_m;
+    if (!(candidate > 0.0f) || !std::isfinite(candidate)) return;
+    distance_history_.push_back(candidate);
+    while (distance_history_.size() > 5U) distance_history_.pop_front();
+    std::vector<float> sorted(distance_history_.begin(), distance_history_.end());
+    std::sort(sorted.begin(), sorted.end());
+    float median = sorted[sorted.size() / 2U];
+    if (sorted.size() % 2U == 0U) {
+        median = 0.5f * (sorted[sorted.size() / 2U - 1U] + median);
+    }
+    if (stable_.distance_estimate_m > 0.0f && !raw.approaching) {
+        median = std::max(stable_.distance_estimate_m * 0.80f,
+            std::min(stable_.distance_estimate_m * 1.20f, median));
+    }
+    stable_.distance_estimate_m = stable_.distance_estimate_m > 0.0f
+        ? 0.75f * stable_.distance_estimate_m + 0.25f * median : median;
+}
+
 const StableGuidance& GuidanceStabilizer::Update(const AvoidanceDecision& raw,
                                                   int64_t now_ms)
 {
@@ -187,12 +267,24 @@ const StableGuidance& GuidanceStabilizer::Update(const AvoidanceDecision& raw,
         stable_.sector = NormalizeSector(raw.hazard_sector);
         stable_.object_label = upper_copy(raw.object_label);
         stable_.scene_label = upper_copy(raw.scene_label);
+        stable_.recommended_direction = direction_for_action(stable_.action);
+        stable_.hazard_position = position_for_sector(stable_.sector);
+        stable_.primary_class = lower_copy(raw.primary_class.empty()
+            ? raw.object_label : raw.primary_class);
+        if (stable_.primary_class.empty() || stable_.primary_class == "none") {
+            stable_.primary_class = lower_copy(raw.cause);
+        }
+        stable_.risk = risk_for(raw, stable_.action);
+        stable_.left = guidance_zone(raw.left);
+        stable_.center = guidance_zone(raw.center);
+        stable_.right = guidance_zone(raw.right);
         stable_.confidence = raw.confidence;
         stable_.ai_ok = raw.ai_ok;
         stable_.timestamp_ms = static_cast<uint64_t>(std::max<int64_t>(0, now_ms));
         last_object_seen_ms_ = stable_.object_label != "NONE" ? now_ms : -100000;
         initialized_ = true;
         range_history_.push_back(stable_.range);
+        UpdateDistance(raw);
         return stable_;
     }
 
@@ -200,6 +292,20 @@ const StableGuidance& GuidanceStabilizer::Update(const AvoidanceDecision& raw,
     UpdateRange(NormalizeRange(raw.range));
     UpdateSector(NormalizeSector(raw.hazard_sector));
     UpdateObject(raw, now_ms);
+    stable_.recommended_direction = direction_for_action(stable_.action);
+    stable_.hazard_position = position_for_sector(stable_.sector);
+    const std::string candidate_class = lower_copy(raw.primary_class.empty()
+        ? raw.object_label : raw.primary_class);
+    if (!candidate_class.empty() && candidate_class != "none") {
+        stable_.primary_class = candidate_class;
+    } else if (stable_.action == "clear") {
+        stable_.primary_class = "none";
+    }
+    stable_.risk = risk_for(raw, stable_.action);
+    stable_.left = guidance_zone(raw.left);
+    stable_.center = guidance_zone(raw.center);
+    stable_.right = guidance_zone(raw.right);
+    UpdateDistance(raw);
     stable_.confidence = 0.75f * stable_.confidence + 0.25f * raw.confidence;
     stable_.ai_ok = raw.ai_ok;
     stable_.timestamp_ms = static_cast<uint64_t>(std::max<int64_t>(0, now_ms));

@@ -1,12 +1,27 @@
 #include "surface_fusion.hpp"
 #include "surface_segmentation.hpp"
 #include "guidance_stabilizer.hpp"
+#include "tracker.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <iostream>
 #include <vector>
+
+namespace utils {
+float IoU(const std::array<float, 4>& a, const std::array<float, 4>& b)
+{
+    const float x1 = std::max(a[0], b[0]);
+    const float y1 = std::max(a[1], b[1]);
+    const float x2 = std::min(a[2], b[2]);
+    const float y2 = std::min(a[3], b[3]);
+    const float intersection = std::max(0.0f, x2 - x1) * std::max(0.0f, y2 - y1);
+    const float area_a = std::max(0.0f, a[2] - a[0]) * std::max(0.0f, a[3] - a[1]);
+    const float area_b = std::max(0.0f, b[2] - b[0]) * std::max(0.0f, b[3] - b[1]);
+    return intersection / std::max(1.0f, area_a + area_b - intersection);
+}
+}  // namespace utils
 
 namespace {
 
@@ -302,6 +317,8 @@ int main()
     assert(packed_surface.stair_edge_peak >= 0.55f);
     assert(packed_surface.stair_edge_span_ratio >= 0.45f);
     assert(packed_surface.stair_depth_jump_bins >= 2.0f);
+    assert(packed_surface.stair_box_valid);
+    assert(packed_surface.stair_edge_x2_norm > packed_surface.stair_edge_x1_norm);
 
     packed_surface.depth_level = "mid";
     packed_surface.depth_ambiguous = false;
@@ -353,10 +370,20 @@ int main()
     raw.cause = "OBJECT";
     raw.object_label = "PERSON";
     raw.range = "NEAR";
+    raw.primary_class = "person";
+    raw.distance_estimate_m = 1.10f;
+    raw.center.occupied = true;
+    raw.center.raw_label = "person";
+    raw.center.distance_estimate_m = 1.10f;
+    raw.center.safe_distance_m = 0.95f;
+    raw.center.risk_level = "urgent";
     guidance.Update(raw, 100);
     const StableGuidance& near_stop = guidance.Update(raw, 200);
     assert(near_stop.action == "stop");
     assert(near_stop.range == "NEAR");
+    assert(near_stop.primary_class == "person");
+    assert(near_stop.center.object_class == "person");
+    assert(std::fabs(near_stop.distance_estimate_m - 1.10f) < 0.01f);
     raw.action = "slow";
     raw.range = "MID";
     for (int i = 0; i < 3; ++i) {
@@ -364,6 +391,63 @@ int main()
     }
     assert(guidance.Update(raw, 600).action == "slow");
     assert(guidance.Current().range == "MID");
+
+    // Indoor8 must not inherit the legacy ROD25 person-part bridge. One chair
+    // observation is ignored as noise, while two consecutive high-confidence
+    // chair observations correct an old PERSON track.
+    obstacle::ObstacleTracker class_tracker;
+    class_tracker.Initialize({720, 1280});
+    SurfaceResult tracker_surface;
+    tracker_surface.valid = true;
+    tracker_surface.stale = false;
+    class_tracker.SetSurfaceResult(tracker_surface);
+    auto raw_detection = [](int raw_class, float score, int64_t timestamp) {
+        DetectionResult frame;
+        frame.view_id = 0;
+        frame.roi = {0, 0, 720, 1280};
+        frame.timestamp_ms = timestamp;
+        DetectionItem item;
+        item.box = {210.0f, 600.0f, 510.0f, 1180.0f};
+        item.score = score;
+        item.raw_class_id = raw_class;
+        item.raw_label = obstacle::semantic::RawLabel(raw_class);
+        item.class_id = obstacle::semantic::SemanticClassFromRaw(raw_class);
+        item.label = obstacle::semantic::SemanticLabel(item.class_id);
+        item.semantic_class = item.label;
+        item.quality = "good";
+        frame.items.push_back(item);
+        return frame;
+    };
+    class_tracker.Update(raw_detection(0, 0.75f, 100), 1);
+    class_tracker.Update(raw_detection(0, 0.75f, 200), 2);
+    assert(!class_tracker.StableResult().items.empty());
+    assert(class_tracker.StableResult().items[0].raw_label == "person");
+    class_tracker.Update(raw_detection(1, 0.65f, 300), 3);
+    assert(class_tracker.StableResult().items[0].raw_label == "person");
+    class_tracker.Update(raw_detection(1, 0.65f, 400), 4);
+    assert(class_tracker.StableResult().items[0].raw_label == "chair");
+
+    // A lower-confidence correction follows the ordinary three-observation
+    // rule; it must not take the two-frame high-confidence shortcut.
+    obstacle::ObstacleTracker ordinary_switch_tracker;
+    ordinary_switch_tracker.Initialize({720, 1280});
+    ordinary_switch_tracker.SetSurfaceResult(tracker_surface);
+    ordinary_switch_tracker.Update(raw_detection(0, 0.75f, 100), 1);
+    ordinary_switch_tracker.Update(raw_detection(0, 0.75f, 200), 2);
+    ordinary_switch_tracker.Update(raw_detection(1, 0.40f, 300), 3);
+    ordinary_switch_tracker.Update(raw_detection(1, 0.40f, 400), 4);
+    assert(ordinary_switch_tracker.StableResult().items[0].raw_label == "person");
+    ordinary_switch_tracker.Update(raw_detection(1, 0.40f, 500), 5);
+    assert(ordinary_switch_tracker.StableResult().items[0].raw_label == "chair");
+
+    obstacle::ObstacleTracker noise_tracker;
+    noise_tracker.Initialize({720, 1280});
+    noise_tracker.SetSurfaceResult(tracker_surface);
+    noise_tracker.Update(raw_detection(0, 0.75f, 100), 1);
+    noise_tracker.Update(raw_detection(0, 0.75f, 200), 2);
+    noise_tracker.Update(raw_detection(1, 0.65f, 300), 3);
+    noise_tracker.Update(raw_detection(0, 0.75f, 400), 4);
+    assert(noise_tracker.StableResult().items[0].raw_label == "person");
 
     // Three reliable anchors establish a scale.  The public depth grid may then
     // affect an internal safe distance, while the UI still exposes only levels.

@@ -446,6 +446,10 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
     if (scene_logits == NULL || result == NULL) return;
     std::array<float, SURFACE_GRID_SIZE> row_scores{};
     std::array<float, SURFACE_GRID_SIZE> row_spans{};
+    std::array<int, SURFACE_GRID_SIZE> row_run_start{};
+    std::array<int, SURFACE_GRID_SIZE> row_run_end{};
+    row_run_start.fill(-1);
+    row_run_end.fill(-1);
     int evidence_cells = 0;
     int corridor_cells = 0;
     for (int y = kGrid / 5; y < kGrid; ++y) {
@@ -453,6 +457,9 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
         int row_count = 0;
         int consecutive = 0;
         int longest = 0;
+        int run_start = -1;
+        int best_start = -1;
+        int best_end = -1;
         for (int x = 0; x < kGrid; ++x) {
             if (!CellInCorridor(x, y, 1)) continue;
             const size_t index = hwc_layout
@@ -465,14 +472,23 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
             ++corridor_cells;
             if (probability >= 0.50f) {
                 ++evidence_cells;
-                longest = std::max(longest, ++consecutive);
+                if (consecutive == 0) run_start = x;
+                ++consecutive;
+                if (consecutive > longest) {
+                    longest = consecutive;
+                    best_start = run_start;
+                    best_end = x;
+                }
             } else {
                 consecutive = 0;
+                run_start = -1;
             }
         }
         row_scores[y] = row_count > 0 ? row_sum / static_cast<float>(row_count) : 0.0f;
         row_spans[y] = row_count > 0
             ? static_cast<float>(longest) / static_cast<float>(row_count) : 0.0f;
+        row_run_start[y] = best_start;
+        row_run_end[y] = best_end;
     }
     result->stair_edge_score = corridor_cells > 0
         ? static_cast<float>(evidence_cells) / static_cast<float>(corridor_cells) : 0.0f;
@@ -583,6 +599,48 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
         result->primary_hazard = result->center.unknown_ratio >= kUnknownMaxRatio
             ? "unknown_other" : "unknown";
         result->primary_sector = "center";
+    }
+
+    // Preserve a compact, normalized geometry contract for Aurora.  It is
+    // derived from real STEP cells and the strongest predicted horizontal
+    // edge; it is not a synthetic target-detection box.
+    int step_x1 = kGrid;
+    int step_y1 = kGrid;
+    int step_x2 = -1;
+    int step_y2 = -1;
+    for (int y = 0; y < kGrid; ++y) {
+        for (int x = 0; x < kGrid; ++x) {
+            if (!CellInCorridor(x, y, 1) ||
+                result->labels[y * kGrid + x] != STEP_OR_DROP) {
+                continue;
+            }
+            step_x1 = std::min(step_x1, x);
+            step_y1 = std::min(step_y1, y);
+            step_x2 = std::max(step_x2, x);
+            step_y2 = std::max(step_y2, y);
+        }
+    }
+    if (stair_state_ != STAIR_NONE && result->stair_edge_count > 0) {
+        const int row = result->stair_edge_rows[0];
+        const int edge_x1 = row_run_start[row] >= 0 ? row_run_start[row] : 0;
+        const int edge_x2 = row_run_end[row] >= edge_x1 ? row_run_end[row] : kGrid - 1;
+        result->stair_edge_x1_norm = static_cast<float>(edge_x1) / kGrid;
+        result->stair_edge_x2_norm = static_cast<float>(edge_x2 + 1) / kGrid;
+        result->stair_edge_y_norm = (static_cast<float>(row) + 0.5f) / kGrid;
+
+        const bool has_step_region = step_x2 >= step_x1 && step_y2 >= step_y1;
+        const int box_x1 = has_step_region ? std::min(step_x1, edge_x1) : edge_x1;
+        const int box_x2 = has_step_region ? std::max(step_x2, edge_x2) : edge_x2;
+        const int box_y1 = has_step_region ? std::min(step_y1, row) : std::max(0, row - 2);
+        const int box_y2 = has_step_region ? std::max(step_y2, row) : std::min(kGrid - 1, row + 2);
+        result->stair_box_norm = {
+            static_cast<float>(std::max(0, box_x1 - 1)) / kGrid,
+            static_cast<float>(std::max(0, box_y1 - 1)) / kGrid,
+            static_cast<float>(std::min(kGrid, box_x2 + 2)) / kGrid,
+            static_cast<float>(std::min(kGrid, box_y2 + 2)) / kGrid
+        };
+        result->stair_box_valid = result->stair_box_norm[2] > result->stair_box_norm[0] &&
+            result->stair_box_norm[3] > result->stair_box_norm[1];
     }
 }
 

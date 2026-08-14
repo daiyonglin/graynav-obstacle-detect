@@ -117,7 +117,9 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     fused.perception_degraded = false;
     fused.perception_source = "detection+surface_depth";
     fused.hazard_type = surface.primary_hazard;
-    fused.hazard_sector = surface.primary_sector;
+    if (detection.action == "clear") {
+        fused.hazard_sector = surface.primary_sector;
+    }
     fused.surface_confidence = surface.confidence;
     // Keep a reliable object/geometry level when the road model is ambiguous.
     // A valid SurfaceDepth level replaces it only when object depth is absent
@@ -170,6 +172,7 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     } else if (detection.action != "clear") {
         // 命名目标已经形成稳定导航动作时，人物/家具背后的 blocked mask
         // 不能覆盖成难以理解的“墙面阻挡”。
+        fused.hazard_sector = detection.hazard_sector;
         reason = "detection_action_preserved";
     } else if (center_blocked) {
         if (near_surface && !left_safe && !right_safe) {

@@ -54,6 +54,20 @@ float size_similarity(const std::array<float, 4>& a,
     return std::sqrt(wr * hr);
 }
 
+float containment_ratio(const std::array<float, 4>& a,
+                        const std::array<float, 4>& b)
+{
+    const float x1 = std::max(a[0], b[0]);
+    const float y1 = std::max(a[1], b[1]);
+    const float x2 = std::min(a[2], b[2]);
+    const float y2 = std::min(a[3], b[3]);
+    const float intersection = std::max(0.0f, x2 - x1) *
+                               std::max(0.0f, y2 - y1);
+    const float area_a = box_width(a) * box_height(a);
+    const float area_b = box_width(b) * box_height(b);
+    return intersection / std::max(1.0f, std::min(area_a, area_b));
+}
+
 bool implausibly_broad_box(const DetectionItem& item,
                            const std::array<int, 2>& image_shape)
 {
@@ -157,9 +171,17 @@ float ObstacleTracker::MatchScore(const Track& track,
     const float overlap = utils::IoU(track.item.box, detection.box);
     const float distance = center_distance(track.item.box, detection.box, image_shape_);
     const float shape_score = size_similarity(track.item.box, detection.box);
+    const float containment = containment_ratio(track.item.box, detection.box);
     // 平滑前先拒绝位置或尺度突变。否则单帧伪框会把稳定轨迹拉到画面另一处，
     // 在 Aurora 上表现为检测框漂移或凭空横移。
     const bool person_part_bridge = IsPersonPartBridge(track, detection);
+    const bool indoor_class_mismatch = semantic::ModelClassCount() == 8 &&
+        track.item.raw_class_id >= 0 && detection.raw_class_id >= 0 &&
+        track.item.raw_class_id != detection.raw_class_id;
+    if (indoor_class_mismatch &&
+        (distance >= 0.08f || (overlap < 0.55f && containment < 0.75f))) {
+        return 0.0f;
+    }
     if (!person_part_bridge && ((overlap < 0.02f && distance > 0.14f) ||
         (distance > 0.10f && overlap < 0.20f) ||
         (shape_score < 0.38f && overlap < 0.30f) ||
@@ -189,7 +211,11 @@ bool ObstacleTracker::IsPersonPartBridge(const Track& track,
      * 只有已有 person 轨迹、候选非 coarse、横向位置连续且空间邻近时才桥接；
      * 该规则不能从零创造人体，只负责维持已有人的局部可见轨迹。
      */
-    if (track.item.class_id != semantic::PERSON ||
+    // Indoor8 has an explicit furniture/people classifier.  Rewriting a real
+    // CHAIR/TABLE observation to PERSON creates a permanent PERSON lock, so the
+    // historical partial-body bridge is restricted to legacy ROD25 only.
+    if (semantic::ModelClassCount() != 25 ||
+        track.item.class_id != semantic::PERSON ||
         detection.class_id == semantic::PERSON ||
         detection.quality == "coarse" || detection.score < 0.12f) {
         return false;
@@ -251,8 +277,10 @@ void ObstacleTracker::UpdateClassEvidence(Track* track,
 {
     // 指数衰减使旧类别证据逐渐失效；1.2 倍滞回避免相邻帧在两个类别间来回跳变。
     if (track == NULL) return;
+    const bool indoor8 = semantic::ModelClassCount() == 8;
+    const float evidence_decay = indoor8 ? 0.85f : 0.95f;
     for (size_t i = 0; i < track->class_evidence.size(); ++i) {
-        track->class_evidence[i] *= 0.95f;
+        track->class_evidence[i] *= evidence_decay;
     }
     if (detection.raw_class_id >= 0 &&
         detection.raw_class_id < static_cast<int>(track->class_evidence.size())) {
@@ -271,14 +299,44 @@ void ObstacleTracker::UpdateClassEvidence(Track* track,
     const float current_evidence = current >= 0 &&
         current < static_cast<int>(track->class_evidence.size())
         ? track->class_evidence[current] : 0.0f;
+    const bool fast_indoor_correction = indoor8 && current >= 0 &&
+        detection.raw_class_id >= 0 && detection.raw_class_id != current &&
+        detection.score >= 0.45f;
     if (current < 0) {
         track->pending_class_id = -1;
         track->pending_class_count = 0;
+    } else if (fast_indoor_correction) {
+        if (track->pending_class_id == detection.raw_class_id) {
+            ++track->pending_class_count;
+        } else {
+            track->pending_class_id = detection.raw_class_id;
+            track->pending_class_count = 1;
+        }
+        if (track->pending_class_count < 2) return;
+        best_class = detection.raw_class_id;
+    } else if (indoor8 && detection.raw_class_id >= 0 &&
+               detection.raw_class_id != current) {
+        // Count consecutive real top-1 observations from the first mismatch.
+        // Waiting to count until the accumulated evidence already wins would
+        // turn a three-frame rule into a much longer, class-locking delay.
+        if (track->pending_class_id == detection.raw_class_id) {
+            ++track->pending_class_count;
+        } else {
+            track->pending_class_id = detection.raw_class_id;
+            track->pending_class_count = 1;
+        }
+        const float candidate_evidence =
+            track->class_evidence[detection.raw_class_id];
+        if (track->pending_class_count < 3 ||
+            candidate_evidence <= current_evidence * 1.20f) {
+            return;
+        }
+        best_class = detection.raw_class_id;
     } else if (best_class == current) {
         track->pending_class_id = -1;
         track->pending_class_count = 0;
         return;
-    } else if (best_evidence > current_evidence * 1.50f) {
+    } else if (best_evidence > current_evidence * (indoor8 ? 1.20f : 1.50f)) {
         if (track->pending_class_id == best_class) ++track->pending_class_count;
         else {
             track->pending_class_id = best_class;
@@ -290,7 +348,9 @@ void ObstacleTracker::UpdateClassEvidence(Track* track,
         track->pending_class_count = 0;
         return;
     }
-    if (current < 0 || track->pending_class_count >= 3) {
+    const int required_switch_observations = fast_indoor_correction ? 2 : 3;
+    if (current < 0 ||
+        track->pending_class_count >= required_switch_observations) {
         track->item.raw_class_id = best_class;
         track->item.raw_label = semantic::RawLabel(best_class);
         track->item.class_id = semantic::SemanticClassFromRaw(best_class);

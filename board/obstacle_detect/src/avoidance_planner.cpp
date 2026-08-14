@@ -29,9 +29,13 @@ void copy_zone(ZoneStatus* zone, const DetectionItem& item)
 {
     zone->occupied = true;
     zone->label = item.label;
+    zone->raw_label = item.raw_label.empty() ? item.label : item.raw_label;
     zone->semantic_class = item.semantic_class;
     zone->risk_weight = item.risk_weight;
-    zone->distance_m = item.safe_distance_m >= 0.0f ? item.safe_distance_m : item.distance_m;
+    zone->distance_estimate_m = item.distance_m;
+    zone->safe_distance_m = item.safe_distance_m >= 0.0f
+        ? item.safe_distance_m : item.distance_m;
+    zone->distance_m = zone->safe_distance_m;
     zone->risk_level = item.risk_level;
 }
 
@@ -112,6 +116,7 @@ void AvoidancePlanner::AddToCorridor(Corridor* corridor, const DetectionItem& it
     const float distance = item.safe_distance_m >= 0.0f
         ? item.safe_distance_m
         : (item.distance_m >= 0.0f ? item.distance_m : 2.5f);
+    ++corridor->zone.object_count;
     if (!corridor->zone.occupied || distance < corridor->clearance) {
         copy_zone(&corridor->zone, item);
     }
@@ -228,16 +233,39 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             continue;
         }
 
-        const float center_half_width = semantic::CenterCorridorHalfWidthM();
-        if (item.lateral_m < -center_half_width || item.sector == "left") {
-            AddToCorridor(&left, item);
-        } else if (item.lateral_m > center_half_width || item.sector == "right") {
-            AddToCorridor(&right, item);
-        } else {
-            AddToCorridor(&center, item);
+        // Assign by horizontal footprint, not just box centre.  A chair/table
+        // spanning two corridors must constrain both potential walking paths.
+        const float frame_w = std::max(1.0f, static_cast<float>(image_shape_[0]));
+        const float bx1 = std::max(0.0f, std::min(1.0f, item.box[0] / frame_w));
+        const float bx2 = std::max(bx1, std::min(1.0f, item.box[2] / frame_w));
+        const float box_span = std::max(0.01f, bx2 - bx1);
+        const float bounds[3][2] = {
+            {0.0f, semantic::SectorLeftBoundaryRatio()},
+            {0.35f, 0.65f},
+            {semantic::SectorRightBoundaryRatio(), 1.0f}
+        };
+        Corridor* corridors[3] = {&left, &center, &right};
+        bool assigned = false;
+        for (int zone = 0; zone < 3; ++zone) {
+            const float overlap = std::max(0.0f,
+                std::min(bx2, bounds[zone][1]) - std::max(bx1, bounds[zone][0]));
+            const float zone_span = bounds[zone][1] - bounds[zone][0];
+            const float coverage = overlap / std::max(0.01f, std::min(box_span, zone_span));
+            if (coverage >= 0.35f) {
+                AddToCorridor(corridors[zone], item);
+                assigned = true;
+            }
         }
-        if (item.sector == "left_center") AddToCorridor(&center, item);
-        if (item.sector == "center_right") AddToCorridor(&center, item);
+        if (!assigned) {
+            const float center_half_width = semantic::CenterCorridorHalfWidthM();
+            if (item.lateral_m < -center_half_width || item.sector == "left") {
+                AddToCorridor(&left, item);
+            } else if (item.lateral_m > center_half_width || item.sector == "right") {
+                AddToCorridor(&right, item);
+            } else {
+                AddToCorridor(&center, item);
+            }
+        }
     }
 
     const bool left_near = near_or_urgent(left);
@@ -255,9 +283,28 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
                             left.clearance > semantic::SideClearDistanceM();
     const bool right_clear = right.verified && !right_near &&
                              right.clearance > semantic::SideClearDistanceM();
-    if (wide_urgent || center_ttc_urgent || (center_near && !left_clear && !right_clear)) {
+    const int near_count = static_cast<int>(left_near) +
+        static_cast<int>(center_near) + static_cast<int>(right_near);
+    const int warning_count = static_cast<int>(left_warning) +
+        static_cast<int>(center_warning) + static_cast<int>(right_warning);
+    if (wide_urgent || near_count == 3 || center_ttc_urgent) {
         desired = "stop";
-        reason = wide_urgent ? "wide_near" : "center_blocked_no_verified_side";
+        reason = wide_urgent ? "wide_near" :
+            (near_count == 3 ? "three_corridors_near" : "center_ttc_urgent");
+    } else if (near_count == 2) {
+        if (!left_near && left_clear) {
+            desired = "turn_left";
+            reason = "two_corridors_choose_left";
+        } else if (!right_near && right_clear) {
+            desired = "turn_right";
+            reason = "two_corridors_choose_right";
+        } else if (!center_near) {
+            desired = "slow";
+            reason = "side_corridors_near_center_open";
+        } else {
+            desired = "stop";
+            reason = "two_corridors_no_verified_escape";
+        }
     } else if (center_near || left_near || right_near) {
         // 单纯侧方近障不再等待双 ROI 将另一侧标记为 verified：右侧障碍直接
         // 提示左转，左侧障碍直接提示右转。中央阻塞时仍要求候选走廊已确认安全。
@@ -267,17 +314,34 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         } else if (left_near && !center_near && !right_near) {
             desired = "turn_right";
             reason = "left_obstacle_direct_avoid";
-        } else if ((center_near || right_near) && left_clear &&
-            left.clearance > right.clearance + semantic::TurnClearanceMarginM()) {
+        } else if (center_near && left_clear && !right_clear) {
             desired = "turn_left";
-            reason = "left_corridor_verified";
-        } else if ((center_near || left_near) && right_clear &&
+            reason = "only_left_corridor_verified";
+        } else if (center_near && right_clear && !left_clear) {
+            desired = "turn_right";
+            reason = "only_right_corridor_verified";
+        } else if (center_near && left_clear && right_clear &&
+                   left.clearance > right.clearance + semantic::TurnClearanceMarginM()) {
+            desired = "turn_left";
+            reason = "left_corridor_safer";
+        } else if (center_near && left_clear && right_clear &&
                    right.clearance > left.clearance + semantic::TurnClearanceMarginM()) {
             desired = "turn_right";
-            reason = "right_corridor_verified";
+            reason = "right_corridor_safer";
         } else {
             desired = center_near ? "stop" : "slow";
-            reason = center_near ? "center_near" : "side_near";
+            reason = center_near ? "center_near_no_clear_margin" : "side_near";
+        }
+    } else if (warning_count >= 2) {
+        if (!left_warning && left_clear) {
+            desired = "turn_left";
+            reason = "two_warnings_choose_left";
+        } else if (!right_warning && right_clear) {
+            desired = "turn_right";
+            reason = "two_warnings_choose_right";
+        } else {
+            desired = "slow";
+            reason = "multiple_warning_slow";
         }
     } else if (center_warning || left_warning || right_warning || uncertain_hazard) {
         if (right_warning && !center_warning && !left_warning) {
@@ -307,8 +371,29 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         decision.depth_source = nearest_item->depth_source;
         decision.depth_consistent = nearest_item->depth_consistent;
         decision.approaching = nearest_item->approaching;
+        decision.primary_class = nearest_item->raw_label.empty()
+            ? nearest_item->label : nearest_item->raw_label;
+        decision.distance_estimate_m = nearest_item->distance_m;
     }
+    const bool active_left = left_near || left_warning;
+    const bool active_center = center_near || center_warning;
+    const bool active_right = right_near || right_warning;
+    const int active_count = static_cast<int>(active_left) +
+        static_cast<int>(active_center) + static_cast<int>(active_right);
+    decision.hazard_sector = active_count >= 3 ? "blocked" :
+        (active_count == 2 ? "multi" :
+         (active_left ? "left" : (active_right ? "right" : "center")));
     decision.action = StabilizeAction(desired, timestamp_ms);
+    decision.recommended_direction = decision.action == "turn_left" ? "left" :
+        (decision.action == "turn_right" ? "right" :
+         (decision.action == "stop" ? "hold" : "forward"));
+    decision.hazard_position = decision.hazard_sector == "left" ? "LEFT" :
+        (decision.hazard_sector == "right" ? "RIGHT" :
+         (decision.hazard_sector == "multi" ? "MULTI" :
+          (decision.hazard_sector == "blocked" ? "BLOCKED" : "FRONT")));
+    decision.risk = decision.action == "stop" ? "URGENT" :
+        (decision.action == "clear" ? "SAFE" :
+         (uncertain_hazard ? "UNKNOWN" : "WARNING"));
     std::ostringstream prompt;
     prompt << "reason=" << reason
            << " desired=" << desired

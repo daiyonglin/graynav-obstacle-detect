@@ -92,19 +92,27 @@ struct ZoneStatus {
     std::string dir;
     bool occupied;
     std::string label;
+    std::string raw_label;
     std::string semantic_class;
     float risk_weight;
-    float distance_m;
+    float distance_m;          // Conservative distance used by the planner.
+    float distance_estimate_m; // Expected distance exposed by serial output.
+    float safe_distance_m;
     std::string risk_level;
+    int object_count;
 
     ZoneStatus()
         : dir("unknown"),
           occupied(false),
           label(""),
+          raw_label(""),
           semantic_class(""),
           risk_weight(1.0f),
           distance_m(-1.0f),
-          risk_level("unknown") {}
+          distance_estimate_m(-1.0f),
+          safe_distance_m(-1.0f),
+          risk_level("unknown"),
+          object_count(0) {}
 };
 
 /** @brief 单通道道路分割模型的四类部署契约。 */
@@ -184,6 +192,11 @@ struct SurfaceResult {
     std::array<int, 2> stair_edge_rows;
     int stair_edge_count;
     bool stair_edge_persistent;
+    bool stair_box_valid;
+    std::array<float, 4> stair_box_norm;
+    float stair_edge_x1_norm;
+    float stair_edge_x2_norm;
+    float stair_edge_y_norm;
     float center_depth_m;  // 内部融合使用，不对 Aurora/语音显示米数。
     std::array<uint8_t, SURFACE_GRID_CELLS> labels;
     std::array<float, SURFACE_GRID_CELLS> depth_m;
@@ -215,6 +228,11 @@ struct SurfaceResult {
           stair_edge_rows{-1, -1},
           stair_edge_count(0),
           stair_edge_persistent(false),
+          stair_box_valid(false),
+          stair_box_norm{0.0f, 0.0f, 0.0f, 0.0f},
+          stair_edge_x1_norm(0.0f),
+          stair_edge_x2_norm(0.0f),
+          stair_edge_y_norm(0.0f),
           center_depth_m(-1.0f),
           labels{},
           depth_m{},
@@ -250,6 +268,11 @@ struct AvoidanceDecision {
     std::string range;
     std::string object_label;
     std::string scene_label;
+    std::string recommended_direction;
+    std::string hazard_position;
+    std::string primary_class;
+    float distance_estimate_m;
+    std::string risk;
     float confidence;
     bool ai_ok;
 
@@ -273,12 +296,33 @@ struct AvoidanceDecision {
           range("UNKNOWN"),
           object_label("NONE"),
           scene_label("UNKNOWN"),
+          recommended_direction("forward"),
+          hazard_position("FRONT"),
+          primary_class("none"),
+          distance_estimate_m(-1.0f),
+          risk("UNKNOWN"),
           confidence(0.0f),
           ai_ok(true) {
         left.dir = "left";
         center.dir = "center";
         right.dir = "right";
     }
+};
+
+/** Compact, stable per-corridor summary shared by UART and future clients. */
+struct GuidanceZone {
+    bool occupied;
+    std::string object_class;
+    float distance_estimate_m;
+    float safe_distance_m;
+    std::string risk;
+
+    GuidanceZone()
+        : occupied(false),
+          object_class("clear"),
+          distance_estimate_m(-1.0f),
+          safe_distance_m(-1.0f),
+          risk("SAFE") {}
 };
 
 /**
@@ -294,6 +338,14 @@ struct StableGuidance {
     std::string sector;
     std::string object_label;
     std::string scene_label;
+    std::string recommended_direction;
+    std::string hazard_position;
+    std::string primary_class;
+    float distance_estimate_m;
+    std::string risk;
+    GuidanceZone left;
+    GuidanceZone center;
+    GuidanceZone right;
     float confidence;
     bool ai_ok;
     uint64_t timestamp_ms;
@@ -305,6 +357,11 @@ struct StableGuidance {
           sector("CENTER"),
           object_label("NONE"),
           scene_label("UNKNOWN"),
+          recommended_direction("forward"),
+          hazard_position("FRONT"),
+          primary_class("none"),
+          distance_estimate_m(-1.0f),
+          risk("UNKNOWN"),
           confidence(0.0f),
           ai_ok(true),
           timestamp_ms(0) {}
@@ -317,6 +374,29 @@ struct StableGuidance {
         decision->hazard_sector = sector;
         decision->object_label = object_label;
         decision->scene_label = scene_label;
+        decision->recommended_direction = recommended_direction;
+        decision->hazard_position = hazard_position;
+        decision->primary_class = primary_class;
+        decision->distance_estimate_m = distance_estimate_m;
+        decision->risk = risk;
+        decision->left.occupied = left.occupied;
+        decision->left.raw_label = left.object_class;
+        decision->left.distance_estimate_m = left.distance_estimate_m;
+        decision->left.safe_distance_m = left.safe_distance_m;
+        decision->left.distance_m = left.safe_distance_m;
+        decision->left.risk_level = left.risk;
+        decision->center.occupied = center.occupied;
+        decision->center.raw_label = center.object_class;
+        decision->center.distance_estimate_m = center.distance_estimate_m;
+        decision->center.safe_distance_m = center.safe_distance_m;
+        decision->center.distance_m = center.safe_distance_m;
+        decision->center.risk_level = center.risk;
+        decision->right.occupied = right.occupied;
+        decision->right.raw_label = right.object_class;
+        decision->right.distance_estimate_m = right.distance_estimate_m;
+        decision->right.safe_distance_m = right.safe_distance_m;
+        decision->right.distance_m = right.safe_distance_m;
+        decision->right.risk_level = right.risk;
         decision->confidence = confidence;
         decision->ai_ok = ai_ok;
         decision->depth_level = range == "NEAR" ? "near" :
