@@ -125,6 +125,9 @@ ObstacleTracker::Track::Track()
       inverse_depth_history{0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
       inverse_depth_count(0),
       inverse_depth_index(0),
+      last_view_id(-1),
+      pending_class_id(-1),
+      pending_class_count(0),
       class_evidence(std::max(1, semantic::ModelClassCount()), 0.0f)
 {
 }
@@ -212,7 +215,13 @@ bool ObstacleTracker::CanStartTrack(const DetectionItem& detection) const
     if (implausibly_broad_box(detection, image_shape_)) return false;
     if (detection.quality == "coarse") return false;
     if (detection.score >= 0.45f) return true;
-    if (detection.class_id == semantic::PERSON) return detection.score >= 0.08f;
+    if (detection.class_id == semantic::PERSON) return detection.score >= 0.12f;
+    if (semantic::ModelClassCount() == 8) {
+        if (semantic::IsFurnitureLikeSemantic(detection.class_id)) {
+            return detection.score >= 0.18f;
+        }
+        return detection.score >= 0.20f;
+    }
     if (semantic::ModelClassCount() == 25) {
         // 与室内 ROD25 解码阈值衔接。弱候选仍需连续命中才允许输出，
         // 因此一次量化噪声不会立即生成轨迹并触发避障。
@@ -243,7 +252,7 @@ void ObstacleTracker::UpdateClassEvidence(Track* track,
     // 指数衰减使旧类别证据逐渐失效；1.2 倍滞回避免相邻帧在两个类别间来回跳变。
     if (track == NULL) return;
     for (size_t i = 0; i < track->class_evidence.size(); ++i) {
-        track->class_evidence[i] *= 0.92f;
+        track->class_evidence[i] *= 0.95f;
     }
     if (detection.raw_class_id >= 0 &&
         detection.raw_class_id < static_cast<int>(track->class_evidence.size())) {
@@ -262,13 +271,34 @@ void ObstacleTracker::UpdateClassEvidence(Track* track,
     const float current_evidence = current >= 0 &&
         current < static_cast<int>(track->class_evidence.size())
         ? track->class_evidence[current] : 0.0f;
-    if (current < 0 || best_evidence > current_evidence * 1.20f) {
+    if (current < 0) {
+        track->pending_class_id = -1;
+        track->pending_class_count = 0;
+    } else if (best_class == current) {
+        track->pending_class_id = -1;
+        track->pending_class_count = 0;
+        return;
+    } else if (best_evidence > current_evidence * 1.50f) {
+        if (track->pending_class_id == best_class) ++track->pending_class_count;
+        else {
+            track->pending_class_id = best_class;
+            track->pending_class_count = 1;
+        }
+        if (track->pending_class_count < 3) return;
+    } else {
+        track->pending_class_id = -1;
+        track->pending_class_count = 0;
+        return;
+    }
+    if (current < 0 || track->pending_class_count >= 3) {
         track->item.raw_class_id = best_class;
         track->item.raw_label = semantic::RawLabel(best_class);
         track->item.class_id = semantic::SemanticClassFromRaw(best_class);
         track->item.label = semantic::SemanticLabel(track->item.class_id);
         track->item.semantic_class = track->item.label;
         track->item.risk_weight = semantic::RiskWeight(track->item.class_id);
+        track->pending_class_id = -1;
+        track->pending_class_count = 0;
     }
 }
 
@@ -389,7 +419,8 @@ void ObstacleTracker::UpdateRangeState(Track* track,
 
 void ObstacleTracker::StartTrack(const DetectionItem& detection,
                                  int frame_id,
-                                 int64_t timestamp_ms)
+                                 int64_t timestamp_ms,
+                                 int view_id)
 {
     Track track;
     track.item = detection;
@@ -400,6 +431,7 @@ void ObstacleTracker::StartTrack(const DetectionItem& detection,
     track.last_seen_ms = timestamp_ms;
     track.last_update_ms = timestamp_ms;
     track.matched_current_frame = true;
+    track.last_view_id = view_id;
     track.item.track_id = track.id;
     track.item.age = track.age;
     UpdateClassEvidence(&track, detection);
@@ -410,7 +442,8 @@ void ObstacleTracker::StartTrack(const DetectionItem& detection,
 void ObstacleTracker::UpdateTrack(Track* track,
                                   const DetectionItem& detection,
                                   int frame_id,
-                                  int64_t timestamp_ms)
+                                  int64_t timestamp_ms,
+                                  int view_id)
 {
     // 运动越快，旧框权重越小；高置信新检测也会更快拉回真实位置，兼顾稳定与低延迟。
     if (track == NULL) return;
@@ -425,14 +458,30 @@ void ObstacleTracker::UpdateTrack(Track* track,
         effective_detection.risk_weight = semantic::RiskWeight(semantic::PERSON);
         ranging_.Estimate(&effective_detection);
     }
-    const float shift = center_distance(track->item.box, detection.box, image_shape_);
-    float old_weight = shift < 0.015f ? 0.65f : (shift < 0.06f ? 0.35f : 0.15f);
-    if (detection.score > 0.70f) old_weight *= 0.65f;
-    for (int i = 0; i < 4; ++i) {
-        track->item.box[i] = old_weight * track->item.box[i] +
-                             (1.0f - old_weight) * detection.box[i];
+    const float overlap = utils::IoU(track->item.box, detection.box);
+    float alpha = overlap >= 0.60f ? 0.25f : (overlap >= 0.30f ? 0.40f : 0.65f);
+    if (track->last_view_id >= 0 && track->last_view_id != view_id) {
+        alpha = std::min(alpha, 0.25f);
     }
-    track->item.score = 0.35f * track->item.score + 0.65f * detection.score;
+    const float old_cx = 0.5f * (track->item.box[0] + track->item.box[2]);
+    const float old_cy = 0.5f * (track->item.box[1] + track->item.box[3]);
+    const float old_w = box_width(track->item.box);
+    const float old_h = box_height(track->item.box);
+    const float det_cx = 0.5f * (detection.box[0] + detection.box[2]);
+    const float det_cy = 0.5f * (detection.box[1] + detection.box[3]);
+    const float target_w = clampf(box_width(detection.box), old_w * 0.80f, old_w * 1.20f);
+    const float target_h = clampf(box_height(detection.box), old_h * 0.80f, old_h * 1.20f);
+    const float cx = old_cx + alpha * (det_cx - old_cx);
+    const float cy = old_cy + alpha * (det_cy - old_cy);
+    const float width = old_w + alpha * (target_w - old_w);
+    const float height = old_h + alpha * (target_h - old_h);
+    track->item.box = {
+        clampf(cx - 0.5f * width, 0.0f, static_cast<float>(image_shape_[0] - 1)),
+        clampf(cy - 0.5f * height, 0.0f, static_cast<float>(image_shape_[1] - 1)),
+        clampf(cx + 0.5f * width, 0.0f, static_cast<float>(image_shape_[0] - 1)),
+        clampf(cy + 0.5f * height, 0.0f, static_cast<float>(image_shape_[1] - 1))
+    };
+    track->item.score = 0.60f * track->item.score + 0.40f * detection.score;
     track->item.quality = detection.quality;
     track->item.sector = sector_from_box(track->item.box, image_shape_[0]);
     ++track->age;
@@ -441,6 +490,7 @@ void ObstacleTracker::UpdateTrack(Track* track,
     track->last_frame = frame_id;
     track->last_seen_ms = timestamp_ms;
     track->matched_current_frame = true;
+    track->last_view_id = view_id;
     UpdateClassEvidence(track, effective_detection);
     UpdateRangeState(track, effective_detection, timestamp_ms);
     track->last_update_ms = timestamp_ms;
@@ -477,7 +527,7 @@ void ObstacleTracker::AgeUnmatchedTracks(const std::vector<int>& matched_tracks,
     tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
         [timestamp_ms](const Track& track) {
             const int64_t age_ms = timestamp_ms - track.last_seen_ms;
-            return (track.visible_in_current_roi && track.missed > 1) || age_ms > 700;
+            return (track.visible_in_current_roi && track.missed > 3) || age_ms > 900;
         }), tracks_.end());
 }
 
@@ -497,11 +547,13 @@ void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
         const Track& track = tracks_[i];
         if (implausibly_broad_box(track.item, image_shape_)) continue;
         const bool inactive_view_hold = !track.visible_in_current_roi &&
-                                        timestamp_ms - track.last_seen_ms <= 250;
+                                        timestamp_ms - track.last_seen_ms <= 500;
         if (!track.matched_current_frame && !inactive_view_hold) continue;
         // 不绘制仅出现一帧的候选。双 ROI 交替时，同一 ROI 的两次观测间隔很短，
         // 等待第二次命中可过滤大部分由量化 head 瞬时波动产生的幽灵框。
-        if (track.hits < kMinConfirmedHits) continue;
+        const int required_hits = track.item.class_id == semantic::PERSON
+            ? kMinConfirmedHits : 3;
+        if (track.hits < required_hits) continue;
         if (track.item.class_id == semantic::PERSON &&
             track.item.score < 0.11f && track.hits < 3) continue;
         DetectionItem item = track.item;
@@ -553,7 +605,7 @@ void ObstacleTracker::Update(const DetectionResult& raw_result, int frame_id)
         const MatchPair& pair = pairs[i];
         if (used_tracks[pair.track] || used_detections[pair.detection]) continue;
         UpdateTrack(&tracks_[pair.track], ranged.items[pair.detection],
-                    frame_id, timestamp_ms);
+                    frame_id, timestamp_ms, raw_result.view_id);
         used_tracks[pair.track] = 1;
         used_detections[pair.detection] = 1;
         matched_tracks.push_back(pair.track);
@@ -562,7 +614,8 @@ void ObstacleTracker::Update(const DetectionResult& raw_result, int frame_id)
     AgeUnmatchedTracks(matched_tracks, raw_result.roi, frame_id, timestamp_ms);
     for (size_t di = 0; di < ranged.items.size(); ++di) {
         if (!used_detections[di] && CanStartTrack(ranged.items[di])) {
-            StartTrack(ranged.items[di], frame_id, timestamp_ms);
+            StartTrack(ranged.items[di], frame_id, timestamp_ms,
+                       raw_result.view_id);
         }
     }
 

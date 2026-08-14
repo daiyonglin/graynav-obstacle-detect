@@ -55,6 +55,9 @@ private:
         std::array<float, 5> inverse_depth_history;
         int inverse_depth_count;
         int inverse_depth_index;
+        int last_view_id;
+        int pending_class_id;
+        int pending_class_count;
         std::vector<float> class_evidence;
 
         Track();
@@ -76,10 +79,11 @@ private:
     /** 当前轨迹中心是否位于本帧推理 ROI，用于区分真正丢失与未观测。 */
     bool IsVisibleInRoi(const Track& track, const std::array<int, 4>& roi) const;
     /** 以当前测距和类别证据初始化一条尚未确认的新轨迹。 */
-    void StartTrack(const DetectionItem& detection, int frame_id, int64_t timestamp_ms);
+    void StartTrack(const DetectionItem& detection, int frame_id,
+                    int64_t timestamp_ms, int view_id);
     /** 更新已匹配轨迹的框、分数、类别、距离、速度和生命周期。 */
     void UpdateTrack(Track* track, const DetectionItem& detection,
-                     int frame_id, int64_t timestamp_ms);
+                     int frame_id, int64_t timestamp_ms, int view_id);
     /** 对 25 类证据做衰减累积和 1.2 倍切换滞回。 */
     void UpdateClassEvidence(Track* track, const DetectionItem& detection);
     /** 以真实时间差更新距离/径向速度，并计算可靠 TTC。 */

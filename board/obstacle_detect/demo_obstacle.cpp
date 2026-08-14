@@ -19,6 +19,7 @@
 #include "include/tracker.hpp"
 #include "include/utils.hpp"
 
+#include "include/guidance_stabilizer.hpp"
 #include "include/surface_fusion.hpp"
 
 #ifndef A1_ENABLE_VOICE
@@ -939,8 +940,10 @@ void DecorateUnifiedDecision(const DetectionResult& result,
     decision->range = to_upper_text(decision->depth_level);
     decision->object_label = nav_object_text(result);
     decision->scene_label = "UNKNOWN";
-    if (surface.stair_edge_persistent || surface.primary_hazard == "step_or_drop") {
+    if (surface.stair_state == STAIR_CONFIRMED) {
         decision->scene_label = "STEP";
+    } else if (surface.stair_state == STAIR_SUSPECTED) {
+        decision->scene_label = "STEP_CHECK";
     } else if (surface.primary_hazard == "blocked_surface") {
         decision->scene_label = "BLOCKED";
     } else if (surface.valid && !surface.stale && surface.center.safe_candidate) {
@@ -949,8 +952,9 @@ void DecorateUnifiedDecision(const DetectionResult& result,
     if (decision->action == "system_fault") decision->cause = "SYSTEM";
     else if (!decision->ai_ok) decision->cause = "AI_FAIL";
     else if (decision->scene_label == "STEP") decision->cause = "STAIR";
-    else if (decision->scene_label == "BLOCKED") decision->cause = "BLOCKED";
     else if (decision->object_label != "NONE" && decision->action != "clear") decision->cause = "OBJECT";
+    else if (decision->scene_label == "BLOCKED") decision->cause = "BLOCKED";
+    else if (decision->scene_label == "STEP_CHECK") decision->cause = "STEP_CHECK";
     else if (decision->scene_label == "UNKNOWN") decision->cause = "UNKNOWN";
     else decision->cause = "PATH";
     decision->confidence = std::max(decision->surface_confidence,
@@ -960,6 +964,28 @@ void DecorateUnifiedDecision(const DetectionResult& result,
         decision->confidence = std::max(decision->confidence,
                                         result.items[object_index].score);
     }
+}
+
+std::string nav_primary_text(const AvoidanceDecision& decision)
+{
+    if (!decision.ai_ok || decision.cause == "AI_FAIL" ||
+        decision.action == "system_fault") return "AI_FAIL";
+    if (decision.cause == "STAIR") return "STAIR";
+    if (decision.object_label != "NONE" && decision.action != "clear") {
+        return decision.object_label;
+    }
+    if (decision.cause == "BLOCKED") return "BLOCKED";
+    if (decision.cause == "STEP_CHECK") return "STEP?";
+    if (decision.cause == "PATH") return "PATH";
+    return "UNKNOWN";
+}
+
+std::string nav_sector_text(const std::string& sector)
+{
+    const std::string upper = to_upper_text(sector);
+    if (upper == "LEFT") return "LEFT";
+    if (upper == "RIGHT") return "RIGHT";
+    return "FRONT";
 }
 
 std::string NavStateKey(const AvoidanceDecision& decision)
@@ -972,15 +998,11 @@ std::string NavStateKey(const AvoidanceDecision& decision)
 
 void PrintUnifiedNavPacket(const AvoidanceDecision& decision)
 {
-    std::cout << "[NAV] action=" << nav_action_text(decision.action)
-              << " cause=" << decision.cause
-              << " sector=" << to_upper_text(decision.hazard_sector)
-              << " range=" << decision.range
-              << " object=" << decision.object_label
-              << " scene=" << decision.scene_label
-              << " confidence=" << std::fixed << std::setprecision(2)
-              << decision.confidence
-              << " ai=" << (decision.ai_ok ? "OK" : "FAIL")
+    std::cout << "[NAV] " << nav_action_text(decision.action)
+              << " | " << nav_primary_text(decision)
+              << " | " << decision.range
+              << " | " << nav_sector_text(decision.hazard_sector)
+              << " | " << (decision.ai_ok ? "AI_OK" : "AI_FAIL")
               << std::endl;
 }
 
@@ -1015,6 +1037,7 @@ int main()
     int surface_failures = 0;
     bool surface_degraded_announced = false;
     obstacle::SurfaceDecisionFusion surface_fusion;
+    obstacle::GuidanceStabilizer guidance_stabilizer;
     surface_result.perception_degraded = surface_degraded;
 
     IMAGEPROCESSOR processor;
@@ -1062,9 +1085,11 @@ int main()
     const std::string test_fault_type = env_string_value("A1_TEST_FAULT_TYPE", "none");
     const int test_fault_start = env_int_value("A1_TEST_FAULT_START_FRAME", 120, 1, 1000000);
     const int test_fault_duration = env_int_value("A1_TEST_FAULT_DURATION_FRAMES", 180, 1, 1000000);
-    std::string last_osd_action;
+    std::string last_osd_key;
     std::string last_nav_state_key;
     int64_t last_nav_print_ms = -100000;
+    const int nav_heartbeat_ms = env_int_value("A1_NAV_HEARTBEAT_MS", 2000, 500, 30000);
+    const int nav_min_change_ms = env_int_value("A1_NAV_MIN_CHANGE_MS", 500, 100, 5000);
     bool last_fault_active = false;
     std::string last_fault_reason;
     std::string last_fault_type = "SYSTEM";
@@ -1082,6 +1107,9 @@ int main()
     std::cout << "[INFO] output diag     = " << (output_serial_diagnostics ? "on" : "off") << std::endl;
     std::cout << "[INFO] output interval = " << output_interval_frames << " frames" << std::endl;
     std::cout << "[INFO] OSD interval    = " << osd_interval_frames << " frames" << std::endl;
+    std::cout << "[NAV] fields: ACTION | HAZARD | RANGE | DIRECTION | AI_STATE" << std::endl;
+    std::cout << "[INFO] NAV heartbeat   = " << nav_heartbeat_ms
+              << " ms, min change=" << nav_min_change_ms << " ms" << std::endl;
     std::cout << "[INFO] capture restart = " << (capture_auto_restart ? "on" : "off") << std::endl;
     std::cout << "[INFO] cover detector  = score>="
               << env_int_value("A1_COVER_SCORE_THRESHOLD", 5, 3, 12)
@@ -1242,6 +1270,7 @@ int main()
         const DetectionResult& stable_result = tracker.StableResult();
         const AvoidanceDecision& tracker_decision = tracker.Decision();
         surface_snapshot = tracker.LatestSurfaceResult();
+        surface_fusion.ApplyObjectOcclusion(stable_result, &surface_snapshot);
         AvoidanceDecision health_decision = tracker_decision;
         health_decision = surface_fusion.Fuse(tracker_decision, surface_snapshot, now_ms);
         const bool fault_active = system_health.FaultActive();
@@ -1265,33 +1294,38 @@ int main()
             last_fault_type = fault_type_text(system_health);
         }
         DecorateUnifiedDecision(stable_result, surface_snapshot, &health_decision);
-        const std::string nav_state_key = NavStateKey(health_decision);
+        const StableGuidance& guidance = guidance_stabilizer.Update(health_decision, now_ms);
+        AvoidanceDecision stable_decision = health_decision;
+        guidance.ApplyTo(&stable_decision);
+        const std::string nav_state_key = NavStateKey(stable_decision);
         const bool nav_state_changed = nav_state_key != last_nav_state_key;
-        const bool nav_heartbeat_due = now_ms - last_nav_print_ms >= 1000;
-        if (output_human_summary && (nav_state_changed || nav_heartbeat_due)) {
-            PrintUnifiedNavPacket(health_decision);
+        const bool nav_heartbeat_due = now_ms - last_nav_print_ms >= nav_heartbeat_ms;
+        const bool nav_change_allowed = now_ms - last_nav_print_ms >= nav_min_change_ms;
+        if (output_human_summary &&
+            (nav_heartbeat_due || (nav_state_changed && nav_change_allowed))) {
+            PrintUnifiedNavPacket(stable_decision);
             last_nav_state_key = nav_state_key;
             last_nav_print_ms = now_ms;
         }
 #if A1_ENABLE_VOICE
         const bool refresh_osd = fault_active ||
-                                 health_decision.action != last_osd_action ||
+                                 nav_state_key != last_osd_key ||
                                  frame_id % osd_interval_frames == 0;
         if (voice_notifier.WantsOsd() && refresh_osd) {
             visualizer.Draw(fault_active ? empty_result : stable_result,
-                            health_decision,
+                            stable_decision,
                             surface_snapshot);
-            last_osd_action = health_decision.action;
+            last_osd_key = nav_state_key;
         }
         voice_notifier.Update(frame_id,
                               fault_active ? empty_result : stable_result,
-                              health_decision);
+                              stable_decision);
 #else
-        if (health_decision.action != last_osd_action || frame_id % osd_interval_frames == 0) {
+        if (nav_state_key != last_osd_key || frame_id % osd_interval_frames == 0) {
             visualizer.Draw(fault_active ? empty_result : stable_result,
-                            health_decision,
+                            stable_decision,
                             surface_snapshot);
-            last_osd_action = health_decision.action;
+            last_osd_key = nav_state_key;
         }
 #endif
 
@@ -1317,7 +1351,7 @@ int main()
         }
 
         if (output_json_lines && frame_id % output_interval_frames == 0) {
-            print_json_packet(frame_id, stable_result, health_decision, surface_snapshot);
+            print_json_packet(frame_id, stable_result, stable_decision, surface_snapshot);
         }
     }
 

@@ -151,6 +151,20 @@ float box_area_for_multi_nms(const DetectionItem& item)
            std::max(0.0f, item.box[3] - item.box[1]);
 }
 
+float intersection_over_min_area(const DetectionItem& a,
+                                 const DetectionItem& b)
+{
+    const float x1 = std::max(a.box[0], b.box[0]);
+    const float y1 = std::max(a.box[1], b.box[1]);
+    const float x2 = std::min(a.box[2], b.box[2]);
+    const float y2 = std::min(a.box[3], b.box[3]);
+    const float intersection = std::max(0.0f, x2 - x1) *
+                               std::max(0.0f, y2 - y1);
+    const float min_area = std::max(1.0f,
+        std::min(box_area_for_multi_nms(a), box_area_for_multi_nms(b)));
+    return intersection / min_area;
+}
+
 float box_width_ratio_for_multi_nms(const DetectionItem& item)
 {
     constexpr float kFrameW = 720.0f;
@@ -228,6 +242,17 @@ bool should_suppress_for_multi_nms(const DetectionItem& cur,
         center_dx > 0.12f ||
         (cur_sector != other_sector && cur_sector != "wide" && other_sector != "wide");
 
+    // 同一 Indoor8 类别的大框套小框通常来自同一实体的头部/身体或椅背/椅座
+    // 响应。IoU 对面积差异很敏感，因此额外使用 intersection/min-area 去重。
+    // 横向明显分离时仍保留多目标。
+    const bool nested_same_entity = cur.raw_class_id == other.raw_class_id &&
+        intersection_over_min_area(cur, other) >= 0.75f &&
+        center_dx < 0.10f && !spatially_separated;
+    if (nested_same_entity) {
+        // 排序阶段已经把应保留的大框/高质量框放在前面。
+        return true;
+    }
+
     if (spatially_separated && protected_raw) {
         return false;
     }
@@ -274,6 +299,19 @@ void MultiTargetNMS(DetectionResult* result, float iou_threshold, int top_k)
      */
     std::sort(result->items.begin(), result->items.end(),
               [](const DetectionItem& a, const DetectionItem& b) {
+                  if (a.raw_class_id == b.raw_class_id &&
+                      intersection_over_min_area(a, b) >= 0.75f &&
+                      std::fabs(center_x_for_multi_nms(a) -
+                                center_x_for_multi_nms(b)) / 720.0f < 0.10f) {
+                      const float aa = box_area_for_multi_nms(a);
+                      const float ba = box_area_for_multi_nms(b);
+                      const DetectionItem& larger = aa >= ba ? a : b;
+                      const DetectionItem& smaller = aa >= ba ? b : a;
+                      if (larger.quality != "coarse" &&
+                          larger.score >= smaller.score * 0.60f) {
+                          return aa > ba;
+                      }
+                  }
                   const float ap = nms_priority_for_multi_target(a);
                   const float bp = nms_priority_for_multi_target(b);
                   if (std::fabs(ap - bp) > 0.02f) {
@@ -639,6 +677,51 @@ std::string hud_asset_path(const std::string& name)
     return "/app_demo/app_assets/osd/" + name + ".ssbmp";
 }
 
+std::string hud_direction_text(const std::string& sector)
+{
+    if (sector == "left" || sector == "LEFT") return "LEFT";
+    if (sector == "right" || sector == "RIGHT") return "RIGHT";
+    return "FRONT";
+}
+
+std::string hud_primary_text(const DetectionResult& result,
+                             const AvoidanceDecision& decision,
+                             const SurfaceResult& surface)
+{
+    if (!decision.ai_ok || decision.action == "system_fault" ||
+        surface.perception_degraded) return "AI_FAIL";
+    if (decision.cause == "STAIR") return "STAIR";
+    // The StableGuidance object label deliberately survives a short detector
+    // miss.  Use that stabilized label for the HUD as well, otherwise the
+    // bitmap can still flicker to UNKNOWN while serial and voice stay stable.
+    if (decision.object_label != "NONE" && decision.action != "clear") {
+        if (decision.object_label == "PERSON" || decision.object_label == "CHAIR" ||
+            decision.object_label == "TABLE" || decision.object_label == "BAG" ||
+            decision.object_label == "COUCH" || decision.object_label == "BENCH") {
+            return decision.object_label;
+        }
+    }
+    const int object_index = find_primary_index(result);
+    if (object_index >= 0 && decision.action != "clear") {
+        return object_hud_text(result.items[object_index]);
+    }
+    if (decision.cause == "BLOCKED") return "BLOCKED";
+    if (decision.cause == "STEP_CHECK") return "STEP_CHECK";
+    if (decision.cause == "PATH") return "PATH";
+    return "UNKNOWN";
+}
+
+std::string hud_info_asset_path(const DetectionResult& result,
+                                const AvoidanceDecision& decision,
+                                const SurfaceResult& surface)
+{
+    const std::string label = hud_primary_text(result, decision, surface);
+    std::string range = decision.range;
+    if (range != "NEAR" && range != "MID" && range != "FAR") range = "UNKNOWN";
+    return hud_asset_path("INFO_" + label + "_" + range + "_" +
+                          hud_direction_text(decision.hazard_sector));
+}
+
 std::string nearest_risk_text(const AvoidanceDecision& decision)
 {
     const float nearest = nearest_distance_from_decision(decision);
@@ -660,7 +743,7 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
      * 图层残留，又避免每帧重载文字纹理造成显示延迟。
      */
     std::vector<sst::device::osd::OsdQuadRangle> box_quads;
-    box_quads.reserve(3);
+    box_quads.reserve(2);
 
     // OSD 图层约定：layer 0 为停用的旧风险条；layer 1 为动作文字位图；
     // layer 2 为方向/风险辅助位图；layer 3 预留；layer 4 绘制目标框。
@@ -670,7 +753,7 @@ void VISUALIZER::Draw(const DetectionResult& result, const AvoidanceDecision& de
         static_layers_cleaned_ = true;
     }
 
-    const size_t max_display_boxes = std::min<size_t>(result.items.size(), 3);
+    const size_t max_display_boxes = std::min<size_t>(result.items.size(), 2);
     for (size_t i = 0; i < max_display_boxes; ++i) {
         const auto& item = result.items[i];
 
@@ -710,16 +793,15 @@ void VISUALIZER::Draw(const DetectionResult& result,
                       const AvoidanceDecision& decision,
                       const SurfaceResult& surface)
 {
-    // Fixed-budget monochrome HUD. Layer 0 stays empty, layers 1/2 each hold
-    // one static bitmap, layer 3 holds at most eight scene primitives and
-    // layer 4 at most three stable object boxes.
+    // Fixed-budget monochrome HUD. Layers 0/3 are intentionally always empty;
+    // layers 1/2 each hold one bitmap and layer 4 holds at most two boxes.
     osd_device.CleanLayer(0);
     osd_device.CleanLayer(3);
     static_layers_cleaned_ = true;
 
     std::vector<sst::device::osd::OsdQuadRangle> box_quads;
-    box_quads.reserve(3);
-    const size_t max_display_boxes = std::min<size_t>(result.items.size(), 3);
+    box_quads.reserve(2);
+    const size_t max_display_boxes = std::min<size_t>(result.items.size(), 2);
     for (size_t i = 0; i < max_display_boxes; ++i) {
         sst::device::osd::OsdQuadRangle q;
         q.box = result.items[i].box;
@@ -735,73 +817,16 @@ void VISUALIZER::Draw(const DetectionResult& result,
         osd_device.DrawTexture(action_asset, 24, 36, 1)) {
         last_action_asset_ = action_asset;
     }
-    std::vector<sst::device::osd::OsdQuadRangle> scene_quads;
-    scene_quads.reserve(8);
-    const float width = static_cast<float>(image_shape_[0]);
-    const float height = static_cast<float>(image_shape_[1]);
-    const float roi_top = std::max(0.0f, height - width);
-    std::string primary_label = "UNKNOWN";
-    if (surface.perception_degraded) {
-        primary_label = "AI_FAIL";
-    } else if (surface.valid && !surface.stale &&
-               (surface.stair_edge_persistent ||
-                surface.primary_hazard == "step_or_drop")) {
-        primary_label = "STAIR";
-    } else if (surface.valid && !surface.stale &&
-               surface.primary_hazard == "blocked_surface") {
-        primary_label = "BLOCKED";
-    } else {
-        const int object_index = find_primary_index(result);
-        if (object_index >= 0) primary_label = object_hud_text(result.items[object_index]);
-        else if (surface.valid && !surface.stale && surface.center.safe_candidate) primary_label = "PATH";
-    }
-    const std::string label_asset = hud_asset_path(primary_label);
+    const std::string label_asset = hud_info_asset_path(result, decision, surface);
     if (label_asset != last_info_asset_ &&
         osd_device.DrawTexture(label_asset, 24, 128, 2)) {
         last_info_asset_ = label_asset;
     }
 
-    if (!surface.perception_degraded && surface.valid && !surface.stale) {
-        const float x1 = width * 0.30f;
-        const float x2 = width * 0.70f;
-        const float y1 = roi_top + 120.0f;
-        const float y2 = height - 16.0f;
-        if (primary_label == "STAIR") {
-            for (int i = 0; i < surface.stair_edge_count && i < 2; ++i) {
-                const float edge_y = roi_top +
-                    width * surface.stair_edge_rows[i] / SURFACE_GRID_SIZE;
-                push_solid(&scene_quads, x1, edge_y, x2, edge_y + 6.0f);
-            }
-            const float edge_y = surface.stair_edge_count > 0
-                ? roi_top + width * surface.stair_edge_rows[0] / SURFACE_GRID_SIZE
-                : y1 + 0.58f * (y2 - y1);
-            const float cx = 0.5f * (x1 + x2);
-            push_solid(&scene_quads, cx - 4.0f, edge_y + 18.0f,
-                       cx + 4.0f, edge_y + 70.0f);
-            push_solid(&scene_quads, cx - 20.0f, edge_y + 52.0f,
-                       cx, edge_y + 62.0f);
-            push_solid(&scene_quads, cx, edge_y + 52.0f,
-                       cx + 20.0f, edge_y + 62.0f);
-        } else if (primary_label == "BLOCKED") {
-            push_hollow(&scene_quads, x1, y1, x2, y2, 6);
-            for (int k = 1; k <= 3; ++k) {
-                const float t = static_cast<float>(k) / 4.0f;
-                const float x = x1 + t * (x2 - x1);
-                push_solid(&scene_quads, x - 5.0f,
-                           y1 + t * (y2 - y1) - 10.0f,
-                           x + 5.0f, y1 + t * (y2 - y1) + 10.0f);
-                push_solid(&scene_quads, x - 5.0f,
-                           y2 - t * (y2 - y1) - 10.0f,
-                           x + 5.0f, y2 - t * (y2 - y1) + 10.0f);
-            }
-        } else if (primary_label == "PATH") {
-            push_hollow(&scene_quads, x1, y1, x2, y2, 3);
-        } else if (primary_label == "UNKNOWN") {
-            push_hollow(&scene_quads, x1, y1, x2, y2, 2);
-        }
-    }
-    if (scene_quads.size() > 8U) scene_quads.resize(8U);
-    osd_device.Draw(scene_quads, 3);
+    // Submit an empty vector explicitly so stale scene geometry cannot remain
+    // after a state transition or an older firmware run.
+    std::vector<sst::device::osd::OsdQuadRangle> no_scene_quads;
+    osd_device.Draw(no_scene_quads, 3);
     osd_device.Draw(box_quads, 4);
     return;
 

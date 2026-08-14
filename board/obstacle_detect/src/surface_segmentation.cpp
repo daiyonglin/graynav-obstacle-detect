@@ -53,7 +53,10 @@ int depth_severity(const std::string& level)
 }  // namespace
 
 SurfaceSegmenter::SurfaceSegmenter()
-    : stable_depth_level_("unknown")
+    : stair_state_(STAIR_NONE),
+      stair_suspect_clear_count_(0),
+      stair_confirm_clear_count_(0),
+      stable_depth_level_("unknown")
 {
     std::memset(hazard_latched_, 0, sizeof(hazard_latched_));
     std::memset(hazard_clear_count_, 0, sizeof(hazard_clear_count_));
@@ -143,11 +146,13 @@ SurfaceCorridor SurfaceSegmenter::BuildCorridor(const CorridorStats& stats)
     corridor.blocked_ratio = stats.counts[BLOCKED_SURFACE] * inv;
     corridor.step_ratio = stats.counts[STEP_OR_DROP] * inv;
     corridor.unknown_ratio = stats.counts[UNKNOWN_OTHER] * inv;
+    corridor.step_largest_component = stats.largest_components[STEP_OR_DROP];
+    corridor.blocked_largest_component = stats.largest_components[BLOCKED_SURFACE];
     // A full-corridor STEP mask is a known failure mode on dark or repetitive
     // indoor textures.  Segmentation alone may only nominate a bounded,
     // connected step region; a larger region needs edge/depth corroboration.
-    corridor.persistent_hazard = corridor.step_ratio >= 0.03f &&
-                                 corridor.step_ratio <= 0.55f &&
+    corridor.persistent_hazard = corridor.step_ratio >= 0.04f &&
+                                 corridor.step_ratio <= 0.35f &&
                                  stats.largest_components[STEP_OR_DROP] >= 12;
     corridor.blocked_persistent = corridor.blocked_ratio >= 0.40f &&
                                   stats.largest_components[BLOCKED_SURFACE] >= 12;
@@ -440,11 +445,14 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
 {
     if (scene_logits == NULL || result == NULL) return;
     std::array<float, SURFACE_GRID_SIZE> row_scores{};
+    std::array<float, SURFACE_GRID_SIZE> row_spans{};
     int evidence_cells = 0;
     int corridor_cells = 0;
     for (int y = kGrid / 5; y < kGrid; ++y) {
         float row_sum = 0.0f;
         int row_count = 0;
+        int consecutive = 0;
+        int longest = 0;
         for (int x = 0; x < kGrid; ++x) {
             if (!CellInCorridor(x, y, 1)) continue;
             const size_t index = hwc_layout
@@ -455,9 +463,16 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
             row_sum += probability;
             ++row_count;
             ++corridor_cells;
-            if (probability >= 0.50f) ++evidence_cells;
+            if (probability >= 0.50f) {
+                ++evidence_cells;
+                longest = std::max(longest, ++consecutive);
+            } else {
+                consecutive = 0;
+            }
         }
         row_scores[y] = row_count > 0 ? row_sum / static_cast<float>(row_count) : 0.0f;
+        row_spans[y] = row_count > 0
+            ? static_cast<float>(longest) / static_cast<float>(row_count) : 0.0f;
     }
     result->stair_edge_score = corridor_cells > 0
         ? static_cast<float>(evidence_cells) / static_cast<float>(corridor_cells) : 0.0f;
@@ -475,6 +490,10 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
         }
         if (best_row >= 0) {
             result->stair_edge_rows[result->stair_edge_count++] = best_row;
+            if (selected == 0) {
+                result->stair_edge_peak = best_score;
+                result->stair_edge_span_ratio = row_spans[best_row];
+            }
         }
     }
 
@@ -498,22 +517,72 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
         ? std::fabs(std::log((upper_depth / upper_count) / (lower_depth / lower_count))) /
               std::log(kDepthMaxM / kDepthMinM) * kDepthBins
         : 0.0f;
-    const bool bounded_step_region = result->center.step_ratio >= 0.03f &&
-                                     result->center.step_ratio <= 0.55f;
-    const bool current_candidate =
-        (bounded_step_region && result->stair_edge_score >= 0.08f) ||
-        (result->stair_edge_score >= 0.12f && depth_bins >= 1.5f);
-    stair_edge_history_.push_back(current_candidate);
-    while (stair_edge_history_.size() > 3U) stair_edge_history_.pop_front();
-    int hits = 0;
-    for (bool value : stair_edge_history_) if (value) ++hits;
-    result->stair_edge_persistent = stair_edge_history_.size() == 3U && hits >= 2;
-    if (result->stair_edge_persistent) {
+    result->stair_depth_jump_bins = depth_bins;
+    const bool semantic_evidence = result->center.step_ratio >= 0.04f &&
+        result->center.step_ratio <= 0.35f &&
+        result->center.step_largest_component >= 12;
+    const bool edge_evidence = result->stair_edge_peak >= 0.55f &&
+        result->stair_edge_span_ratio >= 0.45f;
+    const bool depth_evidence = depth_bins >= 2.0f;
+    const int evidence_count = static_cast<int>(semantic_evidence) +
+        static_cast<int>(edge_evidence) + static_cast<int>(depth_evidence);
+    const bool suspect_candidate = evidence_count >= 2;
+    const bool confirm_candidate = semantic_evidence && edge_evidence && depth_evidence;
+
+    stair_suspect_history_.push_back(suspect_candidate);
+    while (stair_suspect_history_.size() > 5U) stair_suspect_history_.pop_front();
+    stair_confirm_history_.push_back(confirm_candidate);
+    while (stair_confirm_history_.size() > 6U) stair_confirm_history_.pop_front();
+    int suspect_hits = 0;
+    int confirm_hits = 0;
+    for (bool value : stair_suspect_history_) if (value) ++suspect_hits;
+    for (bool value : stair_confirm_history_) if (value) ++confirm_hits;
+
+    if (stair_state_ == STAIR_CONFIRMED) {
+        if (confirm_candidate) stair_confirm_clear_count_ = 0;
+        else if (++stair_confirm_clear_count_ >= 5) {
+            stair_state_ = suspect_hits >= 3 ? STAIR_SUSPECTED : STAIR_NONE;
+            stair_confirm_clear_count_ = 0;
+        }
+    } else if (stair_confirm_history_.size() >= 4U && confirm_hits >= 4) {
+        stair_state_ = STAIR_CONFIRMED;
+        stair_confirm_clear_count_ = 0;
+    } else if (stair_state_ == STAIR_SUSPECTED) {
+        if (suspect_candidate) stair_suspect_clear_count_ = 0;
+        else if (++stair_suspect_clear_count_ >= 3) {
+            stair_state_ = STAIR_NONE;
+            stair_suspect_clear_count_ = 0;
+        }
+    } else if (stair_suspect_history_.size() >= 3U && suspect_hits >= 3) {
+        stair_state_ = STAIR_SUSPECTED;
+        stair_suspect_clear_count_ = 0;
+    }
+
+    result->stair_state = stair_state_;
+    result->stair_edge_persistent = stair_state_ == STAIR_CONFIRMED;
+    result->center.persistent_hazard = result->stair_edge_persistent;
+    result->center.safe_candidate = result->center.safe_candidate &&
+        stair_state_ == STAIR_NONE;
+    if (stair_state_ == STAIR_CONFIRMED) {
         result->center.persistent_hazard = true;
         result->center.safe_candidate = false;
         result->primary_hazard = "step_or_drop";
         result->primary_sector = "center";
         result->proximity = result->depth_level;
+    } else if (stair_state_ == STAIR_SUSPECTED) {
+        result->primary_hazard = "possible_step";
+        result->primary_sector = "center";
+        result->proximity = result->depth_level;
+    } else if (result->center.blocked_persistent) {
+        result->primary_hazard = "blocked_surface";
+        result->primary_sector = "center";
+    } else if (result->center.safe_candidate) {
+        result->primary_hazard = "none";
+        result->primary_sector = "unknown";
+    } else {
+        result->primary_hazard = result->center.unknown_ratio >= kUnknownMaxRatio
+            ? "unknown_other" : "unknown";
+        result->primary_sector = "center";
     }
 }
 
@@ -556,6 +625,10 @@ bool SurfaceSegmenter::PostprocessPackedLogits(const float* scene_logits,
                            hwc_layout, timestamp_ms, result)) {
         return false;
     }
+    // 统一模型中 segmentation 只提供候选证据，不能独自触发台阶停止。
+    result->left.persistent_hazard = false;
+    result->center.persistent_hazard = false;
+    result->right.persistent_hazard = false;
     DecodeStairEdge(scene_logits, hwc_layout, result);
     return true;
 }

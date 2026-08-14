@@ -10,6 +10,10 @@ namespace obstacle {
 /** @brief 将稳定目标决策与道路分割走廊合并为唯一 AvoidanceDecision。 */
 class SurfaceDecisionFusion {
 public:
+    /** 命名目标覆盖预测台阶边缘时，将 confirmed 降为 suspected。 */
+    void ApplyObjectOcclusion(const DetectionResult& detections,
+                              SurfaceResult* surface) const;
+
     AvoidanceDecision Fuse(const AvoidanceDecision& detection,
                            const SurfaceResult& surface,
                            int64_t now_ms) const;

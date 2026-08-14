@@ -76,7 +76,11 @@ private:
     int blocked_clear_count_[3];
     std::deque<float> center_depth_history_;
     std::deque<std::string> center_depth_level_history_;
-    std::deque<bool> stair_edge_history_;
+    std::deque<bool> stair_suspect_history_;
+    std::deque<bool> stair_confirm_history_;
+    StairState stair_state_;
+    int stair_suspect_clear_count_;
+    int stair_confirm_clear_count_;
     std::string stable_depth_level_;
 };
 

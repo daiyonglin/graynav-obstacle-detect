@@ -1459,7 +1459,11 @@ bool YOLOV8GRAY::Postprocess(DetectionResult* result, float conf_threshold)
                     ? fast_sigmoid(person_logit) : 0.0f;
                 // ROD25 对被截断的人体响应偏弱。保留相对可信的 person 次优分支，
                 // 后续仍需经过几何过滤和至少两帧轨迹确认，不把弱单帧直接用于规划。
-                const bool keep_person = person_cls >= 0 && person_cls != best_cls &&
+                // Indoor8 已针对局部人体做过训练，部署时遵循标准 YOLO top-1
+                // 解码。旧 ROD25 的次优 person 保护会在 chair/table anchor 旁
+                // 额外制造人体框，因此只允许旧 25 类模型使用该兼容分支。
+                const bool keep_person = obstacle::semantic::ModelClassCount() == 25 &&
+                    person_cls >= 0 && person_cls != best_cls &&
                     person_logit >= threshold_logits[person_cls] &&
                     person_score >= std::max(0.08f, best_score * 0.30f);
                 if (!keep_best && !keep_person) continue;

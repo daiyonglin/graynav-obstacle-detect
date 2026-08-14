@@ -49,6 +49,43 @@ float SurfaceDecisionFusion::SafeScore(const SurfaceCorridor& corridor)
            2.0f * corridor.step_ratio - 0.75f * corridor.unknown_ratio;
 }
 
+void SurfaceDecisionFusion::ApplyObjectOcclusion(
+    const DetectionResult& detections,
+    SurfaceResult* surface) const
+{
+    if (surface == NULL || surface->stair_state == STAIR_NONE ||
+        surface->stair_edge_count <= 0) {
+        return;
+    }
+    const float frame_width = 720.0f;
+    const float lower_roi_top = 1280.0f - frame_width;
+    const float edge_y = lower_roi_top + frame_width *
+        static_cast<float>(surface->stair_edge_rows[0]) / SURFACE_GRID_SIZE;
+    const float corridor_x1 = frame_width * 0.30f;
+    const float corridor_x2 = frame_width * 0.70f;
+    for (const DetectionItem& item : detections.items) {
+        const bool named_rigid = item.class_id == semantic::PERSON ||
+            semantic::IsFurnitureLikeSemantic(item.class_id);
+        if (!named_rigid || item.quality == "coarse") continue;
+        const float overlap = std::max(0.0f,
+            std::min(item.box[2], corridor_x2) -
+            std::max(item.box[0], corridor_x1));
+        const bool spans_corridor = overlap / (corridor_x2 - corridor_x1) >= 0.35f;
+        const bool contains_edge = edge_y >= item.box[1] - 12.0f &&
+                                   edge_y <= item.box[3] + 12.0f;
+        if (!spans_corridor || !contains_edge) continue;
+        surface->stair_edge_occluded_by_object = true;
+        if (surface->stair_state == STAIR_CONFIRMED) {
+            surface->stair_state = STAIR_SUSPECTED;
+            surface->stair_edge_persistent = false;
+            surface->center.persistent_hazard = false;
+            surface->primary_hazard = "possible_step";
+            surface->primary_sector = "center";
+        }
+        return;
+    }
+}
+
 AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection,
                                                const SurfaceResult& surface,
                                                int64_t now_ms) const
@@ -107,8 +144,9 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     const bool left_safe = IsSafe(surface.left);
     const bool center_safe = IsSafe(surface.center);
     const bool right_safe = IsSafe(surface.right);
-    const bool center_drop = surface.center.persistent_hazard &&
-        (surface.center.step_ratio >= 0.03f || surface.stair_edge_persistent);
+    const bool center_drop = surface.stair_state == STAIR_CONFIRMED &&
+        surface.center.persistent_hazard && surface.stair_edge_persistent;
+    const bool possible_step = surface.stair_state == STAIR_SUSPECTED;
     const bool center_blocked = surface.center.blocked_persistent;
     const bool center_unknown = !center_drop && !center_blocked &&
         (surface.center.unknown_ratio >= 0.30f || !center_safe);
@@ -116,25 +154,23 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
 
     std::string reason = "surface_clear";
     if (center_drop) {
-        if (fused.depth_level == "far") {
-            fused.depth_level = "unknown";
-            fused.depth_confidence = 0.0f;
-            fused.depth_margin = 0.0f;
-            fused.depth_ambiguous = true;
-            fused.depth_source = "step_override_far";
-        }
-        if (near_surface || (!left_safe && !right_safe)) {
+        if (fused.depth_level == "near" || fused.depth_level == "mid") {
             fused.action = "stop";
-            reason = "surface_drop_near_or_no_safe_side";
-        } else if (left_safe || right_safe) {
-            if (left_safe && right_safe) {
-                fused.action = SafeScore(surface.left) >= SafeScore(surface.right)
-                    ? "turn_left" : "turn_right";
-            } else {
-                fused.action = left_safe ? "turn_left" : "turn_right";
-            }
-            reason = "surface_drop_side_avoid";
+            reason = "confirmed_step_near_mid_stop";
+        } else {
+            fused.action = "slow";
+            reason = "confirmed_step_far_unknown_slow";
         }
+    } else if (detection.action == "turn_left" && !left_safe) {
+        fused.action = right_safe ? "turn_right" : "stop";
+        reason = "surface_reject_left_turn";
+    } else if (detection.action == "turn_right" && !right_safe) {
+        fused.action = left_safe ? "turn_left" : "stop";
+        reason = "surface_reject_right_turn";
+    } else if (detection.action != "clear") {
+        // 命名目标已经形成稳定导航动作时，人物/家具背后的 blocked mask
+        // 不能覆盖成难以理解的“墙面阻挡”。
+        reason = "detection_action_preserved";
     } else if (center_blocked) {
         if (near_surface && !left_safe && !right_safe) {
             fused.action = "stop";
@@ -151,14 +187,11 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
             fused.action = "slow";
             reason = "surface_blocked_uncertain_side";
         }
-    } else if (detection.action == "turn_left" && !left_safe) {
-        fused.action = right_safe ? "turn_right" : "stop";
-        reason = "surface_reject_left_turn";
-    } else if (detection.action == "turn_right" && !right_safe) {
-        fused.action = left_safe ? "turn_left" : "stop";
-        reason = "surface_reject_right_turn";
-    } else if (detection.action != "clear") {
-        reason = "detection_action_preserved";
+    } else if (possible_step) {
+        fused.action = "slow";
+        fused.hazard_type = "possible_step";
+        fused.hazard_sector = "center";
+        reason = "possible_step_slow";
     } else if (center_unknown) {
         fused.action = "slow";
         fused.hazard_type = fused.hazard_type == "none"

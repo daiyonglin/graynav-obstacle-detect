@@ -116,6 +116,13 @@ enum SurfaceClass {
     SURFACE_CLASS_COUNT = 4
 };
 
+/** @brief 台阶证据状态。疑似只用于减速提示，确认后才允许触发停止。 */
+enum StairState {
+    STAIR_NONE = 0,
+    STAIR_SUSPECTED = 1,
+    STAIR_CONFIRMED = 2
+};
+
 // The unified model emits scene_logits on its P3 grid: 384 / 8 = 48.
 static const int SURFACE_GRID_SIZE = 48;
 static const int SURFACE_GRID_CELLS = SURFACE_GRID_SIZE * SURFACE_GRID_SIZE;
@@ -129,6 +136,8 @@ struct SurfaceCorridor {
     float blocked_ratio;
     float step_ratio;
     float unknown_ratio;
+    int step_largest_component;
+    int blocked_largest_component;
     bool safe_candidate;
     bool persistent_hazard;
     bool blocked_persistent;
@@ -138,6 +147,8 @@ struct SurfaceCorridor {
           blocked_ratio(0.0f),
           step_ratio(0.0f),
           unknown_ratio(0.0f),
+          step_largest_component(0),
+          blocked_largest_component(0),
           safe_candidate(false),
           persistent_hazard(false),
           blocked_persistent(false) {}
@@ -165,6 +176,11 @@ struct SurfaceResult {
     bool depth_consistent;
     bool approaching;
     float stair_edge_score;
+    float stair_edge_peak;
+    float stair_edge_span_ratio;
+    float stair_depth_jump_bins;
+    bool stair_edge_occluded_by_object;
+    StairState stair_state;
     std::array<int, 2> stair_edge_rows;
     int stair_edge_count;
     bool stair_edge_persistent;
@@ -191,6 +207,11 @@ struct SurfaceResult {
           depth_consistent(false),
           approaching(false),
           stair_edge_score(0.0f),
+          stair_edge_peak(0.0f),
+          stair_edge_span_ratio(0.0f),
+          stair_depth_jump_bins(0.0f),
+          stair_edge_occluded_by_object(false),
+          stair_state(STAIR_NONE),
           stair_edge_rows{-1, -1},
           stair_edge_count(0),
           stair_edge_persistent(false),
@@ -257,6 +278,49 @@ struct AvoidanceDecision {
         left.dir = "left";
         center.dir = "center";
         right.dir = "right";
+    }
+};
+
+/**
+ * @brief 对原始融合决策做过非对称时序稳定后的唯一演示状态。
+ *
+ * Aurora、可读串口和 SYN6288 都必须由同一个 StableGuidance 生成，避免
+ * 距离、方位或目标标签在相邻帧分别抖动成互相矛盾的提示。
+ */
+struct StableGuidance {
+    std::string action;
+    std::string cause;
+    std::string range;
+    std::string sector;
+    std::string object_label;
+    std::string scene_label;
+    float confidence;
+    bool ai_ok;
+    uint64_t timestamp_ms;
+
+    StableGuidance()
+        : action("slow"),
+          cause("UNKNOWN"),
+          range("UNKNOWN"),
+          sector("CENTER"),
+          object_label("NONE"),
+          scene_label("UNKNOWN"),
+          confidence(0.0f),
+          ai_ok(true),
+          timestamp_ms(0) {}
+
+    void ApplyTo(AvoidanceDecision* decision) const {
+        if (decision == NULL) return;
+        decision->action = action;
+        decision->cause = cause;
+        decision->range = range;
+        decision->hazard_sector = sector;
+        decision->object_label = object_label;
+        decision->scene_label = scene_label;
+        decision->confidence = confidence;
+        decision->ai_ok = ai_ok;
+        decision->depth_level = range == "NEAR" ? "near" :
+            (range == "MID" ? "mid" : (range == "FAR" ? "far" : "unknown"));
     }
 };
 

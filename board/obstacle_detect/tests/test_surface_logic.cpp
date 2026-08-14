@@ -1,6 +1,8 @@
 #include "surface_fusion.hpp"
 #include "surface_segmentation.hpp"
+#include "guidance_stabilizer.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -80,10 +82,26 @@ std::vector<float> hwc_to_chw(const std::vector<float>& hwc, int channels)
     return chw;
 }
 
-std::vector<float> packed_scene_logits(bool hazard, int depth_bin, bool edge)
+std::vector<float> packed_scene_logits(bool hazard,
+                                       int depth_bin,
+                                       bool edge,
+                                       bool depth_jump = true)
 {
     const std::vector<float> seg = segmentation_logits(hazard);
-    const std::vector<float> depth = depth_logits(depth_bin);
+    std::vector<float> depth = depth_logits(depth_bin);
+    const int edge_row = SURFACE_GRID_SIZE * 3 / 4;
+    if (depth_jump) {
+        const int upper_bin = std::max(0, depth_bin - 3);
+        const int lower_bin = std::min(DEPTH_BIN_COUNT - 1, depth_bin + 3);
+        depth.assign(SURFACE_GRID_CELLS * DEPTH_BIN_COUNT, -4.0f);
+        for (int y = 0; y < SURFACE_GRID_SIZE; ++y) {
+            const int active_bin = y < edge_row ? upper_bin : lower_bin;
+            for (int x = 0; x < SURFACE_GRID_SIZE; ++x) {
+                const int cell = y * SURFACE_GRID_SIZE + x;
+                depth[cell * DEPTH_BIN_COUNT + active_bin] = 4.0f;
+            }
+        }
+    }
     std::vector<float> packed(SURFACE_GRID_CELLS * UNIFIED_SCENE_CHANNELS, -8.0f);
     for (int cell = 0; cell < SURFACE_GRID_CELLS; ++cell) {
         for (int c = 0; c < SURFACE_CLASS_COUNT; ++c) {
@@ -96,7 +114,7 @@ std::vector<float> packed_scene_logits(bool hazard, int depth_bin, bool edge)
         }
     }
     if (edge) {
-        const int row = SURFACE_GRID_SIZE * 3 / 4;
+        const int row = edge_row;
         for (int y = row - 1; y <= row + 1; ++y) {
             for (int x = SURFACE_GRID_SIZE / 3; x < SURFACE_GRID_SIZE * 2 / 3; ++x) {
                 packed[(y * SURFACE_GRID_SIZE + x) * UNIFIED_SCENE_CHANNELS +
@@ -170,13 +188,9 @@ int main()
     assert(surface.primary_hazard == "step_or_drop");
     assert(surface.depth_level != "unknown");
 
-    surface.left.safe_candidate = true;
-    surface.right.safe_candidate = false;
-    AvoidanceDecision fused = fusion.Fuse(detection, surface, 400);
-    assert(fused.action == "turn_left");
-    assert(fused.perception_source == "detection+surface_depth");
-    assert(fused.depth_level == "unknown");
-    assert(fused.depth_source == "step_override_far");
+    // Segmentation-only evidence is useful for diagnostics, but cannot be a
+    // confirmed unified stair without edge and depth corroboration.
+    assert(surface.stair_state == STAIR_NONE);
 
     const std::vector<float> clear = segmentation_logits(false);
     for (int i = 0; i < 3; ++i) {
@@ -270,20 +284,86 @@ int main()
         depth_chw.data(), depth_chw.size(), false, 1100, &chw_surface));
 
     // The production model packs segmentation, depth and stair edge into one
-    // 21-channel output; two of three lower-ROI observations latch an edge that
-    // corroborates a bounded step region, faster than segmentation-only 3/4.
+    // 21-channel output; semantic, horizontal-edge and depth-jump evidence must
+    // persist for four LOWER observations before a confirmed stair is exposed.
     obstacle::SurfaceSegmenter packed_segmenter;
     SurfaceResult packed_surface;
     const std::vector<float> packed = packed_scene_logits(true, 10, true);
     assert(packed_segmenter.PostprocessPackedLogits(
         packed.data(), packed.size(), true, 1200, &packed_surface));
     assert(!packed_surface.stair_edge_persistent);
-    assert(packed_segmenter.PostprocessPackedLogits(
-        packed.data(), packed.size(), true, 1300, &packed_surface));
-    assert(packed_segmenter.PostprocessPackedLogits(
-        packed.data(), packed.size(), true, 1400, &packed_surface));
+    for (int i = 1; i < 4; ++i) {
+        assert(packed_segmenter.PostprocessPackedLogits(
+            packed.data(), packed.size(), true, 1200 + i * 100, &packed_surface));
+    }
     assert(packed_surface.stair_edge_persistent);
+    assert(packed_surface.stair_state == STAIR_CONFIRMED);
     assert(packed_surface.stair_edge_count > 0);
+    assert(packed_surface.stair_edge_peak >= 0.55f);
+    assert(packed_surface.stair_edge_span_ratio >= 0.45f);
+    assert(packed_surface.stair_depth_jump_bins >= 2.0f);
+
+    packed_surface.depth_level = "mid";
+    packed_surface.depth_ambiguous = false;
+    AvoidanceDecision stair_fused = fusion.Fuse(detection, packed_surface, 1600);
+    assert(stair_fused.action == "stop");
+
+    // A bed edge or chair back supplies one horizontal edge but neither a
+    // bounded STEP region nor a depth discontinuity. It must never confirm.
+    obstacle::SurfaceSegmenter furniture_edge_segmenter;
+    SurfaceResult furniture_edge_surface;
+    const std::vector<float> furniture_edge =
+        packed_scene_logits(false, 10, true, false);
+    for (int i = 0; i < 8; ++i) {
+        assert(furniture_edge_segmenter.PostprocessPackedLogits(
+            furniture_edge.data(), furniture_edge.size(), true,
+            2000 + i * 100, &furniture_edge_surface));
+        assert(furniture_edge_surface.stair_state != STAIR_CONFIRMED);
+        assert(!furniture_edge_surface.stair_edge_persistent);
+    }
+
+    // If a candidate stair edge lies inside a stable person/furniture box, the
+    // confirmation is conservatively downgraded to suspected.
+    DetectionResult occluding_objects;
+    DetectionItem chair;
+    chair.class_id = obstacle::semantic::CHAIR_SEAT;
+    chair.raw_label = "chair";
+    chair.quality = "good";
+    chair.box = {180.0f, 700.0f, 540.0f, 1260.0f};
+    occluding_objects.items.push_back(chair);
+    fusion.ApplyObjectOcclusion(occluding_objects, &packed_surface);
+    assert(packed_surface.stair_edge_occluded_by_object);
+    assert(packed_surface.stair_state == STAIR_SUSPECTED);
+    assert(fusion.Fuse(detection, packed_surface, 1700).action == "slow");
+
+    // OSD, UART and voice consume one stabilized decision. NEAR enters after
+    // 2/3 evidence, requires 4/5 non-NEAR votes to leave, and STOP requires
+    // four lower-risk observations to release.
+    obstacle::GuidanceStabilizer guidance;
+    AvoidanceDecision raw;
+    raw.action = "clear";
+    raw.cause = "PATH";
+    raw.range = "FAR";
+    raw.hazard_sector = "center";
+    raw.object_label = "NONE";
+    raw.scene_label = "PATH";
+    raw.ai_ok = true;
+    guidance.Update(raw, 0);
+    raw.action = "stop";
+    raw.cause = "OBJECT";
+    raw.object_label = "PERSON";
+    raw.range = "NEAR";
+    guidance.Update(raw, 100);
+    const StableGuidance& near_stop = guidance.Update(raw, 200);
+    assert(near_stop.action == "stop");
+    assert(near_stop.range == "NEAR");
+    raw.action = "slow";
+    raw.range = "MID";
+    for (int i = 0; i < 3; ++i) {
+        assert(guidance.Update(raw, 300 + i * 100).action == "stop");
+    }
+    assert(guidance.Update(raw, 600).action == "slow");
+    assert(guidance.Current().range == "MID");
 
     // Three reliable anchors establish a scale.  The public depth grid may then
     // affect an internal safe distance, while the UI still exposes only levels.
