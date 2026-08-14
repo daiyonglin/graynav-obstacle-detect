@@ -31,13 +31,11 @@ define SSNE_AI_DEMO_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/app_demo/app_assets/colorLUT.sscl
 	$(INSTALL) -m 0644 $(@D)/app_assets/models/$(A1_MODEL_FILENAME) \
 		$(TARGET_DIR)/app_demo/app_assets/models/$(A1_MODEL_FILENAME)
-	for name in STOP SLOW CLEAR LEFT RIGHT \
-		PERSON CHAIR TABLE BAG COUCH BENCH ITEM \
-		STAIR BLOCKED PATH UNKNOWN AI_FAIL; do \
+	for name in STOP SLOW CLEAR LEFT RIGHT; do \
 		$(INSTALL) -m 0644 $(@D)/app_assets/osd/$$name.ssbmp \
 			$(TARGET_DIR)/app_demo/app_assets/osd/$$name.ssbmp; \
 	done
-	for asset in $(@D)/app_assets/osd/INFO_*.ssbmp; do \
+	for asset in $(@D)/app_assets/osd/NAV_*.ssbmp; do \
 		test -f $$asset || exit 1; \
 		$(INSTALL) -m 0644 $$asset \
 			$(TARGET_DIR)/app_demo/app_assets/osd/$$(basename $$asset); \

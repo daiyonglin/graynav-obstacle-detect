@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit the fixed-budget two-line Aurora HUD resource contract."""
+"""Audit the fixed-budget object-name-free Aurora HUD resource contract."""
 
 from __future__ import annotations
 
@@ -8,29 +8,24 @@ import struct
 from pathlib import Path
 
 
-LABELS = (
-    "PERSON", "CHAIR", "TABLE", "BAG", "COUCH", "BENCH",
-    "STAIR", "STEP_CHECK", "BLOCKED", "PATH", "UNKNOWN", "AI_FAIL",
-)
 RANGES = ("NEAR", "MID", "FAR", "UNKNOWN")
-DIRECTIONS = ("LEFT", "FRONT", "RIGHT")
+POSITIONS = ("LEFT", "FRONT", "RIGHT", "MULTI", "BLOCKED")
 
 
 def expected_names() -> set[str]:
     return {
-        f"INFO_{label}_{range_name}_{direction}.ssbmp"
-        for label in LABELS
+        f"NAV_{range_name}_{position}.ssbmp"
         for range_name in RANGES
-        for direction in DIRECTIONS
+        for position in POSITIONS
     }
 
 
 def audit(root: Path) -> None:
     expected = expected_names()
-    present = {path.name for path in root.glob("INFO_*.ssbmp")}
+    present = {path.name for path in root.glob("NAV_*.ssbmp")}
     missing = sorted(expected - present)
     if missing:
-        raise RuntimeError(f"missing INFO assets: {missing[:8]} (total={len(missing)})")
+        raise RuntimeError(f"missing NAV assets: {missing[:8]} (total={len(missing)})")
 
     total_bytes = 0
     for name in sorted(expected):
@@ -47,8 +42,8 @@ def audit(root: Path) -> None:
             raise RuntimeError(f"HUD asset exceeds display budget: {path} {width}x{height}")
         total_bytes += len(raw)
 
-    print(f"info_assets={len(expected)}")
-    print(f"info_asset_bytes={total_bytes}")
+    print(f"navigation_assets={len(expected)}")
+    print(f"navigation_asset_bytes={total_bytes}")
     print("GRAYNAV_OSD_ASSET_AUDIT_OK")
 
 

@@ -58,9 +58,12 @@ if(A1_BUILD_SURFACE_TESTS)
     add_executable(surface_logic_test
         ${PROJECT_SOURCE_DIR}/tests/test_surface_logic.cpp
         ${PROJECT_SOURCE_DIR}/src/guidance_stabilizer.cpp
+        ${PROJECT_SOURCE_DIR}/src/avoidance_planner.cpp
+        ${PROJECT_SOURCE_DIR}/src/ranging.cpp
         ${PROJECT_SOURCE_DIR}/src/surface_segmentation.cpp
         ${PROJECT_SOURCE_DIR}/src/surface_fusion.cpp
         ${PROJECT_SOURCE_DIR}/src/semantic_config.cpp
+        ${PROJECT_SOURCE_DIR}/src/tracker.cpp
     )
 endif()
 
@@ -101,20 +104,18 @@ install(TARGETS ssne_ai_demo DESTINATION bin)
 # model and the fixed-budget monochrome HUD assets used by this executable.
 install(FILES ${PROJECT_SOURCE_DIR}/app_assets/colorLUT.sscl DESTINATION app_assets)
 set(A1_HUD_ASSETS
-    STOP SLOW CLEAR LEFT RIGHT
-    PERSON CHAIR TABLE BAG COUCH BENCH ITEM
-    STAIR BLOCKED PATH UNKNOWN AI_FAIL)
+    STOP SLOW CLEAR LEFT RIGHT)
 foreach(A1_HUD_NAME ${A1_HUD_ASSETS})
     install(FILES ${PROJECT_SOURCE_DIR}/app_assets/osd/${A1_HUD_NAME}.ssbmp
             DESTINATION app_assets/osd)
 endforeach()
-file(GLOB A1_HUD_INFO_ASSETS
-    "${PROJECT_SOURCE_DIR}/app_assets/osd/INFO_*.ssbmp")
-list(SORT A1_HUD_INFO_ASSETS)
-if(NOT A1_HUD_INFO_ASSETS)
-    message(FATAL_ERROR "Two-line INFO_ HUD assets are missing; run tools/generate_osd_ssbmp.py --info-only")
+file(GLOB A1_HUD_NAV_ASSETS
+    "${PROJECT_SOURCE_DIR}/app_assets/osd/NAV_*.ssbmp")
+list(SORT A1_HUD_NAV_ASSETS)
+if(NOT A1_HUD_NAV_ASSETS)
+    message(FATAL_ERROR "NAV_ HUD assets are missing; run tools/generate_osd_ssbmp.py --nav-only")
 endif()
-install(FILES ${A1_HUD_INFO_ASSETS} DESTINATION app_assets/osd)
+install(FILES ${A1_HUD_NAV_ASSETS} DESTINATION app_assets/osd)
 install(DIRECTORY DESTINATION app_assets/models)
 set(A1_MODEL_PATH ${PROJECT_SOURCE_DIR}/app_assets/models/${A1_MODEL_FILENAME})
 if(EXISTS ${A1_MODEL_PATH})

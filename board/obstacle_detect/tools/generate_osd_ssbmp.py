@@ -130,6 +130,25 @@ def generate_info_assets(root: Path) -> int:
     return count
 
 
+def generate_navigation_assets(root: Path) -> int:
+    """Generate the object-name-free Aurora guidance line."""
+    ranges = ["NEAR", "MID", "FAR", "UNKNOWN"]
+    positions = ["LEFT", "FRONT", "RIGHT", "MULTI", "BLOCKED"]
+    count = 0
+    for range_name in ranges:
+        for position in positions:
+            path = root / f"NAV_{range_name}_{position}.ssbmp"
+            write_ssbmp(
+                path,
+                f"{range_name} {position}",
+                scale=4,
+                pad_x=7,
+                pad_y=5,
+            )
+            count += 1
+    return count
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -137,11 +156,20 @@ def main() -> None:
         action="store_true",
         help="Only generate the new two-line INFO_ assets; preserve legacy files.",
     )
+    parser.add_argument(
+        "--nav-only",
+        action="store_true",
+        help="Only generate object-name-free NAV_<range>_<position> assets.",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / "app_assets" / "osd"
     if args.info_only:
         count = generate_info_assets(root)
         print(f"generated_info_assets={count}")
+        return
+    if args.nav_only:
+        count = generate_navigation_assets(root)
+        print(f"generated_navigation_assets={count}")
         return
     for word in ["STOP", "SLOW", "CLEAR", "LEFT", "RIGHT"]:
         write_ssbmp(root / f"{word}.ssbmp", word, scale=10, pad_x=8, pad_y=6)
@@ -159,6 +187,8 @@ def main() -> None:
             write_ssbmp(root / f"{d}_{r}.ssbmp", f"{d} {r}", scale=7, pad_x=6, pad_y=5)
     count = generate_info_assets(root)
     print(f"generated_info_assets={count}")
+    nav_count = generate_navigation_assets(root)
+    print(f"generated_navigation_assets={nav_count}")
 
 
 if __name__ == "__main__":

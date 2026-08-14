@@ -712,6 +712,15 @@ std::string to_upper_text(const std::string& text)
     return out;
 }
 
+std::string to_lower_text(const std::string& text)
+{
+    std::string out = text;
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(out[i])));
+    }
+    return out;
+}
+
 std::string action_display_text(const std::string& action)
 {
     if (action == "turn_left") return "LEFT";
@@ -939,6 +948,14 @@ void DecorateUnifiedDecision(const DetectionResult& result,
     decision->ai_ok = !decision->perception_degraded && surface.valid && !surface.stale;
     decision->range = to_upper_text(decision->depth_level);
     decision->object_label = nav_object_text(result);
+    decision->recommended_direction = decision->action == "turn_left" ? "left" :
+        (decision->action == "turn_right" ? "right" :
+         (decision->action == "stop" || decision->action == "system_fault" ? "hold" : "forward"));
+    const std::string sector = to_lower_text(decision->hazard_sector);
+    decision->hazard_position = sector == "left" ? "LEFT" :
+        (sector == "right" ? "RIGHT" :
+         (sector == "multi" ? "MULTI" :
+          (sector == "blocked" || sector == "wide" ? "BLOCKED" : "FRONT")));
     decision->scene_label = "UNKNOWN";
     if (surface.stair_state == STAIR_CONFIRMED) {
         decision->scene_label = "STEP";
@@ -961,9 +978,43 @@ void DecorateUnifiedDecision(const DetectionResult& result,
                                     decision->depth_confidence);
     const int object_index = find_nearest_index(result);
     if (object_index >= 0) {
+        const DetectionItem& item = result.items[object_index];
         decision->confidence = std::max(decision->confidence,
-                                        result.items[object_index].score);
+                                        item.score);
+        decision->primary_class = item.raw_label.empty() ? item.label : item.raw_label;
+        decision->distance_estimate_m = item.distance_m;
+        const std::string item_level = to_upper_text(item.depth_level);
+        if (item_level == "NEAR" || item_level == "MID" || item_level == "FAR") {
+            decision->range = item_level;
+        }
+    } else if ((decision->scene_label == "STEP" ||
+                decision->scene_label == "STEP_CHECK" ||
+                decision->scene_label == "BLOCKED") && surface.center_depth_m > 0.0f) {
+        decision->primary_class = decision->scene_label == "BLOCKED" ? "blocked" : "stair";
+        decision->distance_estimate_m = surface.center_depth_m;
+        if (!decision->center.occupied) {
+            decision->center.occupied = true;
+            decision->center.raw_label = decision->primary_class;
+            decision->center.label = decision->primary_class;
+            decision->center.distance_estimate_m = surface.center_depth_m;
+            decision->center.safe_distance_m = surface.center_depth_m;
+            decision->center.distance_m = surface.center_depth_m;
+            decision->center.risk_level = decision->action == "stop" ? "urgent" : "warning";
+        }
+    } else {
+        decision->primary_class = "none";
+        decision->distance_estimate_m = -1.0f;
     }
+    const int occupied_zones = static_cast<int>(decision->left.occupied) +
+        static_cast<int>(decision->center.occupied) +
+        static_cast<int>(decision->right.occupied);
+    if (occupied_zones >= 2 && result.items.size() >= 2U) {
+        decision->primary_class = "multiple";
+    }
+    decision->risk = !decision->ai_ok || decision->action == "system_fault" ? "FAULT" :
+        (decision->action == "stop" ? "URGENT" :
+         (decision->action == "clear" ? "SAFE" :
+          (decision->cause == "UNKNOWN" ? "UNKNOWN" : "WARNING")));
 }
 
 std::string nav_primary_text(const AvoidanceDecision& decision)
@@ -985,25 +1036,54 @@ std::string nav_sector_text(const std::string& sector)
     const std::string upper = to_upper_text(sector);
     if (upper == "LEFT") return "LEFT";
     if (upper == "RIGHT") return "RIGHT";
+    if (upper == "MULTI") return "MULTI";
+    if (upper == "BLOCKED" || upper == "WIDE") return "BLOCKED";
     return "FRONT";
 }
 
 std::string NavStateKey(const AvoidanceDecision& decision)
 {
-    return decision.action + "|" + decision.cause + "|" +
-           decision.hazard_sector + "|" + decision.range + "|" +
-           decision.object_label + "|" + decision.scene_label + "|" +
+    return decision.action + "|" + decision.recommended_direction + "|" +
+           decision.hazard_position + "|" + decision.range + "|" +
+           decision.primary_class + "|" + decision.risk + "|" +
            (decision.ai_ok ? "OK" : "FAIL");
 }
 
-void PrintUnifiedNavPacket(const AvoidanceDecision& decision)
+std::string serial_zone_text(const ZoneStatus& zone)
 {
-    std::cout << "[NAV] " << nav_action_text(decision.action)
-              << " | " << nav_primary_text(decision)
-              << " | " << decision.range
-              << " | " << nav_sector_text(decision.hazard_sector)
-              << " | " << (decision.ai_ok ? "AI_OK" : "AI_FAIL")
-              << std::endl;
+    if (!zone.occupied) return "clear";
+    std::ostringstream out;
+    std::string label = zone.raw_label.empty() ? zone.label : zone.raw_label;
+    label = to_lower_text(label.empty() ? "obstacle" : label);
+    out << label << "@";
+    if (zone.distance_estimate_m > 0.0f) {
+        out << std::fixed << std::setprecision(2) << zone.distance_estimate_m;
+    } else {
+        out << "--";
+    }
+    return out.str();
+}
+
+void PrintUnifiedNavPacket(int frame_id, const AvoidanceDecision& decision)
+{
+    std::ostringstream out;
+    out << "[F" << std::setw(6) << std::setfill('0') << frame_id << "] "
+        << nav_action_text(decision.action)
+        << " dir=" << decision.recommended_direction
+        << " cls=" << to_lower_text(decision.primary_class.empty()
+            ? "none" : decision.primary_class)
+        << " dist=";
+    if (decision.distance_estimate_m > 0.0f && decision.action != "clear" &&
+        decision.action != "system_fault") {
+        out << std::fixed << std::setprecision(2) << decision.distance_estimate_m << "m";
+    } else {
+        out << "--";
+    }
+    out << " risk=" << decision.risk
+        << " zones=L:" << serial_zone_text(decision.left)
+        << ",C:" << serial_zone_text(decision.center)
+        << ",R:" << serial_zone_text(decision.right);
+    std::cout << out.str() << std::endl;
 }
 
 int main()
@@ -1107,7 +1187,9 @@ int main()
     std::cout << "[INFO] output diag     = " << (output_serial_diagnostics ? "on" : "off") << std::endl;
     std::cout << "[INFO] output interval = " << output_interval_frames << " frames" << std::endl;
     std::cout << "[INFO] OSD interval    = " << osd_interval_frames << " frames" << std::endl;
-    std::cout << "[NAV] fields: ACTION | HAZARD | RANGE | DIRECTION | AI_STATE" << std::endl;
+    std::cout << "[NAV] fields: [FRAME] ACTION dir=<guidance> cls=<primary> "
+                 "dist=<mono-estimate> risk=<level> zones=L:<state>,C:<state>,R:<state>"
+              << std::endl;
     std::cout << "[INFO] NAV heartbeat   = " << nav_heartbeat_ms
               << " ms, min change=" << nav_min_change_ms << " ms" << std::endl;
     std::cout << "[INFO] capture restart = " << (capture_auto_restart ? "on" : "off") << std::endl;
@@ -1303,7 +1385,7 @@ int main()
         const bool nav_change_allowed = now_ms - last_nav_print_ms >= nav_min_change_ms;
         if (output_human_summary &&
             (nav_heartbeat_due || (nav_state_changed && nav_change_allowed))) {
-            PrintUnifiedNavPacket(stable_decision);
+            PrintUnifiedNavPacket(frame_id, stable_decision);
             last_nav_state_key = nav_state_key;
             last_nav_print_ms = now_ms;
         }

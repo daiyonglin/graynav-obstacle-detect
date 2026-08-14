@@ -711,15 +711,16 @@ std::string hud_primary_text(const DetectionResult& result,
     return "UNKNOWN";
 }
 
-std::string hud_info_asset_path(const DetectionResult& result,
-                                const AvoidanceDecision& decision,
-                                const SurfaceResult& surface)
+std::string hud_navigation_asset_path(const AvoidanceDecision& decision)
 {
-    const std::string label = hud_primary_text(result, decision, surface);
     std::string range = decision.range;
     if (range != "NEAR" && range != "MID" && range != "FAR") range = "UNKNOWN";
-    return hud_asset_path("INFO_" + label + "_" + range + "_" +
-                          hud_direction_text(decision.hazard_sector));
+    std::string position = decision.hazard_position;
+    if (position != "LEFT" && position != "RIGHT" && position != "MULTI" &&
+        position != "BLOCKED") {
+        position = "FRONT";
+    }
+    return hud_asset_path("NAV_" + range + "_" + position);
 }
 
 std::string nearest_risk_text(const AvoidanceDecision& decision)
@@ -793,8 +794,9 @@ void VISUALIZER::Draw(const DetectionResult& result,
                       const AvoidanceDecision& decision,
                       const SurfaceResult& surface)
 {
-    // Fixed-budget monochrome HUD. Layers 0/3 are intentionally always empty;
-    // layers 1/2 each hold one bitmap and layer 4 holds at most two boxes.
+    // Fixed-budget monochrome HUD. Layer 1 is the action, layer 2 contains only
+    // range/position, layer 3 is reserved for verified stair geometry, and
+    // layer 4 contains at most two anonymous stable object boxes.
     osd_device.CleanLayer(0);
     osd_device.CleanLayer(3);
     static_layers_cleaned_ = true;
@@ -817,16 +819,69 @@ void VISUALIZER::Draw(const DetectionResult& result,
         osd_device.DrawTexture(action_asset, 24, 36, 1)) {
         last_action_asset_ = action_asset;
     }
-    const std::string label_asset = hud_info_asset_path(result, decision, surface);
-    if (label_asset != last_info_asset_ &&
-        osd_device.DrawTexture(label_asset, 24, 128, 2)) {
-        last_info_asset_ = label_asset;
+    if (decision.action == "clear") {
+        if (!last_info_asset_.empty()) {
+            osd_device.CleanLayer(2);
+            last_info_asset_.clear();
+        }
+    } else {
+        const std::string info_asset = hud_navigation_asset_path(decision);
+        if (info_asset != last_info_asset_ &&
+            osd_device.DrawTexture(info_asset, 24, 128, 2)) {
+            last_info_asset_ = info_asset;
+        }
     }
 
-    // Submit an empty vector explicitly so stale scene geometry cannot remain
-    // after a state transition or an older firmware run.
-    std::vector<sst::device::osd::OsdQuadRangle> no_scene_quads;
-    osd_device.Draw(no_scene_quads, 3);
+    std::vector<sst::device::osd::OsdQuadRangle> stair_quads;
+    stair_quads.reserve(3);
+    if (surface.stair_state != STAIR_NONE && surface.stair_box_valid) {
+        const float width = static_cast<float>(image_shape_[0]);
+        const float height = static_cast<float>(image_shape_[1]);
+        const float roi_top = std::max(0.0f, height - width);
+        auto map_box = [&](const std::array<float, 4>& norm) {
+            return std::array<float, 4>{
+                norm[0] * width,
+                roi_top + norm[1] * width,
+                norm[2] * width,
+                roi_top + norm[3] * width
+            };
+        };
+        if (surface.stair_state == STAIR_CONFIRMED) {
+            sst::device::osd::OsdQuadRangle outer;
+            outer.box = map_box(surface.stair_box_norm);
+            outer.border = 5;
+            outer.layer_id = 3;
+            outer.type = fdevice::TYPE_HOLLOW;
+            outer.alpha = fdevice::TYPE_ALPHA75;
+            outer.color = 2;
+            stair_quads.push_back(outer);
+
+            sst::device::osd::OsdQuadRangle inner = outer;
+            inner.box[0] += 8.0f;
+            inner.box[1] += 8.0f;
+            inner.box[2] -= 8.0f;
+            inner.box[3] -= 8.0f;
+            if (inner.box[2] > inner.box[0] && inner.box[3] > inner.box[1]) {
+                stair_quads.push_back(inner);
+            }
+        }
+        const float edge_y = roi_top + surface.stair_edge_y_norm * width;
+        sst::device::osd::OsdQuadRangle edge;
+        edge.box = {
+            surface.stair_edge_x1_norm * width,
+            std::max(roi_top, edge_y - 3.0f),
+            surface.stair_edge_x2_norm * width,
+            std::min(height, edge_y + 3.0f)
+        };
+        edge.border = 1;
+        edge.layer_id = 3;
+        edge.type = fdevice::TYPE_SOLID;
+        edge.alpha = fdevice::TYPE_ALPHA75;
+        edge.color = 2;
+        stair_quads.push_back(edge);
+    }
+    if (stair_quads.size() > 3U) stair_quads.resize(3U);
+    osd_device.Draw(stair_quads, 3);
     osd_device.Draw(box_quads, 4);
     return;
 
