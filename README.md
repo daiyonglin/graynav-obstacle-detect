@@ -12,14 +12,16 @@ GrayNav 是面向视障辅助导航场景的边缘端感知原型，运行平台
 | COCO80 + SurfaceDepth 双模型候选 | 已烧录、板测失败 | 人体检测可运行，但 SurfaceDepth 进入降级状态；道路/墙面/台阶没有有效结果，分时调度与现有 OSD 不再作为目标架构 |
 | SurfaceDepth E3 | 已训练并完成 A1 INT8 转换 | 训练与转换证据保留，作为统一模型道路/深度分支的设计基线；独立双模型部署停止推进 |
 | 室内单模型 | 已训练、已导出 | 使用 COCO 稀疏室内子集与既有 ADE20K、StairNetV3、NYUv2；室内 8 类检测、4 类场景、16 级相对深度和台阶边缘联合训练 |
-| 板端单模型后处理 | 已实现并通过交叉编译 | 一个 `model_id`、一次 NPU 推理、7 个输出按固定顺序和 shape 校验；packed scene 在 CPU 解码并进入统一决策 |
+| 板端单模型后处理 | 已完成稳定化并通过交叉编译 | 一个 `model_id`、一次 NPU 推理；增加 top-1 解码、嵌套框抑制、ROI 感知跟踪、三级台阶确认和非对称稳定决策 |
 | 最终统一 `.m1model` | 已完成官方 A1 INT8 转换 | 4,150,950 bytes，SHA256 `33EEC832...5D66DA8`；7 个输出整体余弦相似度均大于 0.94，最低单样本为 0.9160 |
-| 统一候选镜像 | 已完成 Docker 构建、待烧录 | rootfs 仅含一个统一模型；构建通过不等于实板验收通过，仍需 Aurora、串口和 SYN6288 场景测试 |
-| Aurora | 不修改客户端 | 取消密集动态点阵文字和风险条；板端只输出少量检测框、静态状态贴图和必要道路形状 |
+| 统一稳定化候选镜像 | 已完成 Docker 构建、待烧录 | rootfs 仅含一个统一模型和受审计的组合 HUD；构建通过不等于实板验收通过，仍需 Aurora、串口和 SYN6288 场景测试 |
+| Aurora | 不修改客户端 | Layer 0/3 始终清空；仅显示动作贴图、两行“目标/路况 + 距离 + 方位”和最多两个稳定检测框 |
 
 2026-08-11 双模型候选已经烧录并实测。串口持续报告 `perception=DETECTION_DEGRADED_SURFACE_DEPTH`、`degraded=1` 和 `hazard=UNKNOWN`，说明板端实际运行的是 detector-only 降级链路，而不是完整道路感知。Aurora 同时出现密集黑点、文字重叠和难以理解的高频串口输出。该镜像被判定为失败实验，不得标记为可用候选。
 
 下一阶段改为单一共享骨干模型。相机输入、训练、ONNX、量化校准和板端张量必须全部保持真单通道；不再通过 `[G,G,G]` 灰度复制运行检测器，也不再常驻两个 `model_id` 或采用 `D/D/D/SD` 双模型分时调度。
+
+2026-08-14 首次统一模型板测确认模型和七输出推理链路正常，但原始后处理导致状态高频跳变、台阶过度触发和难以理解的 Layer 3 图形。本轮保留模型权重，改由 `StableGuidance` 统一驱动 OSD、串口和语音；台阶必须由语义、水平边缘和深度跳变联合时序确认，床沿或椅背的单一边缘只能进入疑似状态，不能直接触发 `STOP/STAIR`。实现与待测边界见 [板端稳定化证据](docs/GRAYNAV_UNIFIED_BOARD_STABILIZATION_2026-08-14.md)。
 
 ## 目标系统架构
 
@@ -44,10 +46,11 @@ flowchart LR
     SPOST --> FUSE
     ZPOST --> FUSE
 
-    FUSE --> DEC["统一 AvoidanceDecision<br/>clear / slow / stop / turn_left / turn_right"]
-    DEC --> OSD["Aurora 限量灰度 OSD"]
-    DEC --> SERIAL["1 Hz 单行状态串口"]
-    DEC --> VOICE["SYN6288 事件驱动语音"]
+    FUSE --> DEC["原始 AvoidanceDecision<br/>clear / slow / stop / turn_left / turn_right"]
+    DEC --> STABLE["StableGuidance<br/>距离投票 / 方位确认 / 非对称进退"]
+    STABLE --> OSD["Aurora 两行组合 HUD + 最多两框"]
+    STABLE --> SERIAL["变化触发 + 2 s 心跳串口"]
+    STABLE --> VOICE["SYN6288 事件驱动语音"]
 ```
 
 统一模型详细契约、训练门控和板端重构边界见 [单模型重构设计](docs/GRAYNAV_UNIFIED_PERCEPTION_REDESIGN_2026-08-11.md)。
@@ -192,12 +195,12 @@ E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk\output\images\z
 ## 运行与演示原则
 
 - NPU 每个调度帧只运行一个统一模型，不进行模型切换；上方 ROI 使用检测输出，下方 ROI 同时使用检测、道路与深度输出。
-- `step_or_drop` 持续成立时优先于深度头给出的 `FAR`。
+- `step_or_drop` 只有在语义、水平边缘和深度跳变满足联合时序门控后才成为确认台阶；疑似台阶只触发慢行。
 - 深度 NEAR/MID/FAR 分组最高与次高概率差小于 `0.20` 时输出 `UNKNOWN`，决策至少为 `slow`。
 - `unknown_other` 不能作为可通行地面；检测与道路理解均稳定无风险时才允许 `clear`。
 - 任一输出契约或推理失败时进入统一感知降级，显示一个静态 `AI_FAIL` 状态，不得用失效深度驱动 `NEAR` 或反复刷屏。
-- Aurora 每帧最多显示三个稳定目标框、一个动作贴图和一个道路符号；禁止动态绘制物体单词、风险点阵条或大面积掩膜。
-- 正常串口默认每秒一行面向演示的状态；张量、比例和时序细节只在显式诊断模式输出。
+- Aurora Layer 0/3 始终为空，Layer 4 最多显示两个互不嵌套的稳定目标框；Layer 1/2 各显示一张静态组合贴图，不再绘制走廊、墙面 X、台阶十字或点状标记。
+- 正常串口格式为 `[NAV] STOP | PERSON | NEAR | FRONT | AI_OK`，状态变化时输出，稳定状态每 2 秒最多一条；张量、置信度和时序细节只在显式诊断模式输出。
 
 ## 回退保护
 
