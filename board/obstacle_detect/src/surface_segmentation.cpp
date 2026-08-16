@@ -470,7 +470,11 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
             row_sum += probability;
             ++row_count;
             ++corridor_cells;
-            if (probability >= 0.50f) {
+            // The E3 edge head is deliberately conservative after INT8
+            // conversion.  A 0.42 cell is useful for estimating a contiguous
+            // horizontal span, but it is never sufficient by itself to create
+            // a stair warning; semantic/depth evidence is still required below.
+            if (probability >= 0.42f) {
                 ++evidence_cells;
                 if (consecutive == 0) run_start = x;
                 ++consecutive;
@@ -540,13 +544,22 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
     const bool edge_evidence = result->stair_edge_peak >= 0.55f &&
         result->stair_edge_span_ratio >= 0.45f;
     const bool depth_evidence = depth_bins >= 2.0f;
-    const int evidence_count = static_cast<int>(semantic_evidence) +
-        static_cast<int>(edge_evidence) + static_cast<int>(depth_evidence);
-    const bool suspect_candidate = evidence_count >= 2;
+    const bool semantic_support = result->center.step_ratio >= 0.025f &&
+        result->center.step_ratio <= 0.40f &&
+        result->center.step_largest_component >= 8;
+    const bool edge_support = result->stair_edge_peak >= 0.42f &&
+        result->stair_edge_span_ratio >= 0.32f;
+    const bool depth_support = depth_bins >= 1.30f;
+    // A weak but spatially coherent edge must be corroborated by semantics or
+    // depth.  Conversely, semantic+depth may flag a drop whose visible edge is
+    // faint.  A lone bed/desk edge remains insufficient.
+    const bool suspect_candidate =
+        (edge_support && (semantic_support || depth_support)) ||
+        (semantic_evidence && depth_evidence);
     const bool confirm_candidate = semantic_evidence && edge_evidence && depth_evidence;
 
     stair_suspect_history_.push_back(suspect_candidate);
-    while (stair_suspect_history_.size() > 5U) stair_suspect_history_.pop_front();
+    while (stair_suspect_history_.size() > 4U) stair_suspect_history_.pop_front();
     stair_confirm_history_.push_back(confirm_candidate);
     while (stair_confirm_history_.size() > 6U) stair_confirm_history_.pop_front();
     int suspect_hits = 0;
@@ -557,10 +570,10 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
     if (stair_state_ == STAIR_CONFIRMED) {
         if (confirm_candidate) stair_confirm_clear_count_ = 0;
         else if (++stair_confirm_clear_count_ >= 5) {
-            stair_state_ = suspect_hits >= 3 ? STAIR_SUSPECTED : STAIR_NONE;
+            stair_state_ = suspect_hits >= 2 ? STAIR_SUSPECTED : STAIR_NONE;
             stair_confirm_clear_count_ = 0;
         }
-    } else if (stair_confirm_history_.size() >= 4U && confirm_hits >= 4) {
+    } else if (stair_confirm_history_.size() >= 3U && confirm_hits >= 3) {
         stair_state_ = STAIR_CONFIRMED;
         stair_confirm_clear_count_ = 0;
     } else if (stair_state_ == STAIR_SUSPECTED) {
@@ -569,7 +582,7 @@ void SurfaceSegmenter::DecodeStairEdge(const float* scene_logits,
             stair_state_ = STAIR_NONE;
             stair_suspect_clear_count_ = 0;
         }
-    } else if (stair_suspect_history_.size() >= 3U && suspect_hits >= 3) {
+    } else if (stair_suspect_history_.size() >= 2U && suspect_hits >= 2) {
         stair_state_ = STAIR_SUSPECTED;
         stair_suspect_clear_count_ = 0;
     }

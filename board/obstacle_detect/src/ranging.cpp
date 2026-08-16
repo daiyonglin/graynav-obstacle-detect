@@ -298,7 +298,8 @@ void RangingEstimator::Estimate(DetectionItem* item) const
 {
     /*
      * 融合步骤：先计算 ground/size，两者归一化残差 <=2.5 时按 1/sigma^2
-     * 加权；冲突时保留地面结果并增大不确定度；最后应用近场上界。
+     * 加权；冲突时保留地面结果并增大不确定度。近场规则只约束规划用的
+     * safe_distance_m，绝不再把连续的公开估计硬改成 0.45/0.70/1.00m。
      * coarse 或低分框不报告 distance_m，只保留风险上界或 unknown。
      */
     if (item == NULL) return;
@@ -339,12 +340,6 @@ void RangingEstimator::Estimate(DetectionItem* item) const
         item->distance_source = "size";
     }
 
-    if (fused.valid && near_upper > 0.0f && fused.mean > near_upper) {
-        fused.mean = near_upper;
-        fused.sigma = std::max(fused.sigma, 0.22f);
-        item->distance_source = "nearfield_cap";
-    }
-
     // 地面证据被判为部分人体而拒绝时，仍用尺寸距离恢复横向地面位置近似。
     if (!ground.valid && fused.valid) {
         const float center_x = 0.5f * (item->box[0] + item->box[2]);
@@ -382,6 +377,12 @@ void RangingEstimator::Estimate(DetectionItem* item) const
     item->distance_sigma_m = fused.sigma;
     item->safe_distance_m = clampf(item->distance_m - fused.sigma,
                                    min_distance_m_, max_distance_m_);
+    if (near_upper > 0.0f) {
+        // This is a one-sided safety bound derived from frame occupancy, not a
+        // metric measurement.  It may make the planner more conservative but
+        // must not be printed as if the target were exactly 0.45/0.70/1.00m.
+        item->safe_distance_m = std::min(item->safe_distance_m, near_upper);
+    }
     item->distance_confidence = clampf(1.0f - fused.sigma / std::max(0.5f, item->distance_m),
                                        0.15f, 0.95f);
     item->risk_level = risk_from_safe_distance(item->safe_distance_m);

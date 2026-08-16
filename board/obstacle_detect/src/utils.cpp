@@ -864,21 +864,44 @@ void VISUALIZER::Draw(const DetectionResult& result,
             if (inner.box[2] > inner.box[0] && inner.box[3] > inner.box[1]) {
                 stair_quads.push_back(inner);
             }
+        } else {
+            // Suspected stair/drop edges are intentionally rendered as two
+            // short parallel bands.  This is more legible than a single 6px
+            // line in Aurora's grayscale scaling, while remaining distinct
+            // from the confirmed double-box warning.
+            const float edge_y = roi_top + surface.stair_edge_y_norm * width;
+            for (int offset = -5; offset <= 5; offset += 10) {
+                sst::device::osd::OsdQuadRangle band;
+                band.box = {
+                    surface.stair_edge_x1_norm * width,
+                    std::max(roi_top, edge_y + static_cast<float>(offset) - 2.0f),
+                    surface.stair_edge_x2_norm * width,
+                    std::min(height, edge_y + static_cast<float>(offset) + 2.0f)
+                };
+                band.border = 1;
+                band.layer_id = 3;
+                band.type = fdevice::TYPE_SOLID;
+                band.alpha = fdevice::TYPE_ALPHA75;
+                band.color = 2;
+                stair_quads.push_back(band);
+            }
         }
-        const float edge_y = roi_top + surface.stair_edge_y_norm * width;
-        sst::device::osd::OsdQuadRangle edge;
-        edge.box = {
-            surface.stair_edge_x1_norm * width,
-            std::max(roi_top, edge_y - 3.0f),
-            surface.stair_edge_x2_norm * width,
-            std::min(height, edge_y + 3.0f)
-        };
-        edge.border = 1;
-        edge.layer_id = 3;
-        edge.type = fdevice::TYPE_SOLID;
-        edge.alpha = fdevice::TYPE_ALPHA75;
-        edge.color = 2;
-        stair_quads.push_back(edge);
+        if (surface.stair_state == STAIR_CONFIRMED) {
+            const float edge_y = roi_top + surface.stair_edge_y_norm * width;
+            sst::device::osd::OsdQuadRangle edge;
+            edge.box = {
+                surface.stair_edge_x1_norm * width,
+                std::max(roi_top, edge_y - 3.0f),
+                surface.stair_edge_x2_norm * width,
+                std::min(height, edge_y + 3.0f)
+            };
+            edge.border = 1;
+            edge.layer_id = 3;
+            edge.type = fdevice::TYPE_SOLID;
+            edge.alpha = fdevice::TYPE_ALPHA75;
+            edge.color = 2;
+            stair_quads.push_back(edge);
+        }
     }
     if (stair_quads.size() > 3U) stair_quads.resize(3U);
     osd_device.Draw(stair_quads, 3);

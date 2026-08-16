@@ -239,6 +239,20 @@ struct SystemHealth {
         AvoidanceDecision decision;
         decision.action = "system_fault";
         decision.prompt = "reason=system_health " + reason;
+        decision.ai_ok = false;
+        decision.perception_degraded = true;
+        decision.cause = "SYSTEM";
+        decision.scene_label = "AI_FAIL";
+        decision.object_label = "NONE";
+        decision.primary_class = "abnormal";
+        decision.hazard_type = "system_fault";
+        decision.hazard_sector = "center";
+        decision.hazard_position = "FRONT";
+        decision.recommended_direction = "hold";
+        decision.range = "UNKNOWN";
+        decision.risk = "FAULT";
+        decision.distance_estimate_m = -1.0f;
+        decision.nearest_track_id = -1;
         return decision;
     }
 
@@ -806,8 +820,10 @@ int find_nearest_index(const DetectionResult& result)
     float nearest_dist = 1e9f;
     for (size_t i = 0; i < result.items.size(); ++i) {
         const DetectionItem& item = result.items[i];
-        if (item.distance_m >= 0.0f && item.distance_m < nearest_dist) {
-            nearest_dist = item.distance_m;
+        const float risk_distance = item.safe_distance_m >= 0.0f
+            ? item.safe_distance_m : item.distance_m;
+        if (risk_distance >= 0.0f && risk_distance < nearest_dist) {
+            nearest_dist = risk_distance;
             nearest_idx = static_cast<int>(i);
         }
     }
@@ -816,6 +832,15 @@ int find_nearest_index(const DetectionResult& result)
         nearest_idx = 0;
     }
     return nearest_idx;
+}
+
+int find_track_index(const DetectionResult& result, int track_id)
+{
+    if (track_id < 0) return -1;
+    for (size_t i = 0; i < result.items.size(); ++i) {
+        if (result.items[i].track_id == track_id) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 void print_human_packet(int frame_id,
@@ -849,7 +874,11 @@ void print_human_packet(int frame_id,
             << std::setprecision(2) << surface.center.ground_ratio << "/"
             << surface.center.blocked_ratio << "/"
             << surface.center.step_ratio << "/"
-            << surface.center.unknown_ratio;
+            << surface.center.unknown_ratio
+            << " stair=" << static_cast<int>(surface.stair_state)
+            << "/" << surface.stair_edge_peak
+            << "/" << surface.stair_edge_span_ratio
+            << "/" << surface.stair_depth_jump_bins;
         if (item != nullptr) {
             oss << " conf=" << std::fixed << std::setprecision(2) << item->score
                 << " src=" << item->distance_source
@@ -945,7 +974,33 @@ void DecorateUnifiedDecision(const DetectionResult& result,
                              AvoidanceDecision* decision)
 {
     if (decision == NULL) return;
+    const bool forced_fault = decision->action == "system_fault" || !decision->ai_ok;
     decision->ai_ok = !decision->perception_degraded && surface.valid && !surface.stale;
+    if (forced_fault || !decision->ai_ok) {
+        // A protection decision must be self-contained.  Do not decorate it
+        // with the last valid person/chair/zone snapshot: that produced UART
+        // lines such as SYSTEM_FAULT + cls=person during a covered lens test.
+        decision->ai_ok = false;
+        decision->perception_degraded = true;
+        decision->cause = "SYSTEM";
+        decision->scene_label = "AI_FAIL";
+        decision->object_label = "NONE";
+        decision->primary_class = "abnormal";
+        decision->nearest_track_id = -1;
+        decision->distance_estimate_m = -1.0f;
+        decision->range = "UNKNOWN";
+        decision->recommended_direction = "hold";
+        decision->hazard_sector = "center";
+        decision->hazard_position = "FRONT";
+        decision->risk = "FAULT";
+        decision->left = ZoneStatus();
+        decision->center = ZoneStatus();
+        decision->right = ZoneStatus();
+        decision->left.dir = "left";
+        decision->center.dir = "center";
+        decision->right.dir = "right";
+        return;
+    }
     decision->range = to_upper_text(decision->depth_level);
     decision->object_label = nav_object_text(result);
     decision->recommended_direction = decision->action == "turn_left" ? "left" :
@@ -966,32 +1021,23 @@ void DecorateUnifiedDecision(const DetectionResult& result,
     } else if (surface.valid && !surface.stale && surface.center.safe_candidate) {
         decision->scene_label = "PATH";
     }
-    if (decision->action == "system_fault") decision->cause = "SYSTEM";
-    else if (!decision->ai_ok) decision->cause = "AI_FAIL";
+    if (!decision->ai_ok) decision->cause = "AI_FAIL";
     else if (decision->scene_label == "STEP") decision->cause = "STAIR";
+    else if (decision->scene_label == "STEP_CHECK") decision->cause = "STEP_CHECK";
     else if (decision->object_label != "NONE" && decision->action != "clear") decision->cause = "OBJECT";
     else if (decision->scene_label == "BLOCKED") decision->cause = "BLOCKED";
-    else if (decision->scene_label == "STEP_CHECK") decision->cause = "STEP_CHECK";
     else if (decision->scene_label == "UNKNOWN") decision->cause = "UNKNOWN";
     else decision->cause = "PATH";
     decision->confidence = std::max(decision->surface_confidence,
                                     decision->depth_confidence);
-    const int object_index = find_nearest_index(result);
-    if (object_index >= 0) {
-        const DetectionItem& item = result.items[object_index];
-        decision->confidence = std::max(decision->confidence,
-                                        item.score);
-        decision->primary_class = item.raw_label.empty() ? item.label : item.raw_label;
-        decision->distance_estimate_m = item.distance_m;
-        const std::string item_level = to_upper_text(item.depth_level);
-        if (item_level == "NEAR" || item_level == "MID" || item_level == "FAR") {
-            decision->range = item_level;
-        }
-    } else if ((decision->scene_label == "STEP" ||
-                decision->scene_label == "STEP_CHECK" ||
-                decision->scene_label == "BLOCKED") && surface.center_depth_m > 0.0f) {
-        decision->primary_class = decision->scene_label == "BLOCKED" ? "blocked" : "stair";
+    const bool scene_distance = decision->cause == "STAIR" ||
+        decision->cause == "STEP_CHECK" || decision->cause == "BLOCKED";
+    int object_index = find_track_index(result, decision->nearest_track_id);
+    if (object_index < 0) object_index = find_nearest_index(result);
+    if (scene_distance && surface.center_depth_m > 0.0f) {
+        decision->primary_class = decision->cause == "BLOCKED" ? "blocked" : "stair";
         decision->distance_estimate_m = surface.center_depth_m;
+        decision->nearest_track_id = -1;
         if (!decision->center.occupied) {
             decision->center.occupied = true;
             decision->center.raw_label = decision->primary_class;
@@ -1000,6 +1046,17 @@ void DecorateUnifiedDecision(const DetectionResult& result,
             decision->center.safe_distance_m = surface.center_depth_m;
             decision->center.distance_m = surface.center_depth_m;
             decision->center.risk_level = decision->action == "stop" ? "urgent" : "warning";
+        }
+    } else if (object_index >= 0) {
+        const DetectionItem& item = result.items[object_index];
+        decision->confidence = std::max(decision->confidence,
+                                        item.score);
+        decision->primary_class = item.raw_label.empty() ? item.label : item.raw_label;
+        decision->distance_estimate_m = item.distance_m;
+        decision->nearest_track_id = item.track_id;
+        const std::string item_level = to_upper_text(item.depth_level);
+        if (item_level == "NEAR" || item_level == "MID" || item_level == "FAR") {
+            decision->range = item_level;
         }
     } else {
         decision->primary_class = "none";

@@ -1,6 +1,7 @@
 #include "surface_fusion.hpp"
 #include "surface_segmentation.hpp"
 #include "guidance_stabilizer.hpp"
+#include "ranging.hpp"
 #include "tracker.hpp"
 
 #include <algorithm>
@@ -307,7 +308,10 @@ int main()
     assert(packed_segmenter.PostprocessPackedLogits(
         packed.data(), packed.size(), true, 1200, &packed_surface));
     assert(!packed_surface.stair_edge_persistent);
-    for (int i = 1; i < 4; ++i) {
+    assert(packed_segmenter.PostprocessPackedLogits(
+        packed.data(), packed.size(), true, 1300, &packed_surface));
+    assert(packed_surface.stair_state == STAIR_SUSPECTED);
+    for (int i = 2; i < 4; ++i) {
         assert(packed_segmenter.PostprocessPackedLogits(
             packed.data(), packed.size(), true, 1200 + i * 100, &packed_surface));
     }
@@ -391,6 +395,50 @@ int main()
     }
     assert(guidance.Update(raw, 600).action == "slow");
     assert(guidance.Current().range == "MID");
+
+    // The public distance filter must be scoped to one track. Switching from a
+    // near person to a far chair cannot retain the old person's history.
+    raw.action = "slow";
+    raw.cause = "OBJECT";
+    raw.primary_class = "person";
+    raw.nearest_track_id = 11;
+    raw.distance_estimate_m = 1.0f;
+    guidance.Update(raw, 700);
+    guidance.Update(raw, 800);
+    raw.primary_class = "chair";
+    raw.nearest_track_id = 12;
+    raw.distance_estimate_m = 3.5f;
+    const StableGuidance& switched_range = guidance.Update(raw, 900);
+    assert(std::fabs(switched_range.distance_estimate_m - 3.5f) < 0.01f);
+
+    // A covered camera is an immediate self-contained protection state. No
+    // stale target, zone or metric distance may leak into the fault packet.
+    raw.action = "system_fault";
+    raw.ai_ok = false;
+    const StableGuidance& fault = guidance.Update(raw, 1000);
+    assert(fault.action == "system_fault");
+    assert(fault.primary_class == "abnormal");
+    assert(fault.object_label == "NONE");
+    assert(fault.distance_estimate_m < 0.0f);
+    assert(!fault.left.occupied && !fault.center.occupied && !fault.right.occupied);
+
+    // Near-field occupancy is a conservative planning bound, not a discrete
+    // metric reading. The displayed mean remains continuous while safe range
+    // may be capped for collision avoidance.
+    obstacle::RangingEstimator ranging;
+    ranging.Initialize({720, 1280});
+    DetectionItem near_chair;
+    near_chair.raw_class_id = 1;
+    near_chair.class_id = obstacle::semantic::CHAIR_SEAT;
+    near_chair.raw_label = "chair";
+    near_chair.label = "chair";
+    near_chair.score = 0.80f;
+    near_chair.quality = "good";
+    near_chair.box = {200.0f, 500.0f, 520.0f, 1255.0f};
+    ranging.Estimate(&near_chair);
+    assert(near_chair.distance_m > 0.45f);
+    assert(near_chair.safe_distance_m <= 0.451f);
+    assert(near_chair.distance_source != "nearfield_cap");
 
     // Indoor8 must not inherit the legacy ROD25 person-part bridge. One chair
     // observation is ignored as noise, while two consecutive high-confidence

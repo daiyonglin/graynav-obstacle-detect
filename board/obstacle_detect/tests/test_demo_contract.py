@@ -49,6 +49,23 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn("const float evidence_decay = indoor8 ? 0.85f : 0.95f", tracker)
         self.assertIn("detection.score >= 0.45f", tracker)
 
+    def test_ranging_keeps_metric_estimate_separate_from_safety_bound(self) -> None:
+        ranging = (ROOT / "src/ranging.cpp").read_text(encoding="utf-8")
+        stabilizer = (ROOT / "src/guidance_stabilizer.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('item->distance_source = "nearfield_cap"', ranging)
+        self.assertIn("std::min(item->safe_distance_m, near_upper)", ranging)
+        self.assertIn("distance_identity_for", stabilizer)
+        self.assertIn("distance_history_.size() > 3U", stabilizer)
+
+    def test_fault_packet_clears_stale_navigation_state(self) -> None:
+        demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")
+        self.assertIn('decision.primary_class = "abnormal"', demo)
+        self.assertIn('decision->primary_class = "abnormal"', demo)
+        self.assertIn('decision->object_label = "NONE"', demo)
+        self.assertIn('voice=ABNORMAL', demo)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -455,6 +455,12 @@ void ObstacleTracker::UpdateRangeState(Track* track,
         track->item.distance_sigma_m = std::sqrt(std::max(0.01f, track->depth_variance));
         track->item.safe_distance_m = clampf(
             track->depth_m - track->item.distance_sigma_m, 0.20f, 8.0f);
+        // Preserve a detector-side near-field upper bound as planning evidence
+        // without replacing the target-specific metric estimate shown on UART.
+        if (detection.safe_distance_m > 0.0f) {
+            track->item.safe_distance_m = std::min(
+                track->item.safe_distance_m, detection.safe_distance_m);
+        }
         track->item.distance_confidence = measurement_used
             ? detection.distance_confidence
             : std::max(0.15f, detection.distance_confidence * 0.60f);

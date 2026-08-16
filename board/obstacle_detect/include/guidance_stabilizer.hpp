@@ -35,6 +35,10 @@ private:
     bool initialized_;
     std::deque<std::string> range_history_;
     std::deque<float> distance_history_;
+    // Numeric range history is valid only for one physical track or one scene
+    // hazard.  Mixing different targets was the main source of 0.45m/3m jumps
+    // in the readable UART stream.
+    std::string distance_identity_;
     std::string pending_sector_;
     int pending_sector_count_;
     std::string pending_action_;
