@@ -192,6 +192,9 @@ E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk\output\images\z
 
 构建成功不代表板测通过。烧录前还要核对 CMakeCache、统一模型的名称/哈希、`zImage < 15 MiB`，并为新候选单独建立归档。
 
+2026-08-16 的实板日志复核、目标绑定测距、遮挡异常保护和台阶边缘门控修复见
+[测距、异常保护与台阶提示调优证据](docs/GRAYNAV_RANGE_FAULT_STAIR_TUNING_2026-08-16.md)。
+
 ## 运行与演示原则
 
 - NPU 每个调度帧只运行一个统一模型，不进行模型切换；上方 ROI 使用检测输出，下方 ROI 同时使用检测、道路与深度输出。
