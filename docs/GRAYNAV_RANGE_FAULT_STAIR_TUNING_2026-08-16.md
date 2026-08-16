@@ -96,4 +96,3 @@ SHA256  A7976710ECB456CB312D18F0195DCAE496ED652EFC582AB698EBC3EB7B055530
 5. 床沿、桌沿连续测试 2 分钟，不得进入确认台阶或因台阶触发 STOP；
 6. 若启用 `A1_OUTPUT_SERIAL_DIAG=1`，记录 `stair=state/peak/span/jump`，用于下一轮只调门控而
    不盲目放宽阈值。
-
