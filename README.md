@@ -14,8 +14,8 @@ GrayNav 是面向视障辅助导航场景的边缘端感知原型，运行平台
 | 室内单模型 | 已训练、已导出 | 使用 COCO 稀疏室内子集与既有 ADE20K、StairNetV3、NYUv2；室内 8 类检测、4 类场景、16 级相对深度和台阶边缘联合训练 |
 | 板端单模型后处理 | 已完成稳定化并通过交叉编译 | 一个 `model_id`、一次 NPU 推理；增加 top-1 解码、嵌套框抑制、ROI 感知跟踪、三级台阶确认和非对称稳定决策 |
 | 最终统一 `.m1model` | 已完成官方 A1 INT8 转换 | 4,150,950 bytes，SHA256 `33EEC832...5D66DA8`；7 个输出整体余弦相似度均大于 0.94，最低单样本为 0.9160 |
-| 统一稳定化候选镜像 | 已完成 Docker 构建、待烧录 | rootfs 仅含一个统一模型和受审计的组合 HUD；构建通过不等于实板验收通过，仍需 Aurora、串口和 SYN6288 场景测试 |
-| Aurora | 不修改客户端 | Layer 0/3 始终清空；仅显示动作贴图、两行“目标/路况 + 距离 + 方位”和最多两个稳定检测框 |
+| 统一稳定化候选镜像 | 已烧录并完成多轮实板测试 | rootfs 仅含一个统一模型；人体、椅子等检测及 Aurora/串口链路已实测，SYN6288 因语音电路尚未接入而仍待硬件听测 |
+| Aurora | 不修改客户端 | Layer 0 清空，Layer 3 仅用于受门控的台阶边缘，Layer 4 最多两个稳定框；左上角只显示动作、距离档位和方位 |
 
 2026-08-11 双模型候选已经烧录并实测。串口持续报告 `perception=DETECTION_DEGRADED_SURFACE_DEPTH`、`degraded=1` 和 `hazard=UNKNOWN`，说明板端实际运行的是 detector-only 降级链路，而不是完整道路感知。Aurora 同时出现密集黑点、文字重叠和难以理解的高频串口输出。该镜像被判定为失败实验，不得标记为可用候选。
 
@@ -54,6 +54,9 @@ flowchart LR
 ```
 
 统一模型详细契约、训练门控和板端重构边界见 [单模型重构设计](docs/GRAYNAV_UNIFIED_PERCEPTION_REDESIGN_2026-08-11.md)。
+
+当前已烧录实现的逐层模型结构、完整后处理流程、测距推导、故障保护与核心参数见
+[当前统一模型与系统架构说明](docs/GRAYNAV_CURRENT_MODEL_SYSTEM_ARCHITECTURE_2026-08-16.md)。
 
 ### 最终统一模型契约
 
@@ -202,8 +205,8 @@ E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk\output\images\z
 - 深度 NEAR/MID/FAR 分组最高与次高概率差小于 `0.20` 时输出 `UNKNOWN`，决策至少为 `slow`。
 - `unknown_other` 不能作为可通行地面；检测与道路理解均稳定无风险时才允许 `clear`。
 - 任一输出契约或推理失败时进入统一感知降级，显示一个静态 `AI_FAIL` 状态，不得用失效深度驱动 `NEAR` 或反复刷屏。
-- Aurora Layer 0/3 始终为空，Layer 4 最多显示两个互不嵌套的稳定目标框；Layer 1/2 各显示一张静态组合贴图，不再绘制走廊、墙面 X、台阶十字或点状标记。
-- 正常串口格式为 `[NAV] STOP | PERSON | NEAR | FRONT | AI_OK`，状态变化时输出，稳定状态每 2 秒最多一条；张量、置信度和时序细节只在显式诊断模式输出。
+- Aurora Layer 0 始终为空，Layer 3 最多显示三个经多证据门控的台阶边缘图元，Layer 4 最多显示两个互不嵌套的稳定目标框；Layer 1/2 只显示动作、距离档位和方位，不显示容易误导演示的物体名称。
+- 正常串口格式为 `[F006390] SLOW dir=right cls=chair dist=1.64m risk=WARNING zones=L:clear,C:chair@1.64,R:clear`；状态变化时输出，稳定状态按心跳限流，张量、置信度和测距来源只在显式诊断模式输出。
 
 ## 回退保护
 
