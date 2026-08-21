@@ -97,9 +97,14 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn('if (action == "clear") return clear_repeat_ms_', voice)
         self.assertNotIn("86400000", voice)
         self.assertIn('getenv_int("A1_VOICE_STOP_REPEAT_MS", 1000)', voice)
+        self.assertIn('getenv_int("A1_VOICE_FAULT_REPEAT_MS", 0)', voice)
+        self.assertIn('getenv_int("A1_VOICE_ACTION_PROMPT_MS", 600)', voice)
+        self.assertIn("fixed_frame_ ? action_prompt_ms_", voice)
         self.assertIn('getenv_int("A1_VOICE_STOP_FOLLOWUP_HOLD_MS", 0)', voice)
         self.assertIn('A1_VOICE_COOLDOWN_MS:-0', run)
         self.assertIn('A1_VOICE_STOP_REPEAT_MS:-1000', run)
+        self.assertIn('A1_VOICE_FAULT_REPEAT_MS:-0', run)
+        self.assertIn('A1_VOICE_ACTION_PROMPT_MS:-600', run)
         self.assertIn('A1_VOICE_STOP_FOLLOWUP_HOLD_MS:-0', run)
 
     def test_confirmed_wall_has_distinct_static_hud(self) -> None:

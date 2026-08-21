@@ -182,6 +182,7 @@ private:
     int post_tx_delay_ms_;
     int passive_rx_ms_;
     int play_timeout_ms_;
+    int action_prompt_ms_;
     int inter_frame_ms_;
     int rx_poll_ms_;
     std::atomic<int> consecutive_no_rx_;

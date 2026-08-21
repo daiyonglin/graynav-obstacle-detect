@@ -146,7 +146,7 @@ VoiceNotifier::VoiceNotifier()
       cooldown_ms_(0),
       clear_repeat_ms_(0),
       stop_repeat_ms_(1000),
-      fault_repeat_ms_(1800),
+      fault_repeat_ms_(0),
       fault_hold_ms_(2500),
       switch_min_ms_(0),
       tx_gap_ms_(0),
@@ -170,6 +170,7 @@ VoiceNotifier::VoiceNotifier()
       post_tx_delay_ms_(30),
       passive_rx_ms_(80),
       play_timeout_ms_(3000),
+      action_prompt_ms_(600),
       inter_frame_ms_(12),
       rx_poll_ms_(3),
       consecutive_no_rx_(0),
@@ -243,7 +244,7 @@ bool VoiceNotifier::InitializeFromEnv()
     // explicitly requests a longer repeat interval.
     clear_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 0));
     stop_repeat_ms_ = std::max(500, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1000));
-    fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 1800));
+    fault_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 0));
     fault_hold_ms_ = std::max(1000, getenv_int("A1_VOICE_FAULT_HOLD_MS", 2500));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
     tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 0));
@@ -268,6 +269,11 @@ bool VoiceNotifier::InitializeFromEnv()
     post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
     play_timeout_ms_ = std::max(1000, getenv_int("A1_VOICE_PLAY_TIMEOUT_MS", 3000));
+    // All production prompts are fixed two-character action words.  Their
+    // playback is shorter than the old generic 900 ms transaction estimate;
+    // use a dedicated timer so the next word starts without an artificial
+    // silent tail when ACK/IDLE feedback is unavailable.
+    action_prompt_ms_ = std::max(350, getenv_int("A1_VOICE_ACTION_PROMPT_MS", 600));
     inter_frame_ms_ = std::max(9, getenv_int("A1_VOICE_INTER_FRAME_MS", 12));
     rx_poll_ms_ = std::max(1, getenv_int("A1_VOICE_RX_POLL_MS", 3));
 
@@ -1248,7 +1254,8 @@ void VoiceNotifier::HandleProtocolTimeouts()
             std::chrono::duration_cast<std::chrono::milliseconds>(now - transaction_tx_time_).count());
         // 导航短词会在该上限内完成。即使 RX 状态缺失或载板偶发 0x45，
         // 超时兜底也会结束当前事务，避免发送状态永久卡死。
-        const int timed_completion_ms = transaction_frame_.size() <= 8 ? 650 : 900;
+        const int timed_completion_ms = fixed_frame_ ? action_prompt_ms_ :
+            (transaction_frame_.size() <= 8 ? 650 : 900);
         if (!require_ack_ && age >= timed_completion_ms) {
             ++rx_completed_count_;
             {
