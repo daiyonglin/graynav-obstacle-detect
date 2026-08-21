@@ -146,6 +146,13 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     const bool left_safe = IsSafe(surface.left);
     const bool center_safe = IsSafe(surface.center);
     const bool right_safe = IsSafe(surface.right);
+    // UNKNOWN is not the same as a measured hazard.  Reject a turn only when
+    // the selected side contains a temporally persistent step or blocked
+    // surface; otherwise preserve the object planner's side-avoidance action.
+    const bool left_explicitly_unsafe = surface.left.persistent_hazard ||
+        surface.left.blocked_persistent;
+    const bool right_explicitly_unsafe = surface.right.persistent_hazard ||
+        surface.right.blocked_persistent;
     const bool center_drop = surface.stair_state == STAIR_CONFIRMED &&
         surface.center.persistent_hazard && surface.stair_edge_persistent;
     const bool possible_step = surface.stair_state == STAIR_SUSPECTED;
@@ -163,11 +170,13 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
             fused.action = "slow";
             reason = "confirmed_step_far_unknown_slow";
         }
-    } else if (detection.action == "turn_left" && !left_safe) {
-        fused.action = right_safe ? "turn_right" : "stop";
+    } else if (detection.action == "turn_left" && left_explicitly_unsafe) {
+        fused.action = right_safe ? "turn_right" :
+            (near_surface && right_explicitly_unsafe ? "stop" : "slow");
         reason = "surface_reject_left_turn";
-    } else if (detection.action == "turn_right" && !right_safe) {
-        fused.action = left_safe ? "turn_left" : "stop";
+    } else if (detection.action == "turn_right" && right_explicitly_unsafe) {
+        fused.action = left_safe ? "turn_left" :
+            (near_surface && left_explicitly_unsafe ? "stop" : "slow");
         reason = "surface_reject_right_turn";
     } else if (detection.action != "clear") {
         // 命名目标已经形成稳定导航动作时，人物/家具背后的 blocked mask

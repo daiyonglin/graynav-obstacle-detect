@@ -30,17 +30,6 @@ const uint8_t kPromptStop[] = {0xCD, 0xA3, 0xCF, 0xC2};
 const uint8_t kPromptLeft[] = {0xD7, 0xF3, 0xD7, 0xAA};
 const uint8_t kPromptRight[] = {0xD3, 0xD2, 0xD7, 0xAA};
 const uint8_t kPromptFault[] = {0xD2, 0xEC, 0xB3, 0xA3};
-const uint8_t kPromptSurfaceStep[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xCC, 0xA8, 0xBD, 0xD7, 0xBB, 0xF2, 0xC2, 0xE4, 0xB2, 0xEE};
-const uint8_t kPromptSurfacePothole[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xC2, 0xB7, 0xC3, 0xE6, 0xBF, 0xD3, 0xCD, 0xDD};
-const uint8_t kPromptSurfaceBlocked[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xB5, 0xC0, 0xC2, 0xB7, 0xCA, 0xDC, 0xD7, 0xE8};
-const uint8_t kPromptSurfaceUnknown[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xC2, 0xB7, 0xBF, 0xF6, 0xB2, 0xBB, 0xC7, 0xE5, 0xA3, 0xAC, 0xC7, 0xEB, 0xC2, 0xFD, 0xD0, 0xD0};
-const uint8_t kPromptSurfaceDegraded[] = {0xC2, 0xB7, 0xBF, 0xF6, 0xB8, 0xD0, 0xD6, 0xAA, 0xBD, 0xB5, 0xBC, 0xB6};
-const uint8_t kPromptPersonStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xC8, 0xCB, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
-const uint8_t kPromptObstacleSlow[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xD5, 0xCF, 0xB0, 0xAD, 0xA3, 0xAC, 0xC7, 0xEB, 0xBC, 0xF5, 0xCB, 0xD9, 0xA1, 0xA3};
-const uint8_t kPromptObstacleStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD3, 0xD0, 0xD5, 0xCF, 0xB0, 0xAD, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
-const uint8_t kPromptStairSlow[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xC2, 0xFD, 0xD0, 0xD0, 0xA1, 0xA3};
-const uint8_t kPromptStairStop[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xCD, 0xA3, 0xCF, 0xC2, 0xA1, 0xA3};
-const uint8_t kPromptPossibleStair[] = {0xC7, 0xB0, 0xB7, 0xBD, 0xD2, 0xC9, 0xCB, 0xC6, 0xCC, 0xA8, 0xBD, 0xD7, 0xA3, 0xAC, 0xC7, 0xEB, 0xC2, 0xFD, 0xD0, 0xD0, 0xA1, 0xA3};
 
 const std::vector<uint8_t> kFixedClearFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xD6, 0xB1, 0xD0, 0xD0, 0x9D};
 const std::vector<uint8_t> kFixedSlowFrame = {0xFD, 0x00, 0x07, 0x01, 0x01, 0xBC, 0xF5, 0xCB, 0xD9, 0xA1};
@@ -202,10 +191,7 @@ VoiceNotifier::VoiceNotifier()
       last_sent_frame_(-100000),
       last_action_(""),
       last_key_(""),
-      last_surface_hazard_("none"),
       last_requested_action_(""),
-      last_announced_depth_level_("unknown"),
-      surface_degraded_announced_(false),
       last_tx_detail_("not_sent"),
       tty_device_("/dev/ttyS1"),
       last_sent_time_(std::chrono::steady_clock::now() - std::chrono::seconds(60)),
@@ -830,60 +816,12 @@ bool VoiceNotifier::SendPrompt(const std::string& action, bool interrupt_current
     return false;
 }
 
-std::string VoiceNotifier::BuildVoiceKey(const DetectionResult& result,
-                                         const AvoidanceDecision& decision) const
-{
-    (void)result;
-    return (decision.action.empty() ? "clear" : decision.action) + "|" +
-           decision.cause + "|" + decision.hazard_sector;
-}
-
 std::vector<uint8_t> VoiceNotifier::BuildPromptPayload(const std::string& action) const
 {
     std::vector<uint8_t> payload;
     payload.reserve(16);
     if (use_prompt_prefix_) {
         append_bytes(&payload, kPromptPrefix, sizeof(kPromptPrefix));
-    }
-    if (action == "person_stop") {
-        append_bytes(&payload, kPromptPersonStop, sizeof(kPromptPersonStop));
-        return payload;
-    }
-    if (action == "obstacle_stop") {
-        append_bytes(&payload, kPromptObstacleStop, sizeof(kPromptObstacleStop));
-        return payload;
-    }
-    if (action == "obstacle_slow") {
-        append_bytes(&payload, kPromptObstacleSlow, sizeof(kPromptObstacleSlow));
-        return payload;
-    }
-    if (action == "stair_stop") {
-        append_bytes(&payload, kPromptStairStop, sizeof(kPromptStairStop));
-        return payload;
-    }
-    if (action == "stair_slow") {
-        append_bytes(&payload, kPromptStairSlow, sizeof(kPromptStairSlow));
-        return payload;
-    }
-    if (action == "possible_stair") {
-        append_bytes(&payload, kPromptPossibleStair, sizeof(kPromptPossibleStair));
-        return payload;
-    }
-    if (action == "surface_step") {
-        append_bytes(&payload, kPromptSurfaceStep, sizeof(kPromptSurfaceStep));
-        return payload;
-    }
-    if (action == "surface_blocked") {
-        append_bytes(&payload, kPromptSurfaceBlocked, sizeof(kPromptSurfaceBlocked));
-        return payload;
-    }
-    if (action == "surface_unknown") {
-        append_bytes(&payload, kPromptSurfaceUnknown, sizeof(kPromptSurfaceUnknown));
-        return payload;
-    }
-    if (action == "surface_degraded") {
-        append_bytes(&payload, kPromptSurfaceDegraded, sizeof(kPromptSurfaceDegraded));
-        return payload;
     }
     if (action == "stop") {
         append_bytes(&payload, kPromptStop, sizeof(kPromptStop));
@@ -935,12 +873,6 @@ std::vector<uint8_t> VoiceNotifier::BuildSyn6288Frame(const std::vector<uint8_t>
 std::vector<uint8_t> VoiceNotifier::BuildFixedPromptFrame(const std::string& action) const
 {
     // 生产模式直接返回离线核验过的短词帧，避免板端字符编码转换差异。
-    if (action.compare(0, 8, "surface_") == 0 ||
-        action == "person_stop" || action == "obstacle_stop" ||
-        action == "obstacle_slow" || action == "stair_stop" ||
-        action == "stair_slow" || action == "possible_stair") {
-        return BuildSyn6288Frame(BuildPromptPayload(action));
-    }
     if (action == "stop") {
         return kFixedStopFrame;
     }
@@ -1062,26 +994,21 @@ void VoiceNotifier::CommitSent(const std::string& action, const std::string& key
 int VoiceNotifier::ActionPriority(const std::string& action) const
 {
     if (action == "system_fault") return 100;
-    if (action == "stop" || action == "person_stop" ||
-        action == "obstacle_stop" || action == "stair_stop") return 90;
+    if (action == "stop") return 90;
     if (action == "turn_left" || action == "turn_right") return 70;
     if (action == "slow") return 50;
-    if (action == "surface_degraded") return 65;
-    if (action.compare(0, 8, "surface_") == 0) return 75;
     return 10;
 }
 
 int VoiceNotifier::RepeatIntervalMs(const std::string& action) const
 {
     if (action == "system_fault") return fault_repeat_ms_;
-    if (action == "stop" || action == "person_stop" ||
-        action == "obstacle_stop" || action == "stair_stop") return stop_repeat_ms_;
+    if (action == "stop") return stop_repeat_ms_;
     if (action == "clear") {
         // Keep the worker's pending transaction dormant when periodic CLEAR
         // announcements are disabled.  Key changes still transmit immediately.
         return clear_repeat_ms_ > 0 ? clear_repeat_ms_ : 86400000;
     }
-    if (action.compare(0, 8, "surface_") == 0) return 60000;
     return cooldown_ms_;
 }
 
@@ -1413,8 +1340,7 @@ void VoiceNotifier::WorkerLoop()
         const bool changed = key != last_key_;
         if (changed) {
             int followup_hold_ms = 0;
-            if (last_action_ == "stop" || last_action_ == "person_stop" ||
-                last_action_ == "obstacle_stop" || last_action_ == "stair_stop") {
+            if (last_action_ == "stop") {
                 followup_hold_ms = stop_followup_hold_ms_;
             } else if (last_action_ == "turn_left" || last_action_ == "turn_right") {
                 followup_hold_ms = turn_followup_hold_ms_;
@@ -1444,31 +1370,10 @@ void VoiceNotifier::Update(int frame_id,
     if (mode_ == Mode::Disabled) {
         return;
     }
+    (void)result;
+    // Do not prepend object or scene descriptions.  The final stabilized
+    // action is the complete voice contract: 直行/减速/停下/左转/右转/异常。
     std::string action = decision.action.empty() ? "clear" : decision.action;
-    const bool hazard_changed = decision.cause != last_surface_hazard_;
-    if (!decision.perception_degraded) {
-        surface_degraded_announced_ = false;
-    }
-    const bool safety_action = action == "system_fault" || action == "stop";
-    if (!safety_action && decision.perception_degraded && !surface_degraded_announced_) {
-        action = "surface_degraded";
-        surface_degraded_announced_ = true;
-    } else if (!decision.perception_degraded && decision.cause == "STAIR") {
-        action = decision.action == "stop" ? "stair_stop" : "stair_slow";
-    } else if (!decision.perception_degraded && decision.cause == "STEP_CHECK") {
-        action = "possible_stair";
-    } else if (!decision.perception_degraded && decision.cause == "OBJECT") {
-        if (decision.object_label == "PERSON" && decision.action == "stop") {
-            action = "person_stop";
-        } else {
-            action = decision.action == "stop" ? "obstacle_stop" : "obstacle_slow";
-        }
-    } else if (!decision.perception_degraded && decision.cause == "BLOCKED") {
-        action = decision.action == "stop" ? "obstacle_stop" : "obstacle_slow";
-    } else if (!decision.perception_degraded && decision.cause == "UNKNOWN") {
-        action = "surface_unknown";
-    }
-    last_surface_hazard_ = decision.cause;
     const auto now = std::chrono::steady_clock::now();
     if (action == "system_fault") {
         last_fault_seen_time_ = now;
@@ -1477,26 +1382,18 @@ void VoiceNotifier::Update(int frame_id,
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fault_seen_time_).count());
         if (since_fault_ms < fault_hold_ms_) action = "system_fault";
     }
-    const bool critical = action == "stop" || action == "system_fault" ||
-        action == "person_stop" || action == "obstacle_stop" || action == "stair_stop";
+    const bool critical = action == "stop" || action == "system_fault";
     const bool action_changed = action != last_requested_action_;
-    // A depth-level transition is only a speech event when it also changes the
-    // conservative motion advice.  Otherwise floor depth jitter would enqueue
-    // repeated "clear" prompts during an otherwise stable demonstration.
-    const bool depth_changed = decision.depth_level != "unknown" &&
-                               decision.depth_level != last_announced_depth_level_ &&
-                               (action == "slow" || action == "stop");
-    const bool semantic_event = hazard_changed || action == "surface_degraded";
-    if (!critical && !action_changed && !depth_changed && !semantic_event) {
+    if (!critical && !action_changed) {
         return;
-    }
-    last_requested_action_ = action;
-    if (decision.depth_level != "unknown") {
-        last_announced_depth_level_ = decision.depth_level;
     }
     if (!critical && frame_id % frame_interval_ != 0) {
         return;
     }
+    // Commit the requested action only after it is eligible for enqueueing;
+    // otherwise a change observed between interval frames would be marked as
+    // handled and the short LEFT/RIGHT/SLOW prompt could be lost entirely.
+    last_requested_action_ = action;
     std::lock_guard<std::mutex> lock(worker_mutex_);
     if (diagnostic_ && frame_id % 300 == 0) {
         std::cout << "[VOICE][HEALTH] frame=" << frame_id
@@ -1515,7 +1412,7 @@ void VoiceNotifier::Update(int frame_id,
     }
     pending_frame_id_ = frame_id;
     pending_action_ = action;
-    pending_key_ = BuildVoiceKey(result, decision);
+    pending_key_ = action;
     pending_ready_ = true;
     worker_cv_.notify_one();
 }

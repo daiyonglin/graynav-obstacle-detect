@@ -196,6 +196,13 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     const DetectionItem* depth_candidate = NULL;
     bool wide_urgent = false;
     bool uncertain_hazard = false;
+    // A side object may overlap the narrow centre footprint even though its
+    // physical centre is clearly on one side.  Track the primary horizontal
+    // origin separately so that a large chair on the left produces RIGHT,
+    // rather than being mistaken for an unescapable two-corridor blockage.
+    bool primary_near[3] = {false, false, false};
+    bool primary_warning[3] = {false, false, false};
+    bool primary_center_ttc_urgent = false;
     for (size_t i = 0; i < result.items.size(); ++i) {
         const DetectionItem& item = result.items[i];
         if (!IsActionHazard(item)) continue;
@@ -239,6 +246,29 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         const float bx1 = std::max(0.0f, std::min(1.0f, item.box[0] / frame_w));
         const float bx2 = std::max(bx1, std::min(1.0f, item.box[2] / frame_w));
         const float box_span = std::max(0.01f, bx2 - bx1);
+        const float box_center = 0.5f * (bx1 + bx2);
+        int primary_zone = 1;
+        // Very wide boxes are central blockers even if regression jitter puts
+        // their centre just outside a sector boundary.
+        if (box_span < 0.55f) {
+            if (box_center < semantic::SectorLeftBoundaryRatio()) {
+                primary_zone = 0;
+            } else if (box_center > semantic::SectorRightBoundaryRatio()) {
+                primary_zone = 2;
+            }
+        }
+        const bool item_near = item.risk_level == "urgent" ||
+            item.risk_level == "near" ||
+            (distance >= 0.0f && distance < semantic::NearDistanceM()) ||
+            (item.ttc_s > 0.0f && item.ttc_s < semantic::StopTtcSeconds());
+        const bool item_warning = item_near || item.risk_level == "warning" ||
+            (distance >= 0.0f && distance < semantic::WarningDistanceM());
+        primary_near[primary_zone] = primary_near[primary_zone] || item_near;
+        primary_warning[primary_zone] = primary_warning[primary_zone] || item_warning;
+        if (primary_zone == 1 && item.ttc_s > 0.0f &&
+            item.ttc_s < semantic::StopTtcSeconds()) {
+            primary_center_ttc_urgent = true;
+        }
         const float bounds[3][2] = {
             {0.0f, semantic::SectorLeftBoundaryRatio()},
             {0.35f, 0.65f},
@@ -277,8 +307,6 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     std::string desired = "clear";
     std::string reason = "clear";
 
-    const bool center_ttc_urgent = center.min_ttc > 0.0f &&
-                                   center.min_ttc < semantic::StopTtcSeconds();
     const bool left_clear = left.verified && !left_near &&
                             left.clearance > semantic::SideClearDistanceM();
     const bool right_clear = right.verified && !right_near &&
@@ -287,10 +315,24 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         static_cast<int>(center_near) + static_cast<int>(right_near);
     const int warning_count = static_cast<int>(left_warning) +
         static_cast<int>(center_warning) + static_cast<int>(right_warning);
-    if (wide_urgent || near_count == 3 || center_ttc_urgent) {
+    const bool left_primary_only_near = primary_near[0] &&
+        !primary_near[1] && !primary_near[2] && !right_near;
+    const bool right_primary_only_near = primary_near[2] &&
+        !primary_near[0] && !primary_near[1] && !left_near;
+    const bool left_primary_only_warning = primary_warning[0] &&
+        !primary_warning[1] && !primary_warning[2] && !right_warning;
+    const bool right_primary_only_warning = primary_warning[2] &&
+        !primary_warning[0] && !primary_warning[1] && !left_warning;
+    if (wide_urgent || near_count == 3 || primary_center_ttc_urgent) {
         desired = "stop";
         reason = wide_urgent ? "wide_near" :
-            (near_count == 3 ? "three_corridors_near" : "center_ttc_urgent");
+            (near_count == 3 ? "three_corridors_near" : "center_primary_ttc_urgent");
+    } else if (left_primary_only_near) {
+        desired = "turn_right";
+        reason = "left_primary_near_avoid_right";
+    } else if (right_primary_only_near) {
+        desired = "turn_left";
+        reason = "right_primary_near_avoid_left";
     } else if (near_count == 2) {
         if (!left_near && left_clear) {
             desired = "turn_left";
@@ -332,6 +374,12 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             desired = center_near ? "stop" : "slow";
             reason = center_near ? "center_near_no_clear_margin" : "side_near";
         }
+    } else if (left_primary_only_warning) {
+        desired = "turn_right";
+        reason = "left_primary_warning_avoid_right";
+    } else if (right_primary_only_warning) {
+        desired = "turn_left";
+        reason = "right_primary_warning_avoid_left";
     } else if (warning_count >= 2) {
         if (!left_warning && left_clear) {
             desired = "turn_left";

@@ -66,6 +66,24 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn('decision->object_label = "NONE"', demo)
         self.assertIn('voice=ABNORMAL', demo)
 
+    def test_voice_uses_action_only_short_prompts(self) -> None:
+        voice = (ROOT / "src/voice_notifier.cpp").read_text(encoding="utf-8")
+        for long_prompt in (
+            "person_stop",
+            "obstacle_stop",
+            "obstacle_slow",
+            "stair_stop",
+            "stair_slow",
+            "possible_stair",
+            "kPromptPersonStop",
+            "kPromptObstacleStop",
+            "kPromptStairStop",
+        ):
+            self.assertNotIn(long_prompt, voice)
+        self.assertIn("pending_key_ = action", voice)
+        self.assertIn('action == "turn_left"', voice)
+        self.assertIn('action == "turn_right"', voice)
+
 
 if __name__ == "__main__":
     unittest.main()

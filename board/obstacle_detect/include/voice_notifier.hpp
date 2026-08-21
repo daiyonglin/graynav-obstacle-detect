@@ -105,10 +105,6 @@ private:
     /** 语音事务完成后提交最后动作与完成时刻，后续冷却从这里开始计时。 */
     void CommitSent(const std::string& action, const std::string& key);
 
-    /** 将决策动作规范化成邮箱键，重复状态以同一键执行周期播报。 */
-    std::string BuildVoiceKey(const DetectionResult& result,
-                              const AvoidanceDecision& decision) const;
-
     /** 把 clear/slow/stop/left/right/fault 映射为对应中文 GBK 负载。 */
     std::vector<uint8_t> BuildPromptPayload(const std::string& action) const;
 
@@ -207,10 +203,7 @@ private:
     int last_sent_frame_;
     std::string last_action_;
     std::string last_key_;
-    std::string last_surface_hazard_;
     std::string last_requested_action_;
-    std::string last_announced_depth_level_;
-    bool surface_degraded_announced_;
     std::string last_tx_detail_;
     std::string tty_device_;
     std::chrono::steady_clock::time_point last_sent_time_;

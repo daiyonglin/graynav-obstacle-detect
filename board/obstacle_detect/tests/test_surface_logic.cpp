@@ -1,6 +1,7 @@
 #include "surface_fusion.hpp"
 #include "surface_segmentation.hpp"
 #include "guidance_stabilizer.hpp"
+#include "avoidance_planner.hpp"
 #include "ranging.hpp"
 #include "tracker.hpp"
 
@@ -167,6 +168,66 @@ int main()
     AvoidanceDecision degraded_fused = fusion.Fuse(detection, pending, 0);
     assert(degraded_fused.action == "clear");
     assert(degraded_fused.perception_degraded);
+
+    // A large side object overlaps the narrow centre footprint by design, but
+    // its primary position remains lateral.  It must produce an opposite turn
+    // after normal action stabilization rather than an immediate STOP.
+    auto planner_detection = [](float x1, float x2, const char* sector,
+                                int64_t timestamp) {
+        DetectionResult frame;
+        frame.view_id = 0;
+        frame.roi = {0, 0, 720, 1280};
+        frame.timestamp_ms = timestamp;
+        DetectionItem item;
+        item.box = {x1, 650.0f, x2, 1240.0f};
+        item.raw_class_id = 1;
+        item.raw_label = "chair";
+        item.class_id = obstacle::semantic::CHAIR_SEAT;
+        item.label = "chair";
+        item.semantic_class = "chair";
+        item.sector = sector;
+        item.distance_m = 0.90f;
+        item.safe_distance_m = 0.75f;
+        item.distance_confidence = 0.80f;
+        item.distance_source = "fused";
+        item.risk_level = "near";
+        item.quality = "good";
+        item.ttc_s = 0.90f;
+        frame.items.push_back(item);
+        return frame;
+    };
+    obstacle::AvoidancePlanner left_planner;
+    left_planner.Initialize({720, 1280});
+    left_planner.Update(planner_detection(40.0f, 340.0f, "left", 100), 0, 100);
+    const AvoidanceDecision left_avoid = left_planner.Update(
+        planner_detection(40.0f, 340.0f, "left", 200), 0, 200);
+    assert(left_avoid.action == "turn_right");
+    assert(left_avoid.recommended_direction == "right");
+
+    obstacle::AvoidancePlanner right_planner;
+    right_planner.Initialize({720, 1280});
+    right_planner.Update(planner_detection(380.0f, 680.0f, "right", 100), 0, 100);
+    const AvoidanceDecision right_avoid = right_planner.Update(
+        planner_detection(380.0f, 680.0f, "right", 200), 0, 200);
+    assert(right_avoid.action == "turn_left");
+    assert(right_avoid.recommended_direction == "left");
+
+    obstacle::AvoidancePlanner center_planner;
+    center_planner.Initialize({720, 1280});
+    const AvoidanceDecision center_stop = center_planner.Update(
+        planner_detection(240.0f, 480.0f, "center", 100), 0, 100);
+    assert(center_stop.action == "stop");
+
+    // An unknown road mask is not positive evidence that the selected escape
+    // side is blocked.  Preserve the object's turn unless that side has a
+    // persistent blocked/step hazard.
+    SurfaceResult unknown_turn_surface;
+    unknown_turn_surface.valid = true;
+    unknown_turn_surface.stale = false;
+    unknown_turn_surface.primary_hazard = "unknown_other";
+    AvoidanceDecision turn_detection = right_avoid;
+    turn_detection.action = "turn_left";
+    assert(fusion.Fuse(turn_detection, unknown_turn_surface, 300).action == "turn_left");
 
     obstacle::SurfaceSegmenter segmenter;
     SurfaceResult surface;
