@@ -144,7 +144,7 @@ VoiceNotifier::VoiceNotifier()
       stable_needed_(1),
       clear_stable_needed_(3),
       cooldown_ms_(0),
-      clear_repeat_ms_(1200),
+      clear_repeat_ms_(0),
       stop_repeat_ms_(1000),
       fault_repeat_ms_(1800),
       fault_hold_ms_(2500),
@@ -238,8 +238,9 @@ bool VoiceNotifier::InitializeFromEnv()
     // word's timed transaction completes, the latest non-STOP action may be
     // sent immediately.  STOP keeps a separately configured ~1 s pause.
     cooldown_ms_ = std::max(0, getenv_int("A1_VOICE_COOLDOWN_MS", 0));
-    // Zero disables periodic CLEAR prompts.  A clear state is still announced
-    // once when the transaction key changes (for example after a hazard ends).
+    // Zero means no post-completion silence.  CLEAR therefore follows the same
+    // continuous short-word cadence as SLOW/LEFT/RIGHT unless an integrator
+    // explicitly requests a longer repeat interval.
     clear_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 0));
     stop_repeat_ms_ = std::max(500, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1000));
     fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 1800));
@@ -974,10 +975,6 @@ bool VoiceNotifier::ShouldSend(const std::string& action, const std::string& key
         return true;
     }
 
-    if (action == "clear" && clear_repeat_ms_ == 0) {
-        if (reason != nullptr) *reason = "clear_repeat_disabled";
-        return false;
-    }
     const int repeat_ms = (action == "clear") ? clear_repeat_ms_ : cooldown_ms_;
     if (key == last_key_ && since_ms < repeat_ms) {
         if (reason != nullptr) *reason = "cooldown";
@@ -1007,11 +1004,7 @@ int VoiceNotifier::RepeatIntervalMs(const std::string& action) const
 {
     if (action == "system_fault") return fault_repeat_ms_;
     if (action == "stop") return stop_repeat_ms_;
-    if (action == "clear") {
-        // Keep the worker's pending transaction dormant when periodic CLEAR
-        // announcements are disabled.  Key changes still transmit immediately.
-        return clear_repeat_ms_ > 0 ? clear_repeat_ms_ : 86400000;
-    }
+    if (action == "clear") return clear_repeat_ms_;
     return cooldown_ms_;
 }
 

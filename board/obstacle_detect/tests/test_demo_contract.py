@@ -94,6 +94,8 @@ class DemoContractTest(unittest.TestCase):
         voice = (ROOT / "src/voice_notifier.cpp").read_text(encoding="utf-8")
         run = (ROOT / "scripts/run.sh").read_text(encoding="utf-8")
         self.assertIn('getenv_int("A1_VOICE_COOLDOWN_MS", 0)', voice)
+        self.assertIn('if (action == "clear") return clear_repeat_ms_', voice)
+        self.assertNotIn("86400000", voice)
         self.assertIn('getenv_int("A1_VOICE_STOP_REPEAT_MS", 1000)', voice)
         self.assertIn('getenv_int("A1_VOICE_STOP_FOLLOWUP_HOLD_MS", 0)', voice)
         self.assertIn('A1_VOICE_COOLDOWN_MS:-0', run)

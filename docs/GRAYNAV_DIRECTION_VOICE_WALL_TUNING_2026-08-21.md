@@ -49,8 +49,8 @@ A1_VOICE_STOP_FOLLOWUP_HOLD_MS=0
 A1_VOICE_TURN_FOLLOWUP_HOLD_MS=0
 ```
 
-固定短词的无 ACK 事务仍保留约 900 ms 的播放保护时间。普通动作在该事务完成后立刻
-按邮箱中的最新稳定动作继续播报；STOP 在完成后额外等待约 1 s。STOP 降级为
+固定短词的无 ACK 事务仍保留约 900 ms 的播放保护时间。直行、减速和转向在该事务
+完成后立刻按邮箱中的最新稳定动作继续播报；STOP 在完成后额外等待约 1 s。STOP 降级为
 SLOW/LEFT/RIGHT 时不再保留旧动作 2.5 s，从而避免 Aurora 已变化而语音仍旧停留。
 
 ## 4. 墙面识别与可视化
@@ -87,11 +87,10 @@ full Docker/Buildroot build          = PASS
 rootfs .m1model count                = 1
 rootfs NAV asset count               = 40
 model SHA256                         = 33EEC832710706B1153F468F219C08389A52BA3D21CBDFFCDE32CA5E25D66DA8
-zImage bytes                         = 8134344
-zImage SHA256                        = A29912BFB60BA8580E1D13240F098DDF1044813ED6B6E9C9563BC6A8FBAF9878
+zImage bytes                         = 8134904
+zImage SHA256                        = B404F69CB0421C211EFC191023C61D0660D8255398AD351C25AFBC02D2FE3090
 ```
 
 该镜像是待烧录候选，不代表实板方向与语音已完成验收。烧录后应先验证右侧单人体
 稳定输出 `LEFT dir=left`，再接 SYN6288 检查 STOP 切换到 LEFT/SLOW 时是否在当前短词
 结束后立即跟随最新动作。墙面测试必须在没有人物/家具框主导的情况下进行。
-
