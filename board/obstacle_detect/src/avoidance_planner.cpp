@@ -158,7 +158,10 @@ std::string AvoidancePlanner::StabilizeAction(const std::string& desired, int64_
     const bool direction_ready = !direction_flip || now_ms - pending_since_ms_ >= 300;
     const bool stop_release_ready = stable_action_ != "stop" ||
                                     now_ms - pending_since_ms_ >= 500;
-    const bool normal_ready = pending_count_ >= 2 && direction_ready && stop_release_ready;
+    const bool direct_side_escape = stable_action_ == "slow" &&
+        (desired == "turn_left" || desired == "turn_right");
+    const bool normal_ready = (direct_side_escape || pending_count_ >= 2) &&
+                              direction_ready && stop_release_ready;
 
     if (stop_now || (escalation && desired == "slow") || clear_ready || normal_ready) {
         stable_action_ = desired;
@@ -321,12 +324,12 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         desired = "stop";
         reason = "three_corridors_distinct_near";
     } else if (near_count == 2) {
-        if (!left_near && left_clear) {
+        if (!left_near && !left.zone.occupied) {
             desired = "turn_left";
-            reason = "two_corridors_choose_left";
-        } else if (!right_near && right_clear) {
+            reason = "two_corridors_open_left";
+        } else if (!right_near && !right.zone.occupied) {
             desired = "turn_right";
-            reason = "two_corridors_choose_right";
+            reason = "two_corridors_open_right";
         } else if (!center_near) {
             desired = "slow";
             reason = "side_corridors_near_center_open";
@@ -368,12 +371,12 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         desired = "turn_left";
         reason = "right_primary_warning_avoid_left";
     } else if (warning_count >= 2) {
-        if (!left_warning && left_clear) {
+        if (!left_warning && !left.zone.occupied) {
             desired = "turn_left";
-            reason = "two_warnings_choose_left";
-        } else if (!right_warning && right_clear) {
+            reason = "two_warnings_open_left";
+        } else if (!right_warning && !right.zone.occupied) {
             desired = "turn_right";
-            reason = "two_warnings_choose_right";
+            reason = "two_warnings_open_right";
         } else {
             desired = "slow";
             reason = "multiple_warning_slow";

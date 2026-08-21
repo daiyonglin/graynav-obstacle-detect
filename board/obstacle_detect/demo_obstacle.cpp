@@ -1440,8 +1440,10 @@ int main()
         const bool nav_state_changed = nav_state_key != last_nav_state_key;
         const bool nav_heartbeat_due = now_ms - last_nav_print_ms >= nav_heartbeat_ms;
         const bool nav_change_allowed = now_ms - last_nav_print_ms >= nav_min_change_ms;
+        const bool nav_every_frame = output_interval_frames == 1;
         if (output_human_summary &&
-            (nav_heartbeat_due || (nav_state_changed && nav_change_allowed))) {
+            (nav_every_frame || nav_heartbeat_due ||
+             (nav_state_changed && nav_change_allowed))) {
             PrintUnifiedNavPacket(frame_id, stable_decision);
             last_nav_state_key = nav_state_key;
             last_nav_print_ms = now_ms;

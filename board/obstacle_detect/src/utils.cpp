@@ -226,9 +226,14 @@ bool same_person_column_entity(const DetectionItem& a,
     if (!both_person || a.raw_class_id != b.raw_class_id) return false;
     const float center_dx = std::fabs(
         center_x_for_multi_nms(a) - center_x_for_multi_nms(b)) / 720.0f;
-    return center_dx < 0.12f &&
-           horizontal_intersection_over_min_width(a, b) >= 0.65f &&
-           vertical_gap_ratio(a, b) <= 0.06f;
+    // Alternating LOWER/UPPER crops can leave a torso track and a face/shoulder
+    // track alive at the same time.  Their vertical gap is often larger than
+    // the detector-side NMS allowance even though they occupy the same body
+    // column.  Use strong horizontal agreement plus a bounded vertical gap;
+    // horizontally distinct people remain separate.
+    return center_dx < 0.16f &&
+           horizontal_intersection_over_min_width(a, b) >= 0.55f &&
+           vertical_gap_ratio(a, b) <= 0.14f;
 }
 
 std::string sector_for_multi_nms(const DetectionItem& item)
@@ -249,6 +254,12 @@ bool should_suppress_for_multi_nms(const DetectionItem& cur,
                                    float overlap,
                                    float iou_threshold)
 {
+    // Face/shoulder and torso boxes from alternating ROIs may be separated by
+    // a small vertical gap, so their 2-D IoU is exactly zero.  Evaluate the
+    // same-body-column rule before the generic no-overlap early return.
+    if (same_person_column_entity(cur, other)) {
+        return true;
+    }
     if (overlap <= 0.0f) {
         return false;
     }
@@ -278,7 +289,7 @@ bool should_suppress_for_multi_nms(const DetectionItem& cur,
     const bool nested_same_entity = cur.raw_class_id == other.raw_class_id &&
         intersection_over_min_area(cur, other) >= 0.75f &&
         center_dx < 0.10f && !spatially_separated;
-    if (nested_same_entity || same_person_column_entity(cur, other)) {
+    if (nested_same_entity) {
         // 排序阶段已经把应保留的大框/高质量框放在前面。
         return true;
     }

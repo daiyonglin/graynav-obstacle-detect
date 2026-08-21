@@ -206,7 +206,13 @@ void GuidanceStabilizer::UpdateActionAndCause(const AvoidanceDecision& raw)
 
     // 台阶确认本身已包含较长时序，系统故障也已在上方立即处理；其余变化
     // 至少连续两帧才进入面向人的输出。STOP 同样要求两帧，避免单帧测距噪声。
-    const int needed = candidate_cause == "STAIR" ? 1 : 2;
+    // The planner already applies temporal hysteresis.  Once it has converted
+    // SLOW into an explicit lateral escape, publish that turn immediately;
+    // applying a second two-frame gate here made alternating ROIs keep the HUD
+    // and speech stuck at SLOW despite a persistent side obstacle.
+    const bool lateral_escape_from_slow = stable_.action == "slow" &&
+        (candidate_action == "turn_left" || candidate_action == "turn_right");
+    const int needed = (candidate_cause == "STAIR" || lateral_escape_from_slow) ? 1 : 2;
     if (pending_action_count_ >= needed) {
         stable_.action = candidate_action;
         stable_.cause = pending_cause_;

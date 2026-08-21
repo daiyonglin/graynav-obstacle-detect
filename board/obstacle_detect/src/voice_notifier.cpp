@@ -145,7 +145,7 @@ VoiceNotifier::VoiceNotifier()
       clear_stable_needed_(3),
       cooldown_ms_(0),
       clear_repeat_ms_(0),
-      stop_repeat_ms_(1000),
+      stop_repeat_ms_(500),
       fault_repeat_ms_(0),
       fault_hold_ms_(2500),
       switch_min_ms_(0),
@@ -170,7 +170,7 @@ VoiceNotifier::VoiceNotifier()
       post_tx_delay_ms_(30),
       passive_rx_ms_(80),
       play_timeout_ms_(3000),
-      action_prompt_ms_(600),
+      action_prompt_ms_(1000),
       inter_frame_ms_(12),
       rx_poll_ms_(3),
       consecutive_no_rx_(0),
@@ -243,7 +243,7 @@ bool VoiceNotifier::InitializeFromEnv()
     // continuous short-word cadence as SLOW/LEFT/RIGHT unless an integrator
     // explicitly requests a longer repeat interval.
     clear_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 0));
-    stop_repeat_ms_ = std::max(500, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1000));
+    stop_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_STOP_REPEAT_MS", 500));
     fault_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 0));
     fault_hold_ms_ = std::max(1000, getenv_int("A1_VOICE_FAULT_HOLD_MS", 2500));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
@@ -269,11 +269,13 @@ bool VoiceNotifier::InitializeFromEnv()
     post_tx_delay_ms_ = std::max(9, getenv_int("A1_VOICE_POST_TX_DELAY_MS", 30));
     passive_rx_ms_ = std::max(0, getenv_int("A1_VOICE_PASSIVE_RX_MS", 80));
     play_timeout_ms_ = std::max(1000, getenv_int("A1_VOICE_PLAY_TIMEOUT_MS", 3000));
-    // All production prompts are fixed two-character action words.  Their
-    // playback is shorter than the old generic 900 ms transaction estimate;
-    // use a dedicated timer so the next word starts without an artificial
-    // silent tail when ACK/IDLE feedback is unavailable.
-    action_prompt_ms_ = std::max(350, getenv_int("A1_VOICE_ACTION_PROMPT_MS", 600));
+    // Use a dedicated fixed-prompt timer when ACK/IDLE feedback is unavailable.
+    // A 600 ms blind timer could resend while the attached SYN6288 was still
+    // speaking.  The module then rejected every following frame, which sounded
+    // like one startup prompt followed by permanent silence.  One second is
+    // still a continuous cadence for these short words but leaves the module a
+    // deterministic idle window even when status bytes are absent.
+    action_prompt_ms_ = std::max(700, getenv_int("A1_VOICE_ACTION_PROMPT_MS", 1000));
     inter_frame_ms_ = std::max(9, getenv_int("A1_VOICE_INTER_FRAME_MS", 12));
     rx_poll_ms_ = std::max(1, getenv_int("A1_VOICE_RX_POLL_MS", 3));
 
@@ -1387,10 +1389,7 @@ void VoiceNotifier::Update(int frame_id,
     }
     const bool critical = action == "stop" || action == "system_fault";
     const bool action_changed = action != last_requested_action_;
-    if (!critical && !action_changed) {
-        return;
-    }
-    if (!critical && frame_id % frame_interval_ != 0) {
+    if (!critical && !action_changed && frame_id % frame_interval_ != 0) {
         return;
     }
     // Commit the requested action only after it is eligible for enqueueing;

@@ -234,6 +234,26 @@ int main()
     assert(!warning_right_avoid.center.occupied);
     assert(warning_right_avoid.right.occupied);
 
+    // When alternating ROIs briefly retain a centre fragment plus the real
+    // right-side body track, an empty left zone is already the only escape.
+    // Do not wait for another view-level clearance flag and fall back to SLOW.
+    obstacle::AvoidancePlanner center_right_planner;
+    center_right_planner.Initialize({720, 1280});
+    DetectionResult center_right = warning_right;
+    DetectionItem center_fragment = center_right.items[0];
+    center_fragment.box = {300.0f, 250.0f, 410.0f, 560.0f};
+    center_fragment.sector = "center";
+    center_fragment.track_id = 99;
+    center_right.items.push_back(center_fragment);
+    center_right_planner.Update(center_right, 0, 100);
+    center_right.timestamp_ms = 200;
+    const AvoidanceDecision center_right_avoid =
+        center_right_planner.Update(center_right, 0, 200);
+    assert(center_right_avoid.action == "turn_left");
+    assert(!center_right_avoid.left.occupied);
+    assert(center_right_avoid.center.occupied);
+    assert(center_right_avoid.right.occupied);
+
     // Alternating UPPER/LOWER views may produce a face box and a torso box for
     // the same person.  They share one horizontal body column and must be
     // published as one entity rather than two obstacles.
@@ -248,7 +268,7 @@ int main()
     body.box = {420.0f, 600.0f, 700.0f, 1250.0f};
     DetectionItem face = body;
     face.score = 0.70f;
-    face.box = {480.0f, 250.0f, 690.0f, 630.0f};
+    face.box = {480.0f, 250.0f, 690.0f, 450.0f};
     duplicate_person.items.push_back(face);
     duplicate_person.items.push_back(body);
     utils::MultiTargetNMS(&duplicate_person, 0.45f, 8);
@@ -500,9 +520,9 @@ int main()
     assert(guidance.Update(raw, 600).action == "slow");
     assert(guidance.Current().range == "MID");
 
-    // Planner reasons are diagnostic detail and may alternate across adjacent
-    // rules.  A stable user-facing direction must still pass after two equal
-    // action observations.
+    // The planner has already stabilized a lateral escape.  Publishing it
+    // through a second two-frame gate left the HUD and voice stuck at SLOW, so
+    // a turn from SLOW is intentionally immediate here.
     obstacle::GuidanceStabilizer direction_guidance;
     AvoidanceDecision direction_raw;
     direction_raw.action = "slow";
@@ -513,7 +533,7 @@ int main()
     direction_guidance.Update(direction_raw, 0);
     direction_raw.action = "turn_left";
     direction_raw.cause = "RIGHT_PRIMARY_WARNING";
-    assert(direction_guidance.Update(direction_raw, 100).action == "slow");
+    assert(direction_guidance.Update(direction_raw, 100).action == "turn_left");
     direction_raw.cause = "RIGHT_WARNING_DIRECT";
     assert(direction_guidance.Update(direction_raw, 200).action == "turn_left");
 
