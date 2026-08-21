@@ -201,6 +201,36 @@ float center_x_for_multi_nms(const DetectionItem& item)
     return 0.5f * (item.box[0] + item.box[2]);
 }
 
+float horizontal_intersection_over_min_width(const DetectionItem& a,
+                                             const DetectionItem& b)
+{
+    const float overlap = std::max(0.0f,
+        std::min(a.box[2], b.box[2]) - std::max(a.box[0], b.box[0]));
+    const float min_width = std::max(1.0f, std::min(
+        a.box[2] - a.box[0], b.box[2] - b.box[0]));
+    return overlap / min_width;
+}
+
+float vertical_gap_ratio(const DetectionItem& a, const DetectionItem& b)
+{
+    const float gap = std::max(0.0f,
+        std::max(a.box[1], b.box[1]) - std::min(a.box[3], b.box[3]));
+    return gap / 1280.0f;
+}
+
+bool same_person_column_entity(const DetectionItem& a,
+                               const DetectionItem& b)
+{
+    const bool both_person =
+        a.class_id == DISPLAY_CLASS_PERSON && b.class_id == DISPLAY_CLASS_PERSON;
+    if (!both_person || a.raw_class_id != b.raw_class_id) return false;
+    const float center_dx = std::fabs(
+        center_x_for_multi_nms(a) - center_x_for_multi_nms(b)) / 720.0f;
+    return center_dx < 0.12f &&
+           horizontal_intersection_over_min_width(a, b) >= 0.65f &&
+           vertical_gap_ratio(a, b) <= 0.06f;
+}
+
 std::string sector_for_multi_nms(const DetectionItem& item)
 {
     const float w = 720.0f;
@@ -248,7 +278,7 @@ bool should_suppress_for_multi_nms(const DetectionItem& cur,
     const bool nested_same_entity = cur.raw_class_id == other.raw_class_id &&
         intersection_over_min_area(cur, other) >= 0.75f &&
         center_dx < 0.10f && !spatially_separated;
-    if (nested_same_entity) {
+    if (nested_same_entity || same_person_column_entity(cur, other)) {
         // 排序阶段已经把应保留的大框/高质量框放在前面。
         return true;
     }
@@ -299,10 +329,11 @@ void MultiTargetNMS(DetectionResult* result, float iou_threshold, int top_k)
      */
     std::sort(result->items.begin(), result->items.end(),
               [](const DetectionItem& a, const DetectionItem& b) {
-                  if (a.raw_class_id == b.raw_class_id &&
-                      intersection_over_min_area(a, b) >= 0.75f &&
-                      std::fabs(center_x_for_multi_nms(a) -
-                                center_x_for_multi_nms(b)) / 720.0f < 0.10f) {
+                   if ((a.raw_class_id == b.raw_class_id &&
+                        intersection_over_min_area(a, b) >= 0.75f &&
+                        std::fabs(center_x_for_multi_nms(a) -
+                                  center_x_for_multi_nms(b)) / 720.0f < 0.10f) ||
+                       same_person_column_entity(a, b)) {
                       const float aa = box_area_for_multi_nms(a);
                       const float ba = box_area_for_multi_nms(b);
                       const DetectionItem& larger = aa >= ba ? a : b;

@@ -186,13 +186,18 @@ void GuidanceStabilizer::UpdateActionAndCause(const AvoidanceDecision& raw)
         stop_release_count_ = 0;
     }
 
-    if (candidate_action == stable_.action && candidate_cause == stable_.cause) {
+    if (candidate_action == stable_.action) {
         pending_action_count_ = 0;
+        // Cause is descriptive metadata.  It may legitimately alternate
+        // between two planner rules while the user-facing action stays the
+        // same; update it without restarting the action stability gate.
+        stable_.cause = candidate_cause;
         stable_.scene_label = upper_copy(raw.scene_label);
         return;
     }
-    if (candidate_action == pending_action_ && candidate_cause == pending_cause_) {
+    if (candidate_action == pending_action_) {
         ++pending_action_count_;
+        pending_cause_ = candidate_cause;
     } else {
         pending_action_ = candidate_action;
         pending_cause_ = candidate_cause;
@@ -204,7 +209,7 @@ void GuidanceStabilizer::UpdateActionAndCause(const AvoidanceDecision& raw)
     const int needed = candidate_cause == "STAIR" ? 1 : 2;
     if (pending_action_count_ >= needed) {
         stable_.action = candidate_action;
-        stable_.cause = candidate_cause;
+        stable_.cause = pending_cause_;
         stable_.scene_label = upper_copy(raw.scene_label);
         pending_action_count_ = 0;
     }

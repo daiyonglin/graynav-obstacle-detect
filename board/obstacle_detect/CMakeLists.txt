@@ -64,6 +64,7 @@ if(A1_BUILD_SURFACE_TESTS)
         ${PROJECT_SOURCE_DIR}/src/surface_fusion.cpp
         ${PROJECT_SOURCE_DIR}/src/semantic_config.cpp
         ${PROJECT_SOURCE_DIR}/src/tracker.cpp
+        ${PROJECT_SOURCE_DIR}/src/utils.cpp
     )
 endif()
 

@@ -4,26 +4,13 @@
 #include "avoidance_planner.hpp"
 #include "ranging.hpp"
 #include "tracker.hpp"
+#include "utils.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <iostream>
 #include <vector>
-
-namespace utils {
-float IoU(const std::array<float, 4>& a, const std::array<float, 4>& b)
-{
-    const float x1 = std::max(a[0], b[0]);
-    const float y1 = std::max(a[1], b[1]);
-    const float x2 = std::min(a[2], b[2]);
-    const float y2 = std::min(a[3], b[3]);
-    const float intersection = std::max(0.0f, x2 - x1) * std::max(0.0f, y2 - y1);
-    const float area_a = std::max(0.0f, a[2] - a[0]) * std::max(0.0f, a[3] - a[1]);
-    const float area_b = std::max(0.0f, b[2] - b[0]) * std::max(0.0f, b[3] - b[1]);
-    return intersection / std::max(1.0f, area_a + area_b - intersection);
-}
-}  // namespace utils
 
 namespace {
 
@@ -224,6 +211,49 @@ int main()
     assert(broad_right_avoid.action == "turn_left");
     assert(broad_right_avoid.hazard_sector == "right");
     assert(broad_right_avoid.hazard_position == "RIGHT");
+    assert(!broad_right_avoid.left.occupied);
+    assert(!broad_right_avoid.center.occupied);
+    assert(broad_right_avoid.right.occupied);
+
+    // The same exclusive-zone contract applies at warning range.  This is the
+    // exact state seen in the board log where MID RIGHT was displayed but the
+    // stale stabilized action remained SLOW.
+    obstacle::AvoidancePlanner warning_right_planner;
+    warning_right_planner.Initialize({720, 1280});
+    DetectionResult warning_right = planner_detection(250.0f, 710.0f, "right", 100);
+    warning_right.items[0].distance_m = 1.95f;
+    warning_right.items[0].safe_distance_m = 1.80f;
+    warning_right.items[0].risk_level = "warning";
+    warning_right.items[0].ttc_s = -1.0f;
+    warning_right_planner.Update(warning_right, 0, 100);
+    warning_right.timestamp_ms = 200;
+    const AvoidanceDecision warning_right_avoid =
+        warning_right_planner.Update(warning_right, 0, 200);
+    assert(warning_right_avoid.action == "turn_left");
+    assert(!warning_right_avoid.left.occupied);
+    assert(!warning_right_avoid.center.occupied);
+    assert(warning_right_avoid.right.occupied);
+
+    // Alternating UPPER/LOWER views may produce a face box and a torso box for
+    // the same person.  They share one horizontal body column and must be
+    // published as one entity rather than two obstacles.
+    DetectionResult duplicate_person;
+    DetectionItem body;
+    body.raw_class_id = 0;
+    body.raw_label = "person";
+    body.class_id = obstacle::semantic::PERSON;
+    body.label = "person";
+    body.quality = "good";
+    body.score = 0.55f;
+    body.box = {420.0f, 600.0f, 700.0f, 1250.0f};
+    DetectionItem face = body;
+    face.score = 0.70f;
+    face.box = {480.0f, 250.0f, 690.0f, 630.0f};
+    duplicate_person.items.push_back(face);
+    duplicate_person.items.push_back(body);
+    utils::MultiTargetNMS(&duplicate_person, 0.45f, 8);
+    assert(duplicate_person.items.size() == 1U);
+    assert(duplicate_person.items[0].box[1] == 600.0f);
 
     obstacle::AvoidancePlanner center_planner;
     center_planner.Initialize({720, 1280});
@@ -469,6 +499,23 @@ int main()
     }
     assert(guidance.Update(raw, 600).action == "slow");
     assert(guidance.Current().range == "MID");
+
+    // Planner reasons are diagnostic detail and may alternate across adjacent
+    // rules.  A stable user-facing direction must still pass after two equal
+    // action observations.
+    obstacle::GuidanceStabilizer direction_guidance;
+    AvoidanceDecision direction_raw;
+    direction_raw.action = "slow";
+    direction_raw.cause = "WARNING_RANGE";
+    direction_raw.range = "MID";
+    direction_raw.hazard_sector = "right";
+    direction_raw.ai_ok = true;
+    direction_guidance.Update(direction_raw, 0);
+    direction_raw.action = "turn_left";
+    direction_raw.cause = "RIGHT_PRIMARY_WARNING";
+    assert(direction_guidance.Update(direction_raw, 100).action == "slow");
+    direction_raw.cause = "RIGHT_WARNING_DIRECT";
+    assert(direction_guidance.Update(direction_raw, 200).action == "turn_left");
 
     // The public distance filter must be scoped to one track. Switching from a
     // near person to a far chair cannot retain the old person's history.

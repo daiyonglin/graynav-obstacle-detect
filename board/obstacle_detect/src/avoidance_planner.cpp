@@ -240,8 +240,11 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             continue;
         }
 
-        // Assign by horizontal footprint, not just box centre.  A chair/table
-        // spanning two corridors must constrain both potential walking paths.
+        // A named detection represents one physical obstacle, so publish it in
+        // exactly one primary horizontal zone.  The previous footprint rule
+        // copied a large right-side person into LEFT/CENTER/RIGHT and made one
+        // target look like a three-obstacle blockade.  Truly frame-spanning
+        // detections were handled by the explicit `wide` branch above.
         const float frame_w = std::max(1.0f, static_cast<float>(image_shape_[0]));
         const float bx1 = std::max(0.0f, std::min(1.0f, item.box[0] / frame_w));
         const float bx2 = std::max(bx1, std::min(1.0f, item.box[2] / frame_w));
@@ -272,33 +275,8 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             item.ttc_s < semantic::StopTtcSeconds()) {
             primary_center_ttc_urgent = true;
         }
-        const float bounds[3][2] = {
-            {0.0f, semantic::SectorLeftBoundaryRatio()},
-            {0.35f, 0.65f},
-            {semantic::SectorRightBoundaryRatio(), 1.0f}
-        };
         Corridor* corridors[3] = {&left, &center, &right};
-        bool assigned = false;
-        for (int zone = 0; zone < 3; ++zone) {
-            const float overlap = std::max(0.0f,
-                std::min(bx2, bounds[zone][1]) - std::max(bx1, bounds[zone][0]));
-            const float zone_span = bounds[zone][1] - bounds[zone][0];
-            const float coverage = overlap / std::max(0.01f, std::min(box_span, zone_span));
-            if (coverage >= 0.35f) {
-                AddToCorridor(corridors[zone], item);
-                assigned = true;
-            }
-        }
-        if (!assigned) {
-            const float center_half_width = semantic::CenterCorridorHalfWidthM();
-            if (item.lateral_m < -center_half_width || item.sector == "left") {
-                AddToCorridor(&left, item);
-            } else if (item.lateral_m > center_half_width || item.sector == "right") {
-                AddToCorridor(&right, item);
-            } else {
-                AddToCorridor(&center, item);
-            }
-        }
+        AddToCorridor(corridors[primary_zone], item);
     }
 
     const bool left_near = near_or_urgent(left);
