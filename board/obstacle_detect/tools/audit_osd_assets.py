@@ -13,11 +13,17 @@ POSITIONS = ("LEFT", "FRONT", "RIGHT", "MULTI", "BLOCKED")
 
 
 def expected_names() -> set[str]:
-    return {
+    normal = {
         f"NAV_{range_name}_{position}.ssbmp"
         for range_name in RANGES
         for position in POSITIONS
     }
+    wall = {
+        f"NAV_WALL_{range_name}_{position}.ssbmp"
+        for range_name in RANGES
+        for position in POSITIONS
+    }
+    return normal | wall
 
 
 def audit(root: Path) -> None:

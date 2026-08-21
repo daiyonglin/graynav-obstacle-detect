@@ -628,6 +628,11 @@ void ObstacleTracker::RebuildStableResult(const DetectionResult& raw_result,
     }
 
     std::sort(stable_result_.items.begin(), stable_result_.items.end(), better_detection);
+    // Tracks are associated per alternating ROI.  A partial upper-body box and
+    // a lower-ROI body box can therefore survive as two track IDs even though
+    // they describe the same person.  Reuse the navigation-aware containment
+    // suppression before publishing so OSD and the planner see one entity.
+    utils::MultiTargetNMS(&stable_result_, 0.45f, kMaxStableObjects);
     if (stable_result_.items.size() > static_cast<size_t>(kMaxStableObjects)) {
         stable_result_.items.resize(kMaxStableObjects);
     }

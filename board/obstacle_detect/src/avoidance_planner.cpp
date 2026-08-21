@@ -248,9 +248,12 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         const float box_span = std::max(0.01f, bx2 - bx1);
         const float box_center = 0.5f * (bx1 + bx2);
         int primary_zone = 1;
-        // Very wide boxes are central blockers even if regression jitter puts
-        // their centre just outside a sector boundary.
-        if (box_span < 0.55f) {
+        // Only a genuinely frame-spanning box loses its lateral identity.
+        // Partial-person boxes are often 55--75% of the image width; forcing
+        // those boxes to CENTER made one person on the right look like three
+        // independent corridor obstacles.  The model/ranging stage already
+        // owns the stricter wide-box contract, so use the same threshold here.
+        if (box_span < semantic::WideBoxRatio()) {
             if (box_center < semantic::SectorLeftBoundaryRatio()) {
                 primary_zone = 0;
             } else if (box_center > semantic::SectorRightBoundaryRatio()) {
@@ -315,24 +318,30 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         static_cast<int>(center_near) + static_cast<int>(right_near);
     const int warning_count = static_cast<int>(left_warning) +
         static_cast<int>(center_warning) + static_cast<int>(right_warning);
+    // Footprint occupancy answers "which paths does this box touch?" whereas
+    // primary evidence answers "where is the physical obstacle?".  Do not
+    // cancel a right-side turn merely because the same large box also touches
+    // the centre/left corridor masks.
     const bool left_primary_only_near = primary_near[0] &&
-        !primary_near[1] && !primary_near[2] && !right_near;
+        !primary_near[1] && !primary_near[2];
     const bool right_primary_only_near = primary_near[2] &&
-        !primary_near[0] && !primary_near[1] && !left_near;
+        !primary_near[0] && !primary_near[1];
     const bool left_primary_only_warning = primary_warning[0] &&
-        !primary_warning[1] && !primary_warning[2] && !right_warning;
+        !primary_warning[1] && !primary_warning[2];
     const bool right_primary_only_warning = primary_warning[2] &&
-        !primary_warning[0] && !primary_warning[1] && !left_warning;
-    if (wide_urgent || near_count == 3 || primary_center_ttc_urgent) {
+        !primary_warning[0] && !primary_warning[1];
+    if (wide_urgent || primary_center_ttc_urgent) {
         desired = "stop";
-        reason = wide_urgent ? "wide_near" :
-            (near_count == 3 ? "three_corridors_near" : "center_primary_ttc_urgent");
+        reason = wide_urgent ? "wide_near" : "center_primary_ttc_urgent";
     } else if (left_primary_only_near) {
         desired = "turn_right";
         reason = "left_primary_near_avoid_right";
     } else if (right_primary_only_near) {
         desired = "turn_left";
         reason = "right_primary_near_avoid_left";
+    } else if (near_count == 3) {
+        desired = "stop";
+        reason = "three_corridors_distinct_near";
     } else if (near_count == 2) {
         if (!left_near && left_clear) {
             desired = "turn_left";
@@ -426,11 +435,27 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     const bool active_left = left_near || left_warning;
     const bool active_center = center_near || center_warning;
     const bool active_right = right_near || right_warning;
+    const bool primary_active[3] = {
+        primary_near[0] || primary_warning[0],
+        primary_near[1] || primary_warning[1],
+        primary_near[2] || primary_warning[2]
+    };
+    const int primary_active_count = static_cast<int>(primary_active[0]) +
+        static_cast<int>(primary_active[1]) + static_cast<int>(primary_active[2]);
     const int active_count = static_cast<int>(active_left) +
         static_cast<int>(active_center) + static_cast<int>(active_right);
-    decision.hazard_sector = active_count >= 3 ? "blocked" :
-        (active_count == 2 ? "multi" :
-         (active_left ? "left" : (active_right ? "right" : "center")));
+    if (wide_urgent) {
+        decision.hazard_sector = "blocked";
+    } else if (primary_active_count > 0) {
+        decision.hazard_sector = primary_active_count >= 3 ? "blocked" :
+            (primary_active_count == 2 ? "multi" :
+             (primary_active[0] ? "left" :
+              (primary_active[2] ? "right" : "center")));
+    } else {
+        decision.hazard_sector = active_count >= 3 ? "blocked" :
+            (active_count == 2 ? "multi" :
+             (active_left ? "left" : (active_right ? "right" : "center")));
+    }
     decision.action = StabilizeAction(desired, timestamp_ms);
     decision.recommended_direction = decision.action == "turn_left" ? "left" :
         (decision.action == "turn_right" ? "right" :

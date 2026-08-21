@@ -720,7 +720,14 @@ std::string hud_navigation_asset_path(const AvoidanceDecision& decision)
         position != "BLOCKED") {
         position = "FRONT";
     }
-    return hud_asset_path("NAV_" + range + "_" + position);
+    // A temporally confirmed blocked_surface with no named object is the wall
+    // visualization contract.  It uses one explicit static text line instead
+    // of the old ambiguous X/corridor graphics; detection boxes remain the
+    // visual language for people and furniture.
+    const bool wall_only = decision.cause == "BLOCKED" &&
+        (decision.object_label.empty() || decision.object_label == "NONE");
+    return hud_asset_path(std::string(wall_only ? "NAV_WALL_" : "NAV_") +
+                          range + "_" + position);
 }
 
 std::string nearest_risk_text(const AvoidanceDecision& decision)

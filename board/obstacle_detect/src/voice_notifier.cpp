@@ -143,15 +143,15 @@ VoiceNotifier::VoiceNotifier()
       frame_interval_(2),
       stable_needed_(1),
       clear_stable_needed_(3),
-      cooldown_ms_(1200),
+      cooldown_ms_(0),
       clear_repeat_ms_(1200),
-      stop_repeat_ms_(1600),
+      stop_repeat_ms_(1000),
       fault_repeat_ms_(1800),
       fault_hold_ms_(2500),
       switch_min_ms_(0),
-      tx_gap_ms_(800),
-      stop_followup_hold_ms_(2500),
-      turn_followup_hold_ms_(1500),
+      tx_gap_ms_(0),
+      stop_followup_hold_ms_(0),
+      turn_followup_hold_ms_(0),
       pre_stop_(false),
       ack_enabled_(true),
       require_ack_(true),
@@ -234,19 +234,22 @@ bool VoiceNotifier::InitializeFromEnv()
     frame_interval_ = std::max(1, getenv_int("A1_VOICE_INTERVAL_FRAMES", 2));
     stable_needed_ = std::max(1, getenv_int("A1_VOICE_STABLE_FRAMES", 2));
     clear_stable_needed_ = std::max(stable_needed_, getenv_int("A1_VOICE_CLEAR_STABLE_FRAMES", 3));
-    cooldown_ms_ = std::max(600, getenv_int("A1_VOICE_COOLDOWN_MS", 1200));
+    // Action-only prompts are intentionally continuous: after the fixed short
+    // word's timed transaction completes, the latest non-STOP action may be
+    // sent immediately.  STOP keeps a separately configured ~1 s pause.
+    cooldown_ms_ = std::max(0, getenv_int("A1_VOICE_COOLDOWN_MS", 0));
     // Zero disables periodic CLEAR prompts.  A clear state is still announced
     // once when the transaction key changes (for example after a hazard ends).
     clear_repeat_ms_ = std::max(0, getenv_int("A1_VOICE_CLEAR_REPEAT_MS", 0));
-    stop_repeat_ms_ = std::max(1000, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1600));
+    stop_repeat_ms_ = std::max(500, getenv_int("A1_VOICE_STOP_REPEAT_MS", 1000));
     fault_repeat_ms_ = std::max(1200, getenv_int("A1_VOICE_FAULT_REPEAT_MS", 1800));
     fault_hold_ms_ = std::max(1000, getenv_int("A1_VOICE_FAULT_HOLD_MS", 2500));
     switch_min_ms_ = std::max(0, getenv_int("A1_VOICE_SWITCH_MIN_MS", 0));
-    tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 800));
+    tx_gap_ms_ = std::max(0, getenv_int("A1_VOICE_TX_GAP_MS", 0));
     stop_followup_hold_ms_ = std::max(
-        1500, getenv_int("A1_VOICE_STOP_FOLLOWUP_HOLD_MS", 2500));
+        0, getenv_int("A1_VOICE_STOP_FOLLOWUP_HOLD_MS", 0));
     turn_followup_hold_ms_ = std::max(
-        800, getenv_int("A1_VOICE_TURN_FOLLOWUP_HOLD_MS", 1500));
+        0, getenv_int("A1_VOICE_TURN_FOLLOWUP_HOLD_MS", 0));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
     ack_enabled_ = getenv_bool("A1_VOICE_ACK", true);
     require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", true);

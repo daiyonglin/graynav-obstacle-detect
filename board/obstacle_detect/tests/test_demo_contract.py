@@ -20,11 +20,17 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn("NAV_*.ssbmp", package)
         self.assertNotIn("INFO_*.ssbmp", package)
         names = {path.name for path in (ROOT / "app_assets/osd").glob("NAV_*.ssbmp")}
-        expected = {
+        normal = {
             f"NAV_{distance}_{position}.ssbmp"
             for distance in ("NEAR", "MID", "FAR", "UNKNOWN")
             for position in ("LEFT", "FRONT", "RIGHT", "MULTI", "BLOCKED")
         }
+        wall = {
+            f"NAV_WALL_{distance}_{position}.ssbmp"
+            for distance in ("NEAR", "MID", "FAR", "UNKNOWN")
+            for position in ("LEFT", "FRONT", "RIGHT", "MULTI", "BLOCKED")
+        }
+        expected = normal | wall
         self.assertEqual(names, expected)
         for name in names:
             raw = (ROOT / "app_assets/osd" / name).read_bytes()
@@ -83,6 +89,20 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn("pending_key_ = action", voice)
         self.assertIn('action == "turn_left"', voice)
         self.assertIn('action == "turn_right"', voice)
+
+    def test_voice_cadence_follows_latest_action(self) -> None:
+        voice = (ROOT / "src/voice_notifier.cpp").read_text(encoding="utf-8")
+        run = (ROOT / "scripts/run.sh").read_text(encoding="utf-8")
+        self.assertIn('getenv_int("A1_VOICE_COOLDOWN_MS", 0)', voice)
+        self.assertIn('getenv_int("A1_VOICE_STOP_REPEAT_MS", 1000)', voice)
+        self.assertIn('getenv_int("A1_VOICE_STOP_FOLLOWUP_HOLD_MS", 0)', voice)
+        self.assertIn('A1_VOICE_COOLDOWN_MS:-0', run)
+        self.assertIn('A1_VOICE_STOP_REPEAT_MS:-1000', run)
+        self.assertIn('A1_VOICE_STOP_FOLLOWUP_HOLD_MS:-0', run)
+
+    def test_confirmed_wall_has_distinct_static_hud(self) -> None:
+        source = (ROOT / "src/utils.cpp").read_text(encoding="utf-8")
+        self.assertIn('wall_only ? "NAV_WALL_" : "NAV_"', source)
 
 
 if __name__ == "__main__":

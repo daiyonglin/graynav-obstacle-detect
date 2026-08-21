@@ -131,7 +131,7 @@ def generate_info_assets(root: Path) -> int:
 
 
 def generate_navigation_assets(root: Path) -> int:
-    """Generate the object-name-free Aurora guidance line."""
+    """Generate guidance plus a minimal wall-only scene variant."""
     ranges = ["NEAR", "MID", "FAR", "UNKNOWN"]
     positions = ["LEFT", "FRONT", "RIGHT", "MULTI", "BLOCKED"]
     count = 0
@@ -142,6 +142,15 @@ def generate_navigation_assets(root: Path) -> int:
                 path,
                 f"{range_name} {position}",
                 scale=4,
+                pad_x=7,
+                pad_y=5,
+            )
+            count += 1
+            wall_path = root / f"NAV_WALL_{range_name}_{position}.ssbmp"
+            write_ssbmp(
+                wall_path,
+                f"WALL {range_name} {position}",
+                scale=3,
                 pad_x=7,
                 pad_y=5,
             )

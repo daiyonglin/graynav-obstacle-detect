@@ -212,6 +212,19 @@ int main()
     assert(right_avoid.action == "turn_left");
     assert(right_avoid.recommended_direction == "left");
 
+    // Reproduce the board log: one right-side partial-person box may cover all
+    // three footprint masks, but its centre and track identity are still on
+    // the right.  It is one obstacle, not a three-corridor blockade.
+    obstacle::AvoidancePlanner broad_right_planner;
+    broad_right_planner.Initialize({720, 1280});
+    broad_right_planner.Update(
+        planner_detection(250.0f, 710.0f, "right", 100), 0, 100);
+    const AvoidanceDecision broad_right_avoid = broad_right_planner.Update(
+        planner_detection(250.0f, 710.0f, "right", 200), 0, 200);
+    assert(broad_right_avoid.action == "turn_left");
+    assert(broad_right_avoid.hazard_sector == "right");
+    assert(broad_right_avoid.hazard_position == "RIGHT");
+
     obstacle::AvoidancePlanner center_planner;
     center_planner.Initialize({720, 1280});
     const AvoidanceDecision center_stop = center_planner.Update(
