@@ -43,7 +43,12 @@
 constexpr bool kOutputJsonLines = false;
 constexpr bool kOutputHumanSummary = true;
 constexpr bool kOutputSerialDiagnostics = false;
-constexpr int kOutputIntervalFrames = 10;
+// UART evidence is part of the live demonstration contract.  Keep the
+// executable itself at one packet per completed processing loop so a missing
+// or stale wrapper script cannot silently restore the old 90-frame cadence.
+constexpr int kOutputIntervalFrames = 1;
+constexpr const char* kBoardBuildContract =
+    "per_frame_nav_continuous_voice_side_turn_v2";
 
 std::atomic<bool> g_exit_flag(false);
 
@@ -1211,11 +1216,12 @@ int main()
     const bool output_human_summary = env_flag_enabled("A1_OUTPUT_HUMAN", kOutputHumanSummary);
     const bool output_serial_diagnostics = env_flag_enabled("A1_OUTPUT_SERIAL_DIAG", kOutputSerialDiagnostics);
     const bool capture_auto_restart = env_flag_enabled("A1_CAPTURE_AUTO_RESTART", true);
-    const int output_interval_frames = env_int_value("A1_OUTPUT_INTERVAL_FRAMES",
-                                                     kOutputIntervalFrames,
-                                                     1,
-                                                     300);
-    const int osd_interval_frames = env_int_value("A1_OSD_INTERVAL_FRAMES", 2, 1, 10);
+    // These two outputs must remain live even when the application is launched
+    // directly instead of through scripts/run.sh.  Diagnostics and JSON retain
+    // their own switches, but the human NAV line and Aurora HUD are refreshed
+    // on every completed loop.
+    const int output_interval_frames = kOutputIntervalFrames;
+    const int osd_interval_frames = 1;
     const int perf_interval_frames = env_int_value("A1_PERF_INTERVAL_FRAMES", 60, 10, 600);
     const int surface_stale_ms = env_int_value("A1_SURFACE_STALE_MS", 1000, 200, 10000);
     const int sensor_fps = env_int_value("A1_SENSOR_FPS", 90, 1, 240);
@@ -1237,6 +1243,9 @@ int main()
     std::cout << "[INFO] capture image shape = [" << capture_shape[0] << ", " << capture_shape[1] << "]" << std::endl;
     std::cout << "[INFO] det input shape = [" << det_shape[0] << ", " << det_shape[1] << "]" << std::endl;
     std::cout << "[INFO] model path      = " << path_det << std::endl;
+    std::cout << "[BUILD] contract=" << kBoardBuildContract
+              << " nav_every_loop=1 osd_every_loop=1 voice_continuous=1"
+              << std::endl;
     std::cout << "[INFO] unified model_id= " << detector.ModelId()
               << " outputs=7 schedule=LOWER,LOWER,UPPER" << std::endl;
     std::cout << "[INFO] output json     = " << (output_json_lines ? "on" : "off") << std::endl;

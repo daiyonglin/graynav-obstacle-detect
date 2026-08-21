@@ -65,6 +65,10 @@ if(A1_BUILD_SURFACE_TESTS)
         ${PROJECT_SOURCE_DIR}/src/semantic_config.cpp
         ${PROJECT_SOURCE_DIR}/src/tracker.cpp
         ${PROJECT_SOURCE_DIR}/src/utils.cpp
+        # utils.cpp contains VISUALIZER methods even though the assertions only
+        # exercise CPU logic.  Link the wrapper so this optional target remains
+        # buildable with the same OSD ABI as the deployed executable.
+        ${PROJECT_SOURCE_DIR}/src/osd-device.cpp
     )
 endif()
 

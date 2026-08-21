@@ -156,10 +156,16 @@ std::string AvoidancePlanner::StabilizeAction(const std::string& desired, int64_
         (stable_action_ == "turn_left" && desired == "turn_right") ||
         (stable_action_ == "turn_right" && desired == "turn_left");
     const bool direction_ready = !direction_flip || now_ms - pending_since_ms_ >= 300;
-    const bool stop_release_ready = stable_action_ != "stop" ||
-                                    now_ms - pending_since_ms_ >= 500;
-    const bool direct_side_escape = stable_action_ == "slow" &&
+    const bool direct_side_escape =
+        (stable_action_ == "slow" || stable_action_ == "stop") &&
         (desired == "turn_left" || desired == "turn_right");
+    // A STOP caused by a formerly central/duplicated track must not pin the
+    // user after the planner has located that obstacle on one side and found a
+    // lateral escape.  The desired action is already planner-stabilized; only
+    // opposite-direction flips retain the 300 ms guard above.
+    const bool stop_release_ready = stable_action_ != "stop" ||
+                                    direct_side_escape ||
+                                    now_ms - pending_since_ms_ >= 500;
     const bool normal_ready = (direct_side_escape || pending_count_ >= 2) &&
                               direction_ready && stop_release_ready;
 

@@ -160,6 +160,14 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
     const bool center_unknown = !center_drop && !center_blocked &&
         (surface.center.unknown_ratio >= 0.30f || !center_safe);
     const bool near_surface = surface.depth_level == "near";
+    const bool named_object_side_escape =
+        (detection.action == "turn_left" && detection.hazard_sector == "right") ||
+        (detection.action == "turn_right" && detection.hazard_sector == "left") ||
+        ((detection.action == "turn_left" || detection.action == "turn_right") &&
+         detection.hazard_sector == "multi");
+    const bool selected_side_has_step =
+        (detection.action == "turn_left" && surface.left.persistent_hazard) ||
+        (detection.action == "turn_right" && surface.right.persistent_hazard);
 
     std::string reason = "surface_clear";
     if (center_drop) {
@@ -170,6 +178,13 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
             fused.action = "slow";
             reason = "confirmed_step_far_unknown_slow";
         }
+    } else if (named_object_side_escape && !selected_side_has_step) {
+        // A background wall-like mask commonly covers the visible image behind
+        // a close person.  It must not erase an explicit object-centre based
+        // side-avoidance action.  Confirmed step/drop evidence on the selected
+        // side still retains veto power.
+        fused.hazard_sector = detection.hazard_sector;
+        reason = "named_object_side_escape_preserved";
     } else if (detection.action == "turn_left" && left_explicitly_unsafe) {
         fused.action = right_safe ? "turn_right" :
             (near_surface && right_explicitly_unsafe ? "stop" : "slow");

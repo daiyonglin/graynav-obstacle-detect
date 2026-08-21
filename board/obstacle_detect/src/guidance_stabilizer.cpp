@@ -174,6 +174,19 @@ void GuidanceStabilizer::UpdateActionAndCause(const AvoidanceDecision& raw)
         return;
     }
 
+    const bool stop_to_lateral_escape = stable_.action == "stop" &&
+        (candidate_action == "turn_left" || candidate_action == "turn_right");
+    if (stop_to_lateral_escape) {
+        // The planner has already confirmed that the obstacle is lateral and
+        // selected the opposite escape direction.  Do not apply another four
+        // samples of STOP release hysteresis in the presentation layer.
+        stable_.action = candidate_action;
+        stable_.cause = candidate_cause;
+        stable_.scene_label = upper_copy(raw.scene_label);
+        pending_action_count_ = 0;
+        stop_release_count_ = 0;
+        return;
+    }
     if (stable_.action == "stop" && candidate_action != "stop") {
         if (++stop_release_count_ < 4) return;
         stop_release_count_ = 0;

@@ -292,6 +292,17 @@ int main()
     turn_detection.action = "turn_left";
     assert(fusion.Fuse(turn_detection, unknown_turn_surface, 300).action == "turn_left");
 
+    // A close person on the right can make the background segmentation label
+    // the empty left image area as blocked.  The named side-object action must
+    // survive that generic mask; only persistent step/drop evidence vetoes it.
+    SurfaceResult wall_like_left = unknown_turn_surface;
+    wall_like_left.left.blocked_persistent = true;
+    wall_like_left.left.safe_candidate = false;
+    turn_detection.hazard_sector = "right";
+    assert(fusion.Fuse(turn_detection, wall_like_left, 350).action == "turn_left");
+    wall_like_left.left.persistent_hazard = true;
+    assert(fusion.Fuse(turn_detection, wall_like_left, 360).action != "turn_left");
+
     obstacle::SurfaceSegmenter segmenter;
     SurfaceResult surface;
     const std::vector<float> hazard = segmentation_logits(true);
@@ -536,6 +547,18 @@ int main()
     assert(direction_guidance.Update(direction_raw, 100).action == "turn_left");
     direction_raw.cause = "RIGHT_WARNING_DIRECT";
     assert(direction_guidance.Update(direction_raw, 200).action == "turn_left");
+
+    // A prior conservative STOP is released as soon as the already-stabilized
+    // planner identifies a lateral escape.  Keeping another four-frame release
+    // gate made both the HUD and speech repeat STOP after the person moved right.
+    obstacle::GuidanceStabilizer stopped_direction_guidance;
+    AvoidanceDecision stopped_direction_raw = direction_raw;
+    stopped_direction_raw.action = "stop";
+    stopped_direction_guidance.Update(stopped_direction_raw, 0);
+    stopped_direction_guidance.Update(stopped_direction_raw, 100);
+    stopped_direction_raw.action = "turn_left";
+    assert(stopped_direction_guidance.Update(stopped_direction_raw, 200).action ==
+           "turn_left");
 
     // The public distance filter must be scoped to one track. Switching from a
     // near person to a far chair cannot retain the old person's history.

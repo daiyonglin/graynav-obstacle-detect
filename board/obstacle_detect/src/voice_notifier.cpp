@@ -232,8 +232,8 @@ bool VoiceNotifier::InitializeFromEnv()
         return false;
     }
 
-    frame_interval_ = std::max(1, getenv_int("A1_VOICE_INTERVAL_FRAMES", 2));
-    stable_needed_ = std::max(1, getenv_int("A1_VOICE_STABLE_FRAMES", 2));
+    frame_interval_ = std::max(1, getenv_int("A1_VOICE_INTERVAL_FRAMES", 1));
+    stable_needed_ = std::max(1, getenv_int("A1_VOICE_STABLE_FRAMES", 1));
     clear_stable_needed_ = std::max(stable_needed_, getenv_int("A1_VOICE_CLEAR_STABLE_FRAMES", 3));
     // Action-only prompts are intentionally continuous: after the fixed short
     // word's timed transaction completes, the latest non-STOP action may be
@@ -253,14 +253,18 @@ bool VoiceNotifier::InitializeFromEnv()
     turn_followup_hold_ms_ = std::max(
         0, getenv_int("A1_VOICE_TURN_FOLLOWUP_HOLD_MS", 0));
     pre_stop_ = getenv_bool("A1_VOICE_PRE_STOP", false);
-    ack_enabled_ = getenv_bool("A1_VOICE_ACK", true);
-    require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", true);
-    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", true);
+    // The deployed SYN6288 carrier does not provide dependable ACK/IDLE
+    // feedback.  A direct binary launch must therefore use the same paced,
+    // timer-completed protocol as scripts/run.sh; otherwise the first prompt
+    // can remain in WaitAccept/Speaking forever and all later actions vanish.
+    ack_enabled_ = getenv_bool("A1_VOICE_ACK", false);
+    require_ack_ = getenv_bool("A1_VOICE_REQUIRE_ACK", false);
+    query_idle_ = getenv_bool("A1_VOICE_QUERY_IDLE", false);
     fixed_frame_ = getenv_bool("A1_VOICE_FIXED_FRAME", true);
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
     reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", false);
     passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", true);
-    diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
+    diagnostic_ = getenv_bool("A1_VOICE_DIAG", true);
     ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 200));
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));
