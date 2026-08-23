@@ -376,15 +376,15 @@ sigma = sqrt(1/(wg+ws))
 safe_distance = clamp(mean - sigma, 0.2, 8.0)
 ```
 
-### 9.6 距离时序与 TTC
+### 9.6 距离时序与诊断 TTC
 
-`ObstacleTracker::UpdateRangeState()` 维护距离和径向速度。先按真实时间差预测，再按测量置信度调整 alpha、beta。逆深度中值窗口由 7 次缩短为 5 次：突然接近快速接纳，突然远离仍要求连续 3 次一致；这样大约 3 个新观测即可覆盖旧中值。展示层只保留最近 3 次中值，避免 tracker 与串口双重长窗口导致人体前后移动 1m 而数值几乎不变。至少累计 3 次可靠测量且接近速度大于 0.20m/s 后才计算：
+`ObstacleTracker::UpdateRangeState()` 维护距离和径向速度。先按真实时间差预测，再按测量置信度调整 alpha、beta。逆深度中值窗口由 7 次缩短为 5 次：突然接近快速接纳，突然远离仍要求连续 3 次一致；这样大约 3 个新观测即可覆盖旧中值。展示层只保留最近 3 次中值，避免 tracker 与串口双重长窗口导致人体前后移动 1m 而数值几乎不变。至少累计 3 次可靠测量且接近速度大于 0.20m/s 后可计算诊断量：
 
 ```text
 TTC = safe_distance / approach_speed
 ```
 
-默认风险阈值为：TTC 小于 1.40s 或安全距离小于 0.85m 为 urgent；小于 1.25m 为 near；小于 2.20m 为 warning；否则 far。侧方走廊必须大于 1.45m 才视为可绕行，并要求候选方向比另一侧至少多 0.25m 净空。所有阈值通过 `A1_RANGE_*`、`A1_TTC_STOP_S`、`A1_SIDE_CLEAR_M` 和 `A1_TURN_MARGIN_M` 环境变量统一覆盖。
+`TTC` 只保留给诊断日志，**不参与 STOP、风险等级或语音动作**。正常导航只使用与串口 `dist` 同源的稳定期望距离：小于 `1.25m` 为 near，小于 `2.20m` 为 warning，否则为 far；只有期望距离无效时才使用 `safe_distance_m` 兜底。阈值通过 `A1_RANGE_NEAR_M` 和 `A1_RANGE_WARNING_M` 覆盖。
 
 ## 10. 三走廊避障规划
 
@@ -392,24 +392,23 @@ TTC = safe_distance / approach_speed
 
 ### 10.1 走廊更新
 
-目标按 `lateral_m` 和 `sector` 分配到 left/center/right。每条走廊保存最近保守距离和最小 TTC。可靠 wide 目标同时影响三条走廊；coarse/低置信 wide 目标只增加不确定性，不允许单独触发全域 STOP。
+目标按检测框中心和 `sector` 唯一分配到 left/center/right。每条走廊保存与串口一致的最近稳定距离。可靠 wide 目标同时影响三条走廊；coarse/低置信 wide 目标只增加不确定性，不允许单独触发全域 STOP。
 
-上下两个 ROI 在最近 500ms 内均被观察时，三条走廊标记为 `verified`。该标志只用于“中央受阻后选择哪一侧安全走廊”；若障碍明确位于单独一侧，系统会立即给出向相反方向转向的建议，不等待双 ROI 验证。
+上下两个 ROI 在最近 500ms 内均被观察时仍记录 `verified` 诊断状态，但简化后的动作不依赖复杂净空搜索。若障碍明确位于单独一侧，系统直接给出向相反方向转向的建议。
 
 ### 10.2 动作规则
 
 | 条件 | 动作 |
 |---|---|
-| 可靠 wide 近障、中心 TTC 过短、中心近障且无已验证可绕行侧 | `stop` |
-| 仅右侧近障/警告 | 立即 `turn_left` |
-| 仅左侧近障/警告 | 立即 `turn_right` |
-| 中心或右侧受阻，左侧已验证且净空明显更大 | `turn_left` |
-| 中心或左侧受阻，右侧已验证且净空明显更大 | `turn_right` |
-| 多侧风险、低质量不确定障碍或只有 warning 且方向不明确 | `slow` |
-| 连续确认无可靠风险 | `clear` |
+| 中央/宽目标距离 `<1.25m` | `stop` |
+| 中央/宽目标距离 `1.25～2.20m` | `slow` |
+| 仅右侧目标距离 `<2.20m` | `turn_left` |
+| 仅左侧目标距离 `<2.20m` | `turn_right` |
+| 左右两侧同时受阻但中央未近障 | `slow`，允许继续试探 |
+| 所有有效目标均 `≥2.20m` | `clear` |
 | 任一系统健康故障 | 主循环覆盖为 `system_fault` |
 
-中央受阻后的候选侧方走廊要求净空大于 `1.45m`，且比另一侧至少多 `0.25m`。这一严格条件不限制“单独侧方障碍直接反向转向”的快速规则。
+典型行走过程为：正对远处障碍时 `clear`，进入警告距离后 `slow`，进入近距离后 `stop`；用户停下并向一侧试探后，障碍框中心进入左/右区，系统立即给出相反方向的转向指令。TTC、隐藏安全下界和墙面分割均不能把远距离目标改写为 STOP。
 
 ### 10.3 动作滞回
 
@@ -501,7 +500,7 @@ FD | length_hi | length_lo | 01 | parameter | GBK payload | XOR checksum
 
 检测证据分为两类：连续取帧/NPU/资源故障仍按原状态机处理；图像内容异常则只在大面积近黑画面成立时触发。默认要求全图均值不高于 45、暗像素比例不低于 80%，且中心区域同样近黑，连续 3 帧后锁存 `state=sensor`。白墙、白板、过曝窗口和低纹理纯色画面不再被解释为镜头遮挡。画面冻结检测也只在存在足够边缘或动态范围时启用，避免静态白墙误报。恢复要求连续 18 帧健康。对应参数为 `A1_COVER_BLACK_MEAN_MAX`、`A1_COVER_BLACK_RATIO_PCT`、`A1_COVER_TRIGGER_FRAMES` 和 `A1_COVER_RECOVERY_FRAMES`。
 
-测距对外值与规划值采用不同契约。脚点可信的地面交点 `distance_m` 才使用 `A1_RANGE_GEOMETRY_SCALE=1.60`；尺寸法使用独立的 `A1_RANGE_SIZE_SCALE=1.00`。`safe_distance_m` 由未放大的规划均值、标准差、近场占用上界和 `A1_RANGE_SAFETY_SCALE=1.00` 共同构成，并取更保守者供避障规划。Tracker 对最近 5 次逆深度取中值，展示层再使用最近 3 次结果；接近快速响应，远离连续确认后释放。串口中的米数仍是未做物理相机标定的单目期望估计，动作则基于更保守的安全距离，二者不要求数值完全相同。
+脚点可信的地面交点 `distance_m` 使用 `A1_RANGE_GEOMETRY_SCALE=1.60`；尺寸法使用独立的 `A1_RANGE_SIZE_SCALE=1.00`。Tracker 对最近 5 次逆深度取中值，展示层再使用最近 3 次结果；接近快速响应，远离连续确认后释放。串口 `dist` 和正常动作现在共同使用该稳定期望距离，避免显示 2～3m 却因隐藏下界而 STOP。`safe_distance_m` 仍记录均值减方差的保守下界，但只在期望距离缺失时兜底。米数仍是未做物理相机标定的单目估计，不能宣称为精密测量。
 
 ### 13.2 推理异常
 
@@ -531,8 +530,8 @@ flowchart TD
     H --> I[全图反映射 + 质量过滤 + MultiTargetNMS]
     I --> J[全局多目标关联和框/类别稳定]
     J --> K[ground + size + nearfield 测距]
-    K --> L[距离/速度滤波与 TTC]
-    L --> M[左中右走廊规划与动作滞回]
+    K --> L[距离滤波与诊断速度/TTC]
+    L --> M[纯距离分级 + 方位规划 + 动作滞回]
     C --> N[SystemHealth]
     F --> N
     I --> N
@@ -590,7 +589,7 @@ flowchart TD
 | NMS 跨类重复与小框保护 | `src/utils.cpp` |
 | tracker 匹配、确认、丢失和框平滑 | `src/tracker.cpp` |
 | 尺寸先验、融合残差、近场上界 | `src/ranging.cpp` |
-| 走廊净空、TTC、动作滞回 | `src/avoidance_planner.cpp` |
+| 距离分级、三区方位和动作滞回 | `src/avoidance_planner.cpp` |
 | 遮挡、推理、资源异常门限 | `demo_obstacle.cpp::SystemHealth` |
 
 调整参数时应一次只改变一个模块，并同时保存串口性能摘要和现场场景，避免用后处理阈值掩盖模型或量化错误。
@@ -715,11 +714,11 @@ flowchart TD
 | `NearFieldUpperBound` | 近场距离上界，不是精确测量 |
 | `Estimate` | 证据一致性检查、逆方差融合、保守距离和风险等级 |
 
-正式规划使用 `safe_distance_m = mean - sigma`。因此同样的均值下，框底不可靠、远场俯角小或类别尺寸变化大的目标会得到更小的保守距离或更低置信度，系统不会把不确定测量包装成虚假的高精度米数。
+模块仍计算 `safe_distance_m = mean - sigma` 作为不确定度下界；正常动作优先使用稳定 `distance_m`，仅在其无效时使用该下界兜底。因此风险指令与串口展示保持一致，同时系统仍不会把不确定测量包装成虚假的高精度米数。
 
 ### 18.8 `avoidance_planner.cpp`：唯一正常动作产生器
 
-`IsActionHazard()` 先屏蔽 road，并要求 building、traffic sign、pole、tree、electrical box 等场景结构具有近场几何证据。`AddToCorridor()` 将每条走廊压缩成最近距离、最小 TTC 和主风险目标。`Update()` 生成期望动作，`StabilizeAction()` 再完成风险升级、方向反转和风险解除的时间滞回。
+`IsActionHazard()` 先屏蔽 road，并要求 building、traffic sign、pole、tree、electrical box 等场景结构具有近场几何证据。`AddToCorridor()` 将每条走廊压缩成最近稳定动作距离和主风险目标。`Update()` 按距离分级和方位生成期望动作，`StabilizeAction()` 再完成风险升级、试探转向和风险解除的时间滞回；TTC 不进入该模块。
 
 普通动作只能由此模块产生。任何检测、测距、OSD 或语音代码都不得自行把某个类别直接翻译为 LEFT/RIGHT/STOP，否则现场调参会出现多套互相冲突的策略。
 
