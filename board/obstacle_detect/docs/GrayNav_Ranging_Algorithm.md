@@ -413,7 +413,7 @@ v_k = beta * v_{k-1} + (1 - beta) * v_meas
 
 对于 2m 以上测量，tracker 保存最近 5 次 `rho=1/z`。获得至少 3 次测量后，在逆深度域取中值并还原 `z=1/rho_median`。逆深度与图像位置的关系比直接深度更接近线性，可显著降低框底抖动在远场被放大的问题；2m 内仍使用当前测量，避免削弱近场避障响应。
 
-## 9. TTC：碰撞时间估计
+## 9. TTC：仅保留的诊断量
 
 若目标正在接近：
 
@@ -427,13 +427,7 @@ approach_mps = max(0, -v_k)
 TTC = z_k / approach_mps
 ```
 
-当：
-
-```text
-TTC < 1.5s
-```
-
-即使 `z_k` 尚未低于近场距离阈值，也提升风险等级。这可以覆盖“目标快速靠近”或“行人向障碍移动”的动态场景。
+当前实现仍可计算并在诊断模式输出 TTC，但 TTC **不再提升风险等级，也不参与 STOP/SLOW/CLEAR 或转向动作**。现场测试表明，单目框抖动产生的速度噪声会使远处目标得到虚假的短 TTC；正常动作因此统一改为只使用与串口 `dist` 同源的稳定距离。
 
 ## 10. 风险等级定义
 
@@ -447,10 +441,9 @@ URGENT / NEAR / WARNING / FAR / UNKNOWN
 
 | 风险等级 | 条件 |
 |---|---|
-| URGENT | 安全距离 `< 0.85m`，或 `TTC < 1.40s` |
-| NEAR | 可靠目标安全距离 `< 1.25m` |
-| WARNING | 可靠目标安全距离 `< 2.20m` |
-| SIDE CLEAR | 侧方净空 `> 1.45m`，且比另一侧至少多 `0.25m` |
+| URGENT | 内部保守下界 `< 0.60m`，仅作附加状态描述 |
+| NEAR | 稳定目标距离 `< 0.80m` |
+| WARNING | 稳定目标距离 `< 1.50m` |
 | FAR | 远距离可靠目标 |
 | UNKNOWN | 有目标但距离不可信 |
 
@@ -486,11 +479,11 @@ clearance(zone) = nearest reliable distance in zone
 
 | 动作 | 触发条件 |
 |---|---|
-| STOP | 中心近距离阻塞且左右也近，或 wide 可靠近障，或 TTC 极短 |
-| LEFT | 右侧近障，或中心阻塞但左侧 clearance 更大 |
-| RIGHT | 左侧近障，或中心阻塞但右侧 clearance 更大 |
-| SLOW | 中心 warning、侧边 warning、多目标不稳定但前方存在风险 |
-| CLEAR | 连续稳定无可靠近障 |
+| STOP | 中央或可靠 wide 障碍距离 `<0.80m` |
+| LEFT | 右侧障碍距离 `<1.50m` |
+| RIGHT | 左侧障碍距离 `<1.50m` |
+| SLOW | 中央或可靠 wide 障碍距离 `0.80～1.50m`，或不确定风险 |
+| CLEAR | 所有有效障碍距离均 `≥1.50m` |
 
 策略目标是让输出动作稳定且短促，方便 OSD 和语音播报。
 
@@ -515,7 +508,7 @@ clearance(zone) = nearest reliable distance in zone
 - 用 ground 与 size 做一致性验证；
 - 用 nearfield fallback 保守处理近距离大目标；
 - 用 track 级 Kalman 平滑距离；
-- 用 TTC 捕捉快速接近风险；
+- 计算 TTC 供诊断，但不让它改变导航动作；
 - 用区域策略代替单目标最近距离策略。
 
 ## 14. 参数标定建议
@@ -610,7 +603,7 @@ detection box
   -> confidence estimation
   -> source fusion
   -> track-level Kalman filter
-  -> TTC
+  -> diagnostic TTC
   -> zone risk
   -> avoidance action
 ```

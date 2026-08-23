@@ -384,7 +384,7 @@ safe_distance = clamp(mean - sigma, 0.2, 8.0)
 TTC = safe_distance / approach_speed
 ```
 
-`TTC` 只保留给诊断日志，**不参与 STOP、风险等级或语音动作**。正常导航只使用与串口 `dist` 同源的稳定期望距离：小于 `1.25m` 为 near，小于 `2.20m` 为 warning，否则为 far；只有期望距离无效时才使用 `safe_distance_m` 兜底。阈值通过 `A1_RANGE_NEAR_M` 和 `A1_RANGE_WARNING_M` 覆盖。
+`TTC` 只保留给诊断日志，**不参与 STOP、风险等级或语音动作**。正常导航只使用与串口 `dist` 同源的稳定期望距离：小于 `0.80m` 为 near，小于 `1.50m` 为 warning，否则为 far；只有期望距离无效时才使用 `safe_distance_m` 兜底。阈值通过 `A1_RANGE_NEAR_M` 和 `A1_RANGE_WARNING_M` 覆盖。
 
 ## 10. 三走廊避障规划
 
@@ -400,12 +400,12 @@ TTC = safe_distance / approach_speed
 
 | 条件 | 动作 |
 |---|---|
-| 中央/宽目标距离 `<1.25m` | `stop` |
-| 中央/宽目标距离 `1.25～2.20m` | `slow` |
-| 仅右侧目标距离 `<2.20m` | `turn_left` |
-| 仅左侧目标距离 `<2.20m` | `turn_right` |
+| 中央/宽目标距离 `<0.80m` | `stop` |
+| 中央/宽目标距离 `0.80～1.50m` | `slow` |
+| 仅右侧目标距离 `<1.50m` | `turn_left` |
+| 仅左侧目标距离 `<1.50m` | `turn_right` |
 | 左右两侧同时受阻但中央未近障 | `slow`，允许继续试探 |
-| 所有有效目标均 `≥2.20m` | `clear` |
+| 所有有效目标均 `≥1.50m` | `clear` |
 | 任一系统健康故障 | 主循环覆盖为 `system_fault` |
 
 典型行走过程为：正对远处障碍时 `clear`，进入警告距离后 `slow`，进入近距离后 `stop`；用户停下并向一侧试探后，障碍框中心进入左/右区，系统立即给出相反方向的转向指令。TTC、隐藏安全下界和墙面分割均不能把远距离目标改写为 STOP。
