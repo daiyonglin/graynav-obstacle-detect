@@ -52,7 +52,7 @@ private:
         float pending_range_m;
         int pending_range_count;
         int range_outlier_skips;
-        std::array<float, 7> inverse_depth_history;
+        std::array<float, 5> inverse_depth_history;
         int inverse_depth_count;
         int inverse_depth_index;
         int last_view_id;

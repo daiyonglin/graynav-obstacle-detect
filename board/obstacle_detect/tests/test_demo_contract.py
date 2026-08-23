@@ -65,11 +65,14 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn("std::min(item->safe_distance_m, near_upper)", ranging)
         self.assertIn('env_float("A1_RANGE_GEOMETRY_SCALE", 1.60f)', ranging)
         self.assertIn("A1_RANGE_GEOMETRY_SCALE:-1.60", run)
+        self.assertIn('env_float("A1_RANGE_SIZE_SCALE", 1.00f)', ranging)
+        self.assertIn("A1_RANGE_SIZE_SCALE:-1.00", run)
         self.assertIn('env_float("A1_RANGE_SAFETY_SCALE", 1.00f)', ranging)
         self.assertIn("A1_RANGE_SAFETY_SCALE:-1.00", run)
         self.assertIn("std::min(displayed_safe, planning_safe)", ranging)
         self.assertIn("distance_identity_for", stabilizer)
-        self.assertIn("distance_history_.size() > 5U", stabilizer)
+        self.assertIn("distance_history_.size() > 3U", stabilizer)
+        self.assertIn('"person_partial_width"', ranging)
 
     def test_cover_fault_is_dark_only_and_white_wall_safe(self) -> None:
         demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")
@@ -86,11 +89,19 @@ class DemoContractTest(unittest.TestCase):
     def test_range_filter_uses_all_distance_median_and_asymmetric_release(self) -> None:
         tracker = (ROOT / "src/tracker.cpp").read_text(encoding="utf-8")
         header = (ROOT / "include/tracker.hpp").read_text(encoding="utf-8")
-        self.assertIn("std::array<float, 7> inverse_depth_history", header)
+        self.assertIn("std::array<float, 5> inverse_depth_history", header)
         self.assertIn("track->inverse_depth_count >= 3", tracker)
         self.assertNotIn("measured_distance > 2.0f", tracker)
         self.assertIn("track->pending_range_count < 3", tracker)
         self.assertIn("accepted_residual < 0.0f", tracker)
+
+    def test_partial_person_does_not_use_full_height_or_scale_anchor(self) -> None:
+        ranging = (ROOT / "src/ranging.cpp").read_text(encoding="utf-8")
+        fusion = (ROOT / "src/surface_fusion.cpp").read_text(encoding="utf-8")
+        self.assertIn("reliable_person_full_extent", ranging)
+        self.assertIn("fx_ * physical_width / pixel_width", ranging)
+        self.assertIn('item.distance_source == "person_partial_width"', fusion)
+        self.assertIn('item.distance_source = "person_partial_depth_fused"', fusion)
 
     def test_field_zone_and_wall_guidance_defaults(self) -> None:
         semantic = (ROOT / "src/semantic_config.cpp").read_text(encoding="utf-8")

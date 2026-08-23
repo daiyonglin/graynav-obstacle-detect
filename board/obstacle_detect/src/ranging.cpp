@@ -49,6 +49,21 @@ int border_touches(const DetectionItem& item, int width, int height)
     return count;
 }
 
+bool reliable_person_full_extent(const DetectionItem& item, int width, int height)
+{
+    const float aspect = box_width(item) / box_height(item);
+    const bool vertically_clipped = item.box[1] <= 4.0f ||
+        item.box[3] >= static_cast<float>(height - 5);
+    const float height_ratio = box_height(item) /
+        std::max(1.0f, static_cast<float>(height));
+    const float width_ratio = box_width(item) /
+        std::max(1.0f, static_cast<float>(width));
+    // 完整人体通常显著高于宽，且头脚均未被画面边界截断。局部上身、脸部和
+    // 横向姿态不允许再把框高解释成 1.70m 全身高度。
+    return !vertically_clipped && aspect <= 0.62f &&
+           height_ratio >= 0.18f && width_ratio <= 0.55f;
+}
+
 std::string risk_from_safe_distance(float safe_distance)
 {
     if (safe_distance < 0.0f) return "unknown";
@@ -68,6 +83,7 @@ RangingEstimator::RangingEstimator()
       camera_pitch_deg_(15.0f),
       ground_contact_offset_ratio_(0.012f),
       geometry_scale_(1.60f),
+      size_scale_(1.00f),
       safety_scale_(1.00f),
       min_distance_m_(0.20f),
       max_distance_m_(8.0f),
@@ -90,6 +106,10 @@ void RangingEstimator::Initialize(const std::array<int, 2>& image_shape)
     // 1.60 是偏保守的首轮修正，不代表相机已经完成厘米级标定。
     geometry_scale_ = clampf(env_float("A1_RANGE_GEOMETRY_SCALE", 1.60f),
                              0.75f, 2.00f);
+    // 现场的 1.60 修正来自脚点地面法，不能套到人体/家具尺寸先验。否则局部
+    // 人体框会先被错当成完整 1.70m，再被二次放大。尺寸法默认保持 1.00。
+    size_scale_ = clampf(env_float("A1_RANGE_SIZE_SCALE", 1.00f),
+                         0.70f, 1.40f);
     // geometry_scale 用于校正串口展示的期望距离；规划器不能因为这项经验校正
     // 同比例变得乐观。safety_scale 作用于未放大的原始几何证据，默认 1.0，
     // 因而 4~5m 目标可显示校正值，但风险判断仍保留原始单目测距的不确定性。
@@ -106,6 +126,7 @@ void RangingEstimator::Initialize(const std::array<int, 2>& image_shape)
               << fov_v_deg_ << "deg height=" << camera_height_m_
               << "m pitch=" << camera_pitch_deg_
               << "deg geometry_scale=" << geometry_scale_
+              << " size_scale=" << size_scale_
               << " safety_scale=" << safety_scale_ << std::endl;
 }
 
@@ -141,6 +162,9 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
      * 此时跳过地面测距，转交部分人体尺寸先验，避免得到虚假的 FAR。
      */
     if (item.class_id == semantic::PERSON) {
+        if (!reliable_person_full_extent(item, image_shape_[0], image_shape_[1])) {
+            return out;
+        }
         const float expected_full_height = fy_ * 1.70f / std::max(0.20f, z);
         const float visible_fraction = box_height(item) /
             std::max(1.0f, expected_full_height);
@@ -168,6 +192,9 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
                           model_sigma * model_sigma);
     if (z > 3.0f) out.sigma = std::max(out.sigma, 0.18f * z);
     out.sigma = clampf(out.sigma, 0.10f, 2.50f);
+    out.planning_mean = z_raw * safety_scale_;
+    out.planning_sigma = out.sigma / std::max(0.01f, geometry_scale_) *
+                         safety_scale_;
     out.valid = true;
     if (lateral_m != NULL) {
         *lateral_m = (foot_x - cx) * z / std::max(1.0f, fx_);
@@ -219,7 +246,8 @@ bool RangingEstimator::SizePrior(int raw_class_id, float* size_m, float* relativ
 
 RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionItem& item) const
 {
-    // 完整目标使用物理高度；部分人体按外观比例选择头宽/肩宽/腿宽先验。
+    // 完整目标使用物理高度；部分人体只使用可见宽度，禁止将局部框高当成
+    // 1.70m 全身高度。尺寸路径拥有独立 scale，不继承脚点地面法的 1.60。
     EstimateValue out;
     const float pixel_width = box_width(item);
     const float pixel_height = box_height(item);
@@ -241,29 +269,33 @@ RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionIt
             }
         }
 
-        if (visible_fraction < 0.52f) {
-            // Indoor8 is explicitly trained on partial people. Their visible
-            // height/width is not a stable metric prior; use learned depth only.
-            if (semantic::ModelClassCount() == 8) return out;
+        const bool reliable_full = reliable_person_full_extent(
+            item, image_shape_[0], image_shape_[1]);
+        if (!reliable_full || visible_fraction < 0.52f) {
             /*
              * 方形区域更接近头部，较窄高框更接近躯干/腿部。宽度先验仅用于
              * 部分人体，并赋予 35%~45% 的较大不确定度；规划最终使用 mean-sigma。
              */
-            float physical_width = 0.42f;  // 成人肩宽/上半身可见宽度。
+            float physical_width = 0.40f;  // 成人肩宽/上半身可见宽度。
             float relative_sigma = 0.38f;
-            if (aspect >= 0.72f) {
-                physical_width = 0.18f;     // 成人头宽。
-                relative_sigma = 0.32f;
+            if (aspect >= 0.75f) {
+                // Indoor8 的 person 可能只框到脸和肩部，不能按纯头宽 0.18m
+                // 处理；0.32m 是头肩可见宽度的保守折中。
+                physical_width = 0.32f;
+                relative_sigma = 0.42f;
             } else if (aspect < 0.32f) {
                 physical_width = 0.28f;     // 双腿或窄身体区域宽度。
                 relative_sigma = 0.45f;
             }
-            const float z_partial =
-                fx_ * physical_width / pixel_width * geometry_scale_;
+            const float z_raw = fx_ * physical_width / pixel_width;
+            const float z_partial = z_raw * size_scale_;
             if (z_partial >= min_distance_m_ && z_partial <= max_distance_m_) {
                 out.mean = z_partial;
                 out.sigma = clampf(relative_sigma * z_partial + 0.10f,
                                    0.16f, 1.60f);
+                out.planning_mean = z_raw * safety_scale_;
+                out.planning_sigma = out.sigma /
+                    std::max(0.01f, size_scale_) * safety_scale_;
                 out.valid = true;
                 return out;
             }
@@ -274,10 +306,14 @@ RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionIt
     if (!SizePrior(item.raw_class_id, &physical_size, &relative_sigma)) return out;
     if (border_touches(item, image_shape_[0], image_shape_[1]) >= 2) return out;
 
-    const float z = fy_ * physical_size / pixel_height * geometry_scale_;
+    const float z_raw = fy_ * physical_size / pixel_height;
+    const float z = z_raw * size_scale_;
     if (z < min_distance_m_ || z > max_distance_m_) return out;
     out.mean = z;
     out.sigma = clampf(z * relative_sigma + 0.08f, 0.12f, 2.0f);
+    out.planning_mean = z_raw * safety_scale_;
+    out.planning_sigma = out.sigma / std::max(0.01f, size_scale_) *
+                         safety_scale_;
     out.valid = true;
     return out;
 }
@@ -301,10 +337,14 @@ float RangingEstimator::NearFieldUpperBound(const DetectionItem& item) const
     }
     const int person_raw_id = semantic::ModelClassCount() == 25 ? 3 : 0;
     if (item.raw_class_id == person_raw_id) {
-        // Indoor8 is trained on incomplete people. A box that may contain only
-        // a head, torso or legs has no reliable metric extent; use packed
-        // learned-depth evidence instead of a hard centimetre-scale cap.
-        if (semantic::ModelClassCount() == 8) return -1.0f;
+        if (semantic::ModelClassCount() == 8) {
+            // 仅作为规划上界，不写入串口距离。占屏宽度能可靠表达“已经很近”，
+            // 即使框没有包含脚，也不应继续输出 CLEAR。
+            if (wr >= 0.42f || hr >= 0.62f) return 0.95f;
+            if (wr >= 0.30f || hr >= 0.48f) return 1.20f;
+            if (wr >= 0.20f || hr >= 0.34f) return 1.80f;
+            return -1.0f;
+        }
         const float aspect = box_width(item) / box_height(item);
         const bool head_like = bottom < 0.78f && aspect > 0.55f && aspect < 1.65f;
         if (head_like && wr > 0.30f) return 0.70f;
@@ -347,6 +387,11 @@ void RangingEstimator::Estimate(DetectionItem* item) const
             const float ws = 1.0f / (size.sigma * size.sigma);
             fused.mean = (wg * ground.mean + ws * size.mean) / (wg + ws);
             fused.sigma = std::sqrt(1.0f / (wg + ws));
+            fused.planning_mean = (wg * ground.planning_mean +
+                                   ws * size.planning_mean) / (wg + ws);
+            fused.planning_sigma = std::sqrt(
+                (wg * ground.planning_sigma * ground.planning_sigma +
+                 ws * size.planning_sigma * size.planning_sigma) / (wg + ws));
             fused.valid = true;
             item->distance_source = "fused";
         } else {
@@ -359,7 +404,9 @@ void RangingEstimator::Estimate(DetectionItem* item) const
         item->distance_source = "ground";
     } else if (size.valid) {
         fused = size;
-        item->distance_source = "size";
+        const bool partial_person = item->class_id == semantic::PERSON &&
+            !reliable_person_full_extent(*item, image_shape_[0], image_shape_[1]);
+        item->distance_source = partial_person ? "person_partial_width" : "size";
     }
 
     // 地面证据被判为部分人体而拒绝时，仍用尺寸距离恢复横向地面位置近似。
@@ -398,9 +445,7 @@ void RangingEstimator::Estimate(DetectionItem* item) const
     item->distance_m = clampf(fused.mean, min_distance_m_, max_distance_m_);
     item->distance_sigma_m = fused.sigma;
     const float displayed_safe = item->distance_m - fused.sigma;
-    const float unscaled_mean = fused.mean / std::max(0.01f, geometry_scale_);
-    const float unscaled_sigma = fused.sigma / std::max(0.01f, geometry_scale_);
-    const float planning_safe = safety_scale_ * (unscaled_mean - unscaled_sigma);
+    const float planning_safe = fused.planning_mean - fused.planning_sigma;
     // 对外 distance_m 是经过现场比例修正后的连续期望值；规划器使用两者中
     // 更保守的下界，避免 1.60 倍显示校正把近场风险错误推成 FAR/CLEAR。
     item->safe_distance_m = clampf(std::min(displayed_safe, planning_safe),

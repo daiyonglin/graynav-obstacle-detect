@@ -136,7 +136,7 @@ ObstacleTracker::Track::Track()
       pending_range_m(-1.0f),
       pending_range_count(0),
       range_outlier_skips(0),
-      inverse_depth_history{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+      inverse_depth_history{0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
       inverse_depth_count(0),
       inverse_depth_index(0),
       last_view_id(-1),
@@ -367,7 +367,7 @@ void ObstacleTracker::UpdateRangeState(Track* track,
                                        int64_t timestamp_ms)
 {
     /*
-     * 七点逆深度中值 + 非对称 alpha-beta 滤波。逆深度对框底像素误差近似
+     * 五点逆深度中值 + 非对称 alpha-beta 滤波。逆深度对框底像素误差近似
      * 线性，适合同时稳定近场和远场；突然接近会被限幅但立即用于风险升级，
      * 突然远离必须连续三次一致才接受，避免单帧框漂移把风险误降为 CLEAR。
      */
@@ -384,9 +384,10 @@ void ObstacleTracker::UpdateRangeState(Track* track,
         track->inverse_depth_count = std::min(
             track->inverse_depth_count + 1,
             static_cast<int>(track->inverse_depth_history.size()));
-        // 所有距离统一使用最近 3~7 次逆深度中值，避免跨过 2m 时滤波规则突变。
+        // 所有距离统一使用最近 3~5 次逆深度中值。五点窗口只需三个新观测
+        // 即可重捕获，避免人体前后移动后旧距离长期滞留。
         if (track->inverse_depth_count >= 3) {
-            std::array<float, 7> sorted = track->inverse_depth_history;
+            std::array<float, 5> sorted = track->inverse_depth_history;
             std::sort(sorted.begin(), sorted.begin() + track->inverse_depth_count);
             const float median_inverse = sorted[track->inverse_depth_count / 2];
             measured_distance = 1.0f / std::max(0.02f, median_inverse);

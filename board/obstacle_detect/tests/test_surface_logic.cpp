@@ -642,6 +642,28 @@ int main()
     // 的原始几何证据会被错误释放到 FAR/CLEAR。
     assert(reference_chair.safe_distance_m < reference_chair.distance_m / 1.35f);
 
+    // Indoor8 局部人体不包含脚时不得套用 1.70m 全身高度和 1.60 地面比例。
+    // 方形上半身框应使用可见宽度，距离必须对框宽变化明显响应。
+    DetectionItem partial_person;
+    partial_person.raw_class_id = 0;
+    partial_person.class_id = obstacle::semantic::PERSON;
+    partial_person.raw_label = "person";
+    partial_person.label = "person";
+    partial_person.score = 0.80f;
+    partial_person.quality = "good";
+    partial_person.box = {350.0f, 260.0f, 680.0f, 690.0f};
+    scaled_ranging.Estimate(&partial_person);
+    assert(partial_person.distance_source == "person_partial_width");
+    assert(partial_person.distance_m > 0.50f);
+    assert(partial_person.distance_m < 1.30f);
+    // 框已占画面近一半宽度时，即使宽度先验存在较大方差，规划器仍须
+    // 保留近场占用上界，不能因为展示均值或滤波历史而释放为 FAR。
+    assert(partial_person.safe_distance_m <= 0.951f);
+    const float close_partial_distance = partial_person.distance_m;
+    partial_person.box = {430.0f, 300.0f, 610.0f, 520.0f};
+    scaled_ranging.Estimate(&partial_person);
+    assert(partial_person.distance_m > close_partial_distance * 1.45f);
+
     // Indoor8 must not inherit the legacy ROD25 person-part bridge. One chair
     // observation is ignored as noise, while two consecutive high-confidence
     // chair observations correct an old PERSON track.

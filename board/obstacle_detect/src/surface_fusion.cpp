@@ -273,7 +273,9 @@ std::string DepthRangeFusion::LevelFromDepth(float depth_m)
 bool DepthRangeFusion::IsReliableAnchor(const DetectionItem& item) const
 {
     if (item.distance_m <= 0.0f || item.distance_confidence < 0.35f ||
-        item.quality == "coarse") {
+        item.quality == "coarse" ||
+        item.distance_source == "person_partial_width" ||
+        item.distance_source == "person_partial_depth_fused") {
         return false;
     }
     if (semantic::ModelClassCount() == 80) {
@@ -406,6 +408,17 @@ void DepthRangeFusion::Apply(DetectionResult* result, SurfaceResult* surface)
                 item.depth_confidence = std::min(item.distance_confidence,
                                                  item.depth_confidence) * 0.5f;
                 item.depth_source = "conflict";
+            }
+            if (item.distance_source == "person_partial_width" &&
+                learned_conf >= 0.25f) {
+                // 局部人体没有脚点，框宽距离和稠密深度都不应单独宣称精确。
+                // 在已有可靠场景尺度锚点时融合两者作为展示期望；规划仍使用
+                // 上方的 conservative 下界，学习深度不能把风险变得更乐观。
+                item.distance_m = clampf(0.45f * geometry + 0.55f * scaled,
+                                         0.20f, 8.0f);
+                item.distance_sigma_m = std::max(
+                    item.distance_sigma_m, 0.30f * item.distance_m);
+                item.distance_source = "person_partial_depth_fused";
             }
         } else if (geometry <= 0.0f && scale > 0.0f && scale_anchors_.size() >= 3U &&
                    item.depth_confidence >= 0.45f) {

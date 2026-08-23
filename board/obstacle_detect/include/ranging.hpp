@@ -26,8 +26,12 @@ private:
     struct EstimateValue {
         float mean;
         float sigma;
+        float planning_mean;
+        float planning_sigma;
         bool valid;
-        EstimateValue() : mean(-1.0f), sigma(1.0f), valid(false) {}
+        EstimateValue()
+            : mean(-1.0f), sigma(1.0f), planning_mean(-1.0f),
+              planning_sigma(1.0f), valid(false) {}
     };
 
     EstimateValue GroundEstimate(const DetectionItem& item, float* lateral_m) const;
@@ -42,6 +46,7 @@ private:
     float camera_pitch_deg_;
     float ground_contact_offset_ratio_;
     float geometry_scale_;
+    float size_scale_;
     float safety_scale_;
     float min_distance_m_;
     float max_distance_m_;
