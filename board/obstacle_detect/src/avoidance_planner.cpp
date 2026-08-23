@@ -84,12 +84,9 @@ void AvoidancePlanner::Initialize(const std::array<int, 2>& image_shape)
     pending_action_ = "clear";
     pending_count_ = 0;
     stable_since_ms_ = pending_since_ms_ = 0;
-    std::cout << "[NAV][THRESHOLDS] urgent=" << semantic::UrgentDistanceM()
-              << "m near=" << semantic::NearDistanceM()
-              << "m warning=" << semantic::WarningDistanceM()
-              << "m side_clear=" << semantic::SideClearDistanceM()
-              << "m turn_margin=" << semantic::TurnClearanceMarginM()
-              << "m sector=" << semantic::SectorLeftBoundaryRatio()
+    std::cout << "[NAV][THRESHOLDS] stop_below=" << semantic::NearDistanceM()
+              << "m slow_below=" << semantic::WarningDistanceM()
+              << "m ttc=diagnostic_only sector=" << semantic::SectorLeftBoundaryRatio()
               << "/" << semantic::SectorRightBoundaryRatio()
               << " wide=" << semantic::WideBoxRatio()
               << " center_half=" << semantic::CenterCorridorHalfWidthM()

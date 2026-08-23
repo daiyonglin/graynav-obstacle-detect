@@ -87,6 +87,9 @@ class DemoContractTest(unittest.TestCase):
         self.assertNotIn("min_ttc", header)
         self.assertNotIn("StopTtcSeconds", tracker)
         self.assertNotIn("A1_TTC_STOP_S", run)
+        self.assertIn("stop_below=", planner)
+        self.assertIn("slow_below=", planner)
+        self.assertIn("ttc=diagnostic_only", planner)
 
     def test_cover_fault_is_dark_only_and_white_wall_safe(self) -> None:
         demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")
