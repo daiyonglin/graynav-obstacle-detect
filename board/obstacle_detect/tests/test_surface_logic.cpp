@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 
@@ -133,6 +134,9 @@ std::vector<float> packed_scene_logits(bool hazard,
 
 int main()
 {
+    unsetenv("A1_SECTOR_LEFT_BOUND");
+    unsetenv("A1_SECTOR_RIGHT_BOUND");
+    unsetenv("A1_ENABLE_WALL_GUIDANCE");
     // The unified head uses the fixed indoor8 order, not ROD25 or COCO80 IDs.
     assert(obstacle::semantic::RawLabel(0) == "person");
     assert(obstacle::semantic::RawLabel(1) == "chair");
@@ -142,6 +146,9 @@ int main()
     assert(obstacle::semantic::SemanticClassFromRaw(1) == obstacle::semantic::CHAIR_SEAT);
     assert(obstacle::semantic::SemanticClassFromRaw(2) == obstacle::semantic::TABLE_DESK);
     assert(obstacle::semantic::SemanticClassFromRaw(3) == obstacle::semantic::BAG_SUITCASE);
+    assert(std::fabs(obstacle::semantic::SectorLeftBoundaryRatio() - 0.35f) < 0.001f);
+    assert(std::fabs(obstacle::semantic::SectorRightBoundaryRatio() - 0.65f) < 0.001f);
+    assert(!obstacle::semantic::WallGuidanceEnabled());
 
     obstacle::SurfaceDecisionFusion fusion;
     AvoidanceDecision detection;
@@ -327,6 +334,11 @@ int main()
         3300, &blocked_surface));
     assert(blocked_surface.center.blocked_persistent);
     assert(blocked_surface.primary_hazard == "blocked_surface");
+    // 生产默认关闭 blocked_surface 对动作的覆盖：墙面分割仍可诊断，地面
+    // 误分却不能再让一个无目标画面持续 SLOW。台阶测试在后文仍保持生效。
+    const AvoidanceDecision blocked_fused =
+        fusion.Fuse(detection, blocked_surface, 3300);
+    assert(blocked_fused.action == "clear");
     assert(segmenter.PostprocessLogits(hazard.data(), hazard.size(),
                                        depth.data(), depth.size(), true, 200, &surface));
     assert(!surface.center.persistent_hazard);
@@ -603,6 +615,29 @@ int main()
     assert(near_chair.distance_m > 0.45f);
     assert(near_chair.safe_distance_m <= 0.451f);
     assert(near_chair.distance_source != "nearfield_cap");
+
+    // 现场比例修正只作用于可解释的几何均值与不确定度。它不能改写相机
+    // 高度/俯角，也不能把近场上界伪装成精确读数。
+    setenv("A1_RANGE_GEOMETRY_SCALE", "1.00", 1);
+    obstacle::RangingEstimator unscaled_ranging;
+    unscaled_ranging.Initialize({720, 1280});
+    DetectionItem reference_chair;
+    reference_chair.raw_class_id = 1;
+    reference_chair.class_id = obstacle::semantic::CHAIR_SEAT;
+    reference_chair.raw_label = "chair";
+    reference_chair.label = "chair";
+    reference_chair.score = 0.80f;
+    reference_chair.quality = "good";
+    reference_chair.box = {210.0f, 560.0f, 510.0f, 900.0f};
+    unscaled_ranging.Estimate(&reference_chair);
+    const float unscaled_distance = reference_chair.distance_m;
+    assert(unscaled_distance > 0.0f);
+    setenv("A1_RANGE_GEOMETRY_SCALE", "1.60", 1);
+    obstacle::RangingEstimator scaled_ranging;
+    scaled_ranging.Initialize({720, 1280});
+    scaled_ranging.Estimate(&reference_chair);
+    assert(reference_chair.distance_m > unscaled_distance * 1.45f);
+    assert(reference_chair.distance_m < unscaled_distance * 1.75f);
 
     // Indoor8 must not inherit the legacy ROD25 person-part bridge. One chair
     // observation is ignored as noise, while two consecutive high-confidence

@@ -20,6 +20,7 @@
 #include "include/utils.hpp"
 
 #include "include/guidance_stabilizer.hpp"
+#include "include/semantic_config.hpp"
 #include "include/surface_fusion.hpp"
 
 #ifndef A1_ENABLE_VOICE
@@ -1021,7 +1022,8 @@ void DecorateUnifiedDecision(const DetectionResult& result,
         decision->scene_label = "STEP";
     } else if (surface.stair_state == STAIR_SUSPECTED) {
         decision->scene_label = "STEP_CHECK";
-    } else if (surface.primary_hazard == "blocked_surface") {
+    } else if (obstacle::semantic::WallGuidanceEnabled() &&
+               surface.primary_hazard == "blocked_surface") {
         decision->scene_label = "BLOCKED";
     } else if (surface.valid && !surface.stale && surface.center.safe_candidate) {
         decision->scene_label = "PATH";

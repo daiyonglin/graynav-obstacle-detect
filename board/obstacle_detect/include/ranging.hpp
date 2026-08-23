@@ -41,6 +41,7 @@ private:
     float camera_height_m_;
     float camera_pitch_deg_;
     float ground_contact_offset_ratio_;
+    float geometry_scale_;
     float min_distance_m_;
     float max_distance_m_;
     float fx_;

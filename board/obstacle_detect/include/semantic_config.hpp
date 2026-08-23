@@ -62,6 +62,14 @@ float SectorRightBoundaryRatio();
 float WideBoxRatio();
 float CenterCorridorHalfWidthM();
 
+/**
+ * 墙面/blocked_surface 是否可以直接改变导航动作。
+ *
+ * 当前室内灰度模型会把部分地面纹理误分为 blocked_surface，因此生产镜像
+ * 默认关闭墙面动作，只保留其诊断结果；台阶/落差链路不受该开关影响。
+ */
+bool WallGuidanceEnabled();
+
 /** 导航语义全名、OSD 简写和模型原始类别名。 */
 std::string SemanticLabel(int semantic_class_id);
 std::string SemanticShortLabel(int semantic_class_id);

@@ -87,16 +87,20 @@ export A1_CAM_FOV_V_DEG="${A1_CAM_FOV_V_DEG:-78.9}"
 export A1_CAM_HEIGHT_M="${A1_CAM_HEIGHT_M:-0.71}"
 export A1_CAM_PITCH_DOWN_DEG="${A1_CAM_PITCH_DOWN_DEG:-15.0}"
 export A1_GROUND_CONTACT_OFFSET_RATIO="${A1_GROUND_CONTACT_OFFSET_RATIO:-0.012}"
+# 现场 4~5m 目标低估为 2~3m 后的保守首轮比例修正；仍需用已知距离复核。
+export A1_RANGE_GEOMETRY_SCALE="${A1_RANGE_GEOMETRY_SCALE:-1.60}"
 export A1_RANGE_URGENT_M="${A1_RANGE_URGENT_M:-0.85}"
 export A1_RANGE_NEAR_M="${A1_RANGE_NEAR_M:-1.25}"
 export A1_RANGE_WARNING_M="${A1_RANGE_WARNING_M:-2.20}"
 export A1_TTC_STOP_S="${A1_TTC_STOP_S:-1.40}"
 export A1_SIDE_CLEAR_M="${A1_SIDE_CLEAR_M:-1.45}"
 export A1_TURN_MARGIN_M="${A1_TURN_MARGIN_M:-0.25}"
-export A1_SECTOR_LEFT_BOUND="${A1_SECTOR_LEFT_BOUND:-0.42}"
-export A1_SECTOR_RIGHT_BOUND="${A1_SECTOR_RIGHT_BOUND:-0.58}"
+export A1_SECTOR_LEFT_BOUND="${A1_SECTOR_LEFT_BOUND:-0.35}"
+export A1_SECTOR_RIGHT_BOUND="${A1_SECTOR_RIGHT_BOUND:-0.65}"
 export A1_WIDE_BOX_RATIO="${A1_WIDE_BOX_RATIO:-0.88}"
 export A1_CENTER_HALF_WIDTH_M="${A1_CENTER_HALF_WIDTH_M:-0.22}"
+# blocked_surface 结果保留诊断，但默认不参与动作，避免地面误分导致持续减速。
+export A1_ENABLE_WALL_GUIDANCE="${A1_ENABLE_WALL_GUIDANCE:-0}"
 
 # ===== 仅在暗光且仍有纹理时启用的局部灰度增强 =====
 # The unified model was trained with grayscale photometric augmentation. Keep

@@ -87,7 +87,9 @@ void AvoidancePlanner::Initialize(const std::array<int, 2>& image_shape)
               << "/" << semantic::SectorRightBoundaryRatio()
               << " wide=" << semantic::WideBoxRatio()
               << " center_half=" << semantic::CenterCorridorHalfWidthM()
-              << "m" << std::endl;
+              << "m wall_guidance="
+              << (semantic::WallGuidanceEnabled() ? "on" : "off")
+              << std::endl;
 }
 
 bool AvoidancePlanner::IsActionHazard(const DetectionItem& item) const

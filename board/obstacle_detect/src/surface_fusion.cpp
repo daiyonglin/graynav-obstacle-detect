@@ -114,6 +114,7 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
         return fused;
     }
 
+    const bool wall_guidance = semantic::WallGuidanceEnabled();
     fused.perception_degraded = false;
     fused.perception_source = "detection+surface_depth";
     fused.hazard_type = surface.primary_hazard;
@@ -121,6 +122,12 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
         fused.hazard_sector = surface.primary_sector;
     }
     fused.surface_confidence = surface.confidence;
+    // blocked/unknown 仍保留在 SurfaceResult 供诊断，但默认不能再把地面误分
+    // 直接升级成 SLOW/STOP。台阶/落差始终独立生效。
+    if (!wall_guidance && surface.primary_hazard == "blocked_surface") {
+        fused.hazard_type = detection.hazard_type;
+        fused.hazard_sector = detection.hazard_sector;
+    }
     // Keep a reliable object/geometry level when the road model is ambiguous.
     // A valid SurfaceDepth level replaces it only when object depth is absent
     // or the road evidence is more dangerous.
@@ -143,22 +150,27 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
         return fused;
     }
 
-    const bool left_safe = IsSafe(surface.left);
-    const bool center_safe = IsSafe(surface.center);
-    const bool right_safe = IsSafe(surface.right);
+    const bool left_safe = wall_guidance
+        ? IsSafe(surface.left) : !surface.left.persistent_hazard;
+    const bool center_safe = wall_guidance
+        ? IsSafe(surface.center) : !surface.center.persistent_hazard;
+    const bool right_safe = wall_guidance
+        ? IsSafe(surface.right) : !surface.right.persistent_hazard;
     // UNKNOWN is not the same as a measured hazard.  Reject a turn only when
     // the selected side contains a temporally persistent step or blocked
     // surface; otherwise preserve the object planner's side-avoidance action.
     const bool left_explicitly_unsafe = surface.left.persistent_hazard ||
-        surface.left.blocked_persistent;
+        (wall_guidance && surface.left.blocked_persistent);
     const bool right_explicitly_unsafe = surface.right.persistent_hazard ||
-        surface.right.blocked_persistent;
+        (wall_guidance && surface.right.blocked_persistent);
     const bool center_drop = surface.stair_state == STAIR_CONFIRMED &&
         surface.center.persistent_hazard && surface.stair_edge_persistent;
     const bool possible_step = surface.stair_state == STAIR_SUSPECTED;
-    const bool center_blocked = surface.center.blocked_persistent;
+    const bool center_blocked = wall_guidance &&
+        surface.center.blocked_persistent;
     const bool center_unknown = !center_drop && !center_blocked &&
-        (surface.center.unknown_ratio >= 0.30f || !center_safe);
+        (surface.center.unknown_ratio >= 0.30f ||
+         (wall_guidance && !center_safe));
     const bool near_surface = surface.depth_level == "near";
     const bool named_object_side_escape =
         (detection.action == "turn_left" && detection.hazard_sector == "right") ||

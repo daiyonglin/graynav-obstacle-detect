@@ -323,13 +323,14 @@ float TurnClearanceMarginM()
 
 float SectorLeftBoundaryRatio()
 {
-    static const float value = env_float("A1_SECTOR_LEFT_BOUND", 0.42f);
+    // 左右各 35%、中央 30%。只有目标中心进入外侧区域时才建议转向。
+    static const float value = env_float("A1_SECTOR_LEFT_BOUND", 0.35f);
     return std::max(0.20f, std::min(value, 0.48f));
 }
 
 float SectorRightBoundaryRatio()
 {
-    static const float value = env_float("A1_SECTOR_RIGHT_BOUND", 0.58f);
+    static const float value = env_float("A1_SECTOR_RIGHT_BOUND", 0.65f);
     return std::max(0.52f, std::min(value, 0.80f));
 }
 
@@ -343,6 +344,13 @@ float CenterCorridorHalfWidthM()
 {
     static const float value = env_float("A1_CENTER_HALF_WIDTH_M", 0.22f);
     return std::max(0.12f, std::min(value, 0.45f));
+}
+
+bool WallGuidanceEnabled()
+{
+    static const bool enabled =
+        env_float("A1_ENABLE_WALL_GUIDANCE", 0.0f) >= 0.5f;
+    return enabled;
 }
 
 std::string SemanticLabel(int semantic_class_id)

@@ -60,10 +60,27 @@ class DemoContractTest(unittest.TestCase):
         stabilizer = (ROOT / "src/guidance_stabilizer.cpp").read_text(
             encoding="utf-8"
         )
+        run = (ROOT / "scripts/run.sh").read_text(encoding="utf-8")
         self.assertNotIn('item->distance_source = "nearfield_cap"', ranging)
         self.assertIn("std::min(item->safe_distance_m, near_upper)", ranging)
+        self.assertIn('env_float("A1_RANGE_GEOMETRY_SCALE", 1.60f)', ranging)
+        self.assertIn("A1_RANGE_GEOMETRY_SCALE:-1.60", run)
         self.assertIn("distance_identity_for", stabilizer)
         self.assertIn("distance_history_.size() > 3U", stabilizer)
+
+    def test_field_zone_and_wall_guidance_defaults(self) -> None:
+        semantic = (ROOT / "src/semantic_config.cpp").read_text(encoding="utf-8")
+        fusion = (ROOT / "src/surface_fusion.cpp").read_text(encoding="utf-8")
+        run = (ROOT / "scripts/run.sh").read_text(encoding="utf-8")
+        self.assertIn('A1_SECTOR_LEFT_BOUND:-0.35', run)
+        self.assertIn('A1_SECTOR_RIGHT_BOUND:-0.65', run)
+        self.assertIn('env_float("A1_SECTOR_LEFT_BOUND", 0.35f)', semantic)
+        self.assertIn('env_float("A1_SECTOR_RIGHT_BOUND", 0.65f)', semantic)
+        self.assertIn('A1_ENABLE_WALL_GUIDANCE:-0', run)
+        self.assertIn('env_float("A1_ENABLE_WALL_GUIDANCE", 0.0f)', semantic)
+        self.assertIn("const bool wall_guidance", fusion)
+        demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")
+        self.assertIn("semantic::WallGuidanceEnabled()", demo)
 
     def test_fault_packet_clears_stale_navigation_state(self) -> None:
         demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")

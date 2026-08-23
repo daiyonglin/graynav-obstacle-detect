@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <iostream>
 
 namespace obstacle {
 namespace {
@@ -66,6 +67,7 @@ RangingEstimator::RangingEstimator()
       camera_height_m_(0.71f),
       camera_pitch_deg_(15.0f),
       ground_contact_offset_ratio_(0.012f),
+      geometry_scale_(1.60f),
       min_distance_m_(0.20f),
       max_distance_m_(8.0f),
       fx_(1.0f),
@@ -82,6 +84,11 @@ void RangingEstimator::Initialize(const std::array<int, 2>& image_shape)
     camera_height_m_ = env_float("A1_CAM_HEIGHT_M", 0.71f);
     camera_pitch_deg_ = env_float("A1_CAM_PITCH_DOWN_DEG", 15.0f);
     ground_contact_offset_ratio_ = env_float("A1_GROUND_CONTACT_OFFSET_RATIO", 0.012f);
+    // 现场 4~5 m 目标曾稳定低估为 2~3 m。保留真实安装高度/俯角，另用
+    // 显式比例修正所有几何证据，便于后续用 2/3/4/5 m 已知距离复核。
+    // 1.60 是偏保守的首轮修正，不代表相机已经完成厘米级标定。
+    geometry_scale_ = clampf(env_float("A1_RANGE_GEOMETRY_SCALE", 1.60f),
+                             0.75f, 2.00f);
     min_distance_m_ = env_float("A1_DIST_MIN_M", 0.20f);
     max_distance_m_ = env_float("A1_DIST_MAX_M", 8.0f);
 
@@ -89,6 +96,10 @@ void RangingEstimator::Initialize(const std::array<int, 2>& image_shape)
           std::tan(0.5f * fov_h_deg_ * kPi / 180.0f);
     fy_ = 0.5f * image_shape_[1] /
           std::tan(0.5f * fov_v_deg_ * kPi / 180.0f);
+    std::cout << "[RANGE][CALIBRATION] fov=" << fov_h_deg_ << "/"
+              << fov_v_deg_ << "deg height=" << camera_height_m_
+              << "m pitch=" << camera_pitch_deg_
+              << "deg geometry_scale=" << geometry_scale_ << std::endl;
 }
 
 RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
@@ -113,7 +124,8 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
                            camera_pitch_deg_ * kPi / 180.0f;
     if (ray_down <= 0.75f * kPi / 180.0f) return out;
 
-    const float z = camera_height_m_ / std::tan(ray_down);
+    const float z_raw = camera_height_m_ / std::tan(ray_down);
+    const float z = z_raw * geometry_scale_;
     if (z < min_distance_m_ || z > max_distance_m_) return out;
 
     /*
@@ -142,7 +154,8 @@ RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
     float pixel_sigma = 2.0f + 7.0f * (1.0f - clampf(item.score, 0.0f, 1.0f));
     if (item.quality == "low") pixel_sigma += 2.0f;
     pixel_sigma += 1.5f * touches;
-    const float projection_sigma = std::fabs(dz_dtheta * dtheta_dv) * pixel_sigma;
+    const float projection_sigma =
+        std::fabs(dz_dtheta * dtheta_dv) * pixel_sigma * geometry_scale_;
     const float model_sigma = 0.06f + 0.05f * z;
     out.sigma = std::sqrt(projection_sigma * projection_sigma +
                           model_sigma * model_sigma);
@@ -213,7 +226,8 @@ RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionIt
             camera_pitch_deg_ * kPi / 180.0f;
         float visible_fraction = 0.0f;
         if (ray_down > 0.75f * kPi / 180.0f) {
-            const float z_ground = camera_height_m_ / std::tan(ray_down);
+            const float z_ground =
+                camera_height_m_ / std::tan(ray_down) * geometry_scale_;
             if (z_ground >= min_distance_m_ && z_ground <= max_distance_m_) {
                 const float expected_full_height = fy_ * 1.70f / z_ground;
                 visible_fraction = pixel_height / std::max(1.0f, expected_full_height);
@@ -237,7 +251,8 @@ RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionIt
                 physical_width = 0.28f;     // 双腿或窄身体区域宽度。
                 relative_sigma = 0.45f;
             }
-            const float z_partial = fx_ * physical_width / pixel_width;
+            const float z_partial =
+                fx_ * physical_width / pixel_width * geometry_scale_;
             if (z_partial >= min_distance_m_ && z_partial <= max_distance_m_) {
                 out.mean = z_partial;
                 out.sigma = clampf(relative_sigma * z_partial + 0.10f,
@@ -252,7 +267,7 @@ RangingEstimator::EstimateValue RangingEstimator::SizeEstimate(const DetectionIt
     if (!SizePrior(item.raw_class_id, &physical_size, &relative_sigma)) return out;
     if (border_touches(item, image_shape_[0], image_shape_[1]) >= 2) return out;
 
-    const float z = fy_ * physical_size / pixel_height;
+    const float z = fy_ * physical_size / pixel_height * geometry_scale_;
     if (z < min_distance_m_ || z > max_distance_m_) return out;
     out.mean = z;
     out.sigma = clampf(z * relative_sigma + 0.08f, 0.12f, 2.0f);
