@@ -638,6 +638,9 @@ int main()
     scaled_ranging.Estimate(&reference_chair);
     assert(reference_chair.distance_m > unscaled_distance * 1.45f);
     assert(reference_chair.distance_m < unscaled_distance * 1.75f);
+    // 1.60 倍仅校正展示均值；规划下界默认不得随之放大，否则 2m 左右
+    // 的原始几何证据会被错误释放到 FAR/CLEAR。
+    assert(reference_chair.safe_distance_m < reference_chair.distance_m / 1.35f);
 
     // Indoor8 must not inherit the legacy ROD25 person-part bridge. One chair
     // observation is ignored as noise, while two consecutive high-confidence

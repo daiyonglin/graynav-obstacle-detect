@@ -138,7 +138,7 @@ struct LightStats {
 /**
  * @brief 三类异常的统一锁存与恢复状态机。
  *
- * camera/data：连续取帧失败、遮挡/过曝/近乎纯色、画面冻结；
+ * camera/data：连续取帧失败、大面积近黑遮挡、可观测纹理画面冻结；
  * inference：NPU 调用或 head 校验连续失败；
  * resource：低 FPS、高 P95、低内存或候选爆炸。
  * 故障一旦锁存，必须连续一段可配置的健康帧才恢复，避免遮挡边缘短暂露光时
@@ -187,8 +187,8 @@ struct SystemHealth {
 
     void UpdateData(const LightStats& light)
     {
-        // cover_candidate 综合全图和中心区域的纹理、梯度及动态范围。它可以识别
-        // 手掌贴近镜头时“非纯黑但大面积失焦”的遮挡，而不仅依赖暗像素比例。
+        // cover_candidate 只代表连续的大面积近黑输入。白墙、白板、过曝窗口和
+        // 其他低纹理亮场景不得再进入遮挡故障。
         last_cover_score = light.cover_score;
         last_cover_candidate = light.cover_candidate;
         // 计数封顶，避免长时间遮挡后需要同样长时间才能恢复；故障锁存仍由
@@ -196,7 +196,12 @@ struct SystemHealth {
         data_fault_frames = light.cover_candidate
             ? std::min(cover_trigger_frames + 4, data_fault_frames + 1)
             : std::max(0, data_fault_frames - 2);
-        if (last_image_hash != 0 && light.sample_hash == last_image_hash) {
+        // 只有存在足够纹理/动态范围时，精确哈希不变才可解释为采集冻结；
+        // 纯白墙等静态低纹理场景缺乏可观测性，不能据此报异常。
+        const bool freeze_observable = light.edge_ratio >= 0.015f ||
+                                       light.dynamic_range >= 45.0f;
+        if (freeze_observable && last_image_hash != 0 &&
+            light.sample_hash == last_image_hash) {
             ++frozen_frames;
         } else {
             frozen_frames = 0;
@@ -462,8 +467,8 @@ LightStats analyze_light_stats(ssne_tensor_t* img)
               static_cast<float>(center_edge_samples) : 0.0f;
     }
 
-    // 多证据遮挡评分：全图低纹理、中心低纹理和灰度分布压缩分别计分；
-    // 大面积暗/亮饱和额外计分。这样手掌、衣物等非纯黑遮挡也能被识别。
+    // 保留纹理评分用于诊断画面质量，但它不再参与遮挡故障判定。亮墙、白板
+    // 和过曝窗口都可能低纹理，不能仅凭纯色或低边缘密度播报“异常”。
     int cover_score = 0;
     cover_score += stats.stddev < 10.0f ? 2 : (stats.stddev < 18.0f ? 1 : 0);
     cover_score += stats.dynamic_range < 35.0f ? 2 : (stats.dynamic_range < 60.0f ? 1 : 0);
@@ -475,19 +480,16 @@ LightStats analyze_light_stats(ssne_tensor_t* img)
                    (stats.center_edge_ratio < 0.045f ? 1 : 0);
     if (stats.dark_ratio > 0.65f || stats.bright_ratio > 0.65f) cover_score += 2;
 
-    const bool hard_dark_cover = stats.mean < 55.0f && stats.dark_ratio > 0.65f &&
-                                 stats.stddev < 20.0f;
-    const bool hard_bright_cover = stats.mean > 215.0f && stats.bright_ratio > 0.70f &&
-                                   stats.stddev < 20.0f;
-    const bool hard_flat_frame = stats.stddev > 0.0f && stats.stddev < 5.0f;
-    const bool center_occluded = stats.center_stddev < 14.0f &&
-                                 stats.center_dynamic_range < 48.0f &&
-                                 stats.center_edge_ratio < 0.025f;
-    static const int score_threshold =
-        env_int_value("A1_COVER_SCORE_THRESHOLD", 5, 3, 12);
+    static const int black_mean_max =
+        env_int_value("A1_COVER_BLACK_MEAN_MAX", 45, 20, 80);
+    static const int black_ratio_pct =
+        env_int_value("A1_COVER_BLACK_RATIO_PCT", 80, 60, 98);
+    const bool hard_black_cover =
+        stats.mean <= static_cast<float>(black_mean_max) &&
+        stats.center_mean <= static_cast<float>(black_mean_max + 5) &&
+        stats.dark_ratio >= 0.01f * static_cast<float>(black_ratio_pct);
     stats.cover_score = cover_score;
-    stats.cover_candidate = hard_dark_cover || hard_bright_cover || hard_flat_frame ||
-                            center_occluded || cover_score >= score_threshold;
+    stats.cover_candidate = hard_black_cover;
 
     if (stats.cover_candidate) {
         stats.state = "covered";
@@ -1261,8 +1263,11 @@ int main()
     std::cout << "[INFO] NAV heartbeat   = " << nav_heartbeat_ms
               << " ms, min change=" << nav_min_change_ms << " ms" << std::endl;
     std::cout << "[INFO] capture restart = " << (capture_auto_restart ? "on" : "off") << std::endl;
-    std::cout << "[INFO] cover detector  = score>="
-              << env_int_value("A1_COVER_SCORE_THRESHOLD", 5, 3, 12)
+    std::cout << "[INFO] cover detector  = dark-only mean<="
+              << env_int_value("A1_COVER_BLACK_MEAN_MAX", 45, 20, 80)
+              << " dark_ratio>="
+              << env_int_value("A1_COVER_BLACK_RATIO_PCT", 80, 60, 98)
+              << "%"
               << " trigger=" << system_health.cover_trigger_frames
               << " recovery=" << system_health.cover_recovery_frames
               << " frames" << std::endl;

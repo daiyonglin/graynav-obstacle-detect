@@ -133,10 +133,10 @@ ObstacleTracker::Track::Track()
       depth_velocity_mps(0.0f),
       depth_variance(1.0f),
       depth_measurements(0),
-      pending_far_depth_m(-1.0f),
-      pending_far_depth_count(0),
+      pending_range_m(-1.0f),
+      pending_range_count(0),
       range_outlier_skips(0),
-      inverse_depth_history{0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+      inverse_depth_history{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
       inverse_depth_count(0),
       inverse_depth_index(0),
       last_view_id(-1),
@@ -367,8 +367,9 @@ void ObstacleTracker::UpdateRangeState(Track* track,
                                        int64_t timestamp_ms)
 {
     /*
-     * alpha-beta 滤波：先用上一时刻距离和速度预测，再按测量置信度修正。
-     * depth_variance 同步传播，最终得到保守距离和至少三次有效测量后的 TTC。
+     * 七点逆深度中值 + 非对称 alpha-beta 滤波。逆深度对框底像素误差近似
+     * 线性，适合同时稳定近场和远场；突然接近会被限幅但立即用于风险升级，
+     * 突然远离必须连续三次一致才接受，避免单帧框漂移把风险误降为 CLEAR。
      */
     if (track == NULL) return;
     const float dt = track->last_update_ms > 0
@@ -383,10 +384,9 @@ void ObstacleTracker::UpdateRangeState(Track* track,
         track->inverse_depth_count = std::min(
             track->inverse_depth_count + 1,
             static_cast<int>(track->inverse_depth_history.size()));
-        // 远场在深度 z 上高度非线性，而 inverse-depth 与像素位置更接近线性。
-        // 使用最近 3~5 次逆深度中值抑制框底一两个像素的偶发抖动。
-        if (measured_distance > 2.0f && track->inverse_depth_count >= 3) {
-            std::array<float, 5> sorted = track->inverse_depth_history;
+        // 所有距离统一使用最近 3~7 次逆深度中值，避免跨过 2m 时滤波规则突变。
+        if (track->inverse_depth_count >= 3) {
+            std::array<float, 7> sorted = track->inverse_depth_history;
             std::sort(sorted.begin(), sorted.begin() + track->inverse_depth_count);
             const float median_inverse = sorted[track->inverse_depth_count / 2];
             measured_distance = 1.0f / std::max(0.02f, median_inverse);
@@ -398,56 +398,69 @@ void ObstacleTracker::UpdateRangeState(Track* track,
             track->depth_velocity_mps = 0.0f;
             track->depth_variance = std::max(0.04f,
                 detection.distance_sigma_m * detection.distance_sigma_m);
-            track->pending_far_depth_m = -1.0f;
-            track->pending_far_depth_count = 0;
+            track->pending_range_m = -1.0f;
+            track->pending_range_count = 0;
         } else {
             const float predicted = track->depth_m + track->depth_velocity_mps * dt;
             const float residual = measured_distance - predicted;
-            const float far_jump_gate = std::max(0.55f, 0.35f * std::max(0.5f, predicted));
-            const bool suspicious_far_jump = residual > far_jump_gate &&
+            const float jump_gate = std::max(0.45f,
+                0.25f * std::max(0.5f, predicted));
+            const bool suspicious_jump = std::fabs(residual) > jump_gate &&
                 detection.distance_source != "nearfield_cap";
-            if (suspicious_far_jump) {
-                const bool agrees_with_pending = track->pending_far_depth_count > 0 &&
-                    std::fabs(measured_distance - track->pending_far_depth_m) <=
-                    std::max(0.35f, 0.20f * track->pending_far_depth_m);
+            if (suspicious_jump) {
+                const bool agrees_with_pending = track->pending_range_count > 0 &&
+                    std::fabs(measured_distance - track->pending_range_m) <=
+                    std::max(0.30f, 0.18f * track->pending_range_m);
                 if (agrees_with_pending) {
-                    ++track->pending_far_depth_count;
-                    track->pending_far_depth_m = 0.5f *
-                        (track->pending_far_depth_m + measured_distance);
+                    ++track->pending_range_count;
+                    track->pending_range_m = 0.5f *
+                        (track->pending_range_m + measured_distance);
                 } else {
-                    track->pending_far_depth_m = measured_distance;
-                    track->pending_far_depth_count = 1;
+                    track->pending_range_m = measured_distance;
+                    track->pending_range_count = 1;
                 }
-                // 单帧突然跳远通常来自上半身框底部变化。先保持预测值；只有
-                // 连续两次远距离一致才认为目标确实远离并接受新测量。
-                if (track->pending_far_depth_count < 2) {
+                if (residual > 0.0f && track->pending_range_count < 3) {
+                    // 风险下降必须慢：连续三次远距离一致才允许目标跳远。
                     measurement_used = false;
                     ++track->range_outlier_skips;
                     track->depth_m = clampf(predicted, 0.20f, 8.0f);
-                    track->depth_velocity_mps *= 0.90f;
+                    track->depth_velocity_mps *= 0.80f;
                     track->depth_variance = std::min(4.0f,
                         track->depth_variance + 0.05f + 0.02f * dt);
+                } else if (residual < 0.0f && track->pending_range_count < 2) {
+                    // 风险上升不能被完全忽略：首个突然接近值先按一个 gate
+                    // 向近处移动，第二次一致后再接受完整测量。
+                    measured_distance = std::max(measured_distance,
+                                                 predicted - jump_gate);
                 }
             } else {
-                track->pending_far_depth_m = -1.0f;
-                track->pending_far_depth_count = 0;
+                track->pending_range_m = -1.0f;
+                track->pending_range_count = 0;
             }
 
             if (measurement_used) {
-                const float accepted_distance = track->pending_far_depth_count >= 2
-                    ? track->pending_far_depth_m : measured_distance;
+                const bool confirmed_jump = track->pending_range_count >=
+                    (residual > 0.0f ? 3 : 2);
+                const float accepted_distance = confirmed_jump
+                    ? track->pending_range_m : measured_distance;
                 const float accepted_residual = accepted_distance - predicted;
-                const float alpha = 0.25f + 0.50f * confidence;
-                const float beta = 0.06f + 0.18f * confidence;
+                // 接近时快速响应，远离时慢速释放；降低 beta 和速度上限，防止
+                // 框抖动产生虚假高速/TTC。
+                const float alpha = accepted_residual < 0.0f
+                    ? 0.30f + 0.20f * confidence
+                    : 0.14f + 0.14f * confidence;
+                const float beta = accepted_residual < 0.0f
+                    ? 0.035f + 0.055f * confidence
+                    : 0.015f + 0.035f * confidence;
                 track->depth_m = clampf(predicted + alpha * accepted_residual, 0.20f, 8.0f);
                 track->depth_velocity_mps = clampf(
-                    track->depth_velocity_mps + beta * accepted_residual / dt, -6.0f, 6.0f);
+                    track->depth_velocity_mps + beta * accepted_residual / dt, -2.0f, 2.0f);
                 const float measurement_variance = std::max(0.04f,
                     detection.distance_sigma_m * detection.distance_sigma_m);
                 track->depth_variance = (1.0f - alpha) *
                     (track->depth_variance + 0.03f * dt) + alpha * measurement_variance;
-                track->pending_far_depth_m = -1.0f;
-                track->pending_far_depth_count = 0;
+                track->pending_range_m = -1.0f;
+                track->pending_range_count = 0;
             }
         }
         if (measurement_used) ++track->depth_measurements;
@@ -465,11 +478,11 @@ void ObstacleTracker::UpdateRangeState(Track* track,
             ? detection.distance_confidence
             : std::max(0.15f, detection.distance_confidence * 0.60f);
         track->item.distance_source = measurement_used
-            ? detection.distance_source : "temporal_hold_far_outlier";
+            ? detection.distance_source : "temporal_hold_far_jump";
         track->item.range_measurements = track->depth_measurements;
         track->item.approach_mps = std::max(0.0f, -track->depth_velocity_mps);
-        track->item.ttc_s = track->depth_measurements >= 3 &&
-            track->item.approach_mps > 0.08f
+        track->item.ttc_s = track->depth_measurements >= 5 &&
+            track->item.approach_mps > 0.20f
             ? track->item.safe_distance_m / track->item.approach_mps : -1.0f;
     } else {
         track->item.safe_distance_m = detection.safe_distance_m;

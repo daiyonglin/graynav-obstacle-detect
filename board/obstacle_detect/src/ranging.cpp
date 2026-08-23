@@ -68,6 +68,7 @@ RangingEstimator::RangingEstimator()
       camera_pitch_deg_(15.0f),
       ground_contact_offset_ratio_(0.012f),
       geometry_scale_(1.60f),
+      safety_scale_(1.00f),
       min_distance_m_(0.20f),
       max_distance_m_(8.0f),
       fx_(1.0f),
@@ -89,6 +90,11 @@ void RangingEstimator::Initialize(const std::array<int, 2>& image_shape)
     // 1.60 是偏保守的首轮修正，不代表相机已经完成厘米级标定。
     geometry_scale_ = clampf(env_float("A1_RANGE_GEOMETRY_SCALE", 1.60f),
                              0.75f, 2.00f);
+    // geometry_scale 用于校正串口展示的期望距离；规划器不能因为这项经验校正
+    // 同比例变得乐观。safety_scale 作用于未放大的原始几何证据，默认 1.0，
+    // 因而 4~5m 目标可显示校正值，但风险判断仍保留原始单目测距的不确定性。
+    safety_scale_ = clampf(env_float("A1_RANGE_SAFETY_SCALE", 1.00f),
+                           0.60f, 1.20f);
     min_distance_m_ = env_float("A1_DIST_MIN_M", 0.20f);
     max_distance_m_ = env_float("A1_DIST_MAX_M", 8.0f);
 
@@ -99,7 +105,8 @@ void RangingEstimator::Initialize(const std::array<int, 2>& image_shape)
     std::cout << "[RANGE][CALIBRATION] fov=" << fov_h_deg_ << "/"
               << fov_v_deg_ << "deg height=" << camera_height_m_
               << "m pitch=" << camera_pitch_deg_
-              << "deg geometry_scale=" << geometry_scale_ << std::endl;
+              << "deg geometry_scale=" << geometry_scale_
+              << " safety_scale=" << safety_scale_ << std::endl;
 }
 
 RangingEstimator::EstimateValue RangingEstimator::GroundEstimate(
@@ -390,7 +397,13 @@ void RangingEstimator::Estimate(DetectionItem* item) const
 
     item->distance_m = clampf(fused.mean, min_distance_m_, max_distance_m_);
     item->distance_sigma_m = fused.sigma;
-    item->safe_distance_m = clampf(item->distance_m - fused.sigma,
+    const float displayed_safe = item->distance_m - fused.sigma;
+    const float unscaled_mean = fused.mean / std::max(0.01f, geometry_scale_);
+    const float unscaled_sigma = fused.sigma / std::max(0.01f, geometry_scale_);
+    const float planning_safe = safety_scale_ * (unscaled_mean - unscaled_sigma);
+    // 对外 distance_m 是经过现场比例修正后的连续期望值；规划器使用两者中
+    // 更保守的下界，避免 1.60 倍显示校正把近场风险错误推成 FAR/CLEAR。
+    item->safe_distance_m = clampf(std::min(displayed_safe, planning_safe),
                                    min_distance_m_, max_distance_m_);
     if (near_upper > 0.0f) {
         // This is a one-sided safety bound derived from frame occupancy, not a

@@ -65,8 +65,32 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn("std::min(item->safe_distance_m, near_upper)", ranging)
         self.assertIn('env_float("A1_RANGE_GEOMETRY_SCALE", 1.60f)', ranging)
         self.assertIn("A1_RANGE_GEOMETRY_SCALE:-1.60", run)
+        self.assertIn('env_float("A1_RANGE_SAFETY_SCALE", 1.00f)', ranging)
+        self.assertIn("A1_RANGE_SAFETY_SCALE:-1.00", run)
+        self.assertIn("std::min(displayed_safe, planning_safe)", ranging)
         self.assertIn("distance_identity_for", stabilizer)
-        self.assertIn("distance_history_.size() > 3U", stabilizer)
+        self.assertIn("distance_history_.size() > 5U", stabilizer)
+
+    def test_cover_fault_is_dark_only_and_white_wall_safe(self) -> None:
+        demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")
+        run = (ROOT / "scripts/run.sh").read_text(encoding="utf-8")
+        self.assertIn("const bool hard_black_cover", demo)
+        self.assertIn("stats.cover_candidate = hard_black_cover", demo)
+        self.assertNotIn("hard_bright_cover", demo)
+        self.assertNotIn("hard_flat_frame", demo)
+        self.assertNotIn("cover_score >= score_threshold", demo)
+        self.assertIn("freeze_observable", demo)
+        self.assertIn("A1_COVER_BLACK_MEAN_MAX:-45", run)
+        self.assertIn("A1_COVER_BLACK_RATIO_PCT:-80", run)
+
+    def test_range_filter_uses_all_distance_median_and_asymmetric_release(self) -> None:
+        tracker = (ROOT / "src/tracker.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/tracker.hpp").read_text(encoding="utf-8")
+        self.assertIn("std::array<float, 7> inverse_depth_history", header)
+        self.assertIn("track->inverse_depth_count >= 3", tracker)
+        self.assertNotIn("measured_distance > 2.0f", tracker)
+        self.assertIn("track->pending_range_count < 3", tracker)
+        self.assertIn("accepted_residual < 0.0f", tracker)
 
     def test_field_zone_and_wall_guidance_defaults(self) -> None:
         semantic = (ROOT / "src/semantic_config.cpp").read_text(encoding="utf-8")

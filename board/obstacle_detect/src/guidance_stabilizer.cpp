@@ -299,7 +299,7 @@ void GuidanceStabilizer::UpdateDistance(const AvoidanceDecision& raw)
         stable_.distance_estimate_m = -1.0f;
     }
     distance_history_.push_back(candidate);
-    while (distance_history_.size() > 3U) distance_history_.pop_front();
+    while (distance_history_.size() > 5U) distance_history_.pop_front();
     std::vector<float> sorted(distance_history_.begin(), distance_history_.end());
     std::sort(sorted.begin(), sorted.end());
     float median = sorted[sorted.size() / 2U];
