@@ -497,7 +497,9 @@ FD | length_hi | length_lo | 01 | parameter | GBK payload | XOR checksum
 
 ### 13.1 摄像头/数据异常
 
-检测证据：连续取帧失败、黑色遮挡、强过曝、极低方差纯色、多帧采样哈希不变，以及由全图/中心区域动态范围、纹理和边缘联合得到的遮挡分数。默认连续 3 帧达到遮挡分数门限后锁存 `state=sensor`，正常决策被替换为 `system_fault`；恢复要求连续 18 帧全部健康。对应参数为 `A1_COVER_SCORE_THRESHOLD`、`A1_COVER_TRIGGER_FRAMES` 和 `A1_COVER_RECOVERY_FRAMES`。
+检测证据分为两类：连续取帧/NPU/资源故障仍按原状态机处理；图像内容异常则只在大面积近黑画面成立时触发。默认要求全图均值不高于 45、暗像素比例不低于 80%，且中心区域同样近黑，连续 3 帧后锁存 `state=sensor`。白墙、白板、过曝窗口和低纹理纯色画面不再被解释为镜头遮挡。画面冻结检测也只在存在足够边缘或动态范围时启用，避免静态白墙误报。恢复要求连续 18 帧健康。对应参数为 `A1_COVER_BLACK_MEAN_MAX`、`A1_COVER_BLACK_RATIO_PCT`、`A1_COVER_TRIGGER_FRAMES` 和 `A1_COVER_RECOVERY_FRAMES`。
+
+测距对外值与规划值采用不同契约。`distance_m` 是经过 `A1_RANGE_GEOMETRY_SCALE=1.60` 修正的连续期望值，用于串口展示；`safe_distance_m` 由未放大的原始几何估计、标准差和 `A1_RANGE_SAFETY_SCALE=1.00` 构成，并取其与展示下界中的较小值，供避障规划使用。Tracker 对最近 7 次逆深度取中值，目标接近时较快响应，目标远离时要求连续 3 次一致才释放风险；展示层再对同一目标最近 5 次结果取中值并平滑。因此比例校正不会再把近场目标错误推成 `FAR/CLEAR`。
 
 ### 13.2 推理异常
 
