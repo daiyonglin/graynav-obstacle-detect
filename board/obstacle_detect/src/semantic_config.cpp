@@ -287,19 +287,19 @@ float RiskWeight(int semantic_class_id)
 
 float UrgentDistanceM()
 {
-    static const float value = env_float("A1_RANGE_URGENT_M", 0.85f);
+    static const float value = env_float("A1_RANGE_URGENT_M", 0.60f);
     return value;
 }
 
 float NearDistanceM()
 {
-    static const float value = env_float("A1_RANGE_NEAR_M", 1.25f);
+    static const float value = env_float("A1_RANGE_NEAR_M", 0.80f);
     return std::max(value, UrgentDistanceM() + 0.10f);
 }
 
 float WarningDistanceM()
 {
-    static const float value = env_float("A1_RANGE_WARNING_M", 2.20f);
+    static const float value = env_float("A1_RANGE_WARNING_M", 1.50f);
     return std::max(value, NearDistanceM() + 0.20f);
 }
 

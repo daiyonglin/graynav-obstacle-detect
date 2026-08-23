@@ -137,6 +137,9 @@ int main()
     unsetenv("A1_SECTOR_LEFT_BOUND");
     unsetenv("A1_SECTOR_RIGHT_BOUND");
     unsetenv("A1_ENABLE_WALL_GUIDANCE");
+    unsetenv("A1_RANGE_URGENT_M");
+    unsetenv("A1_RANGE_NEAR_M");
+    unsetenv("A1_RANGE_WARNING_M");
     // The unified head uses the fixed indoor8 order, not ROD25 or COCO80 IDs.
     assert(obstacle::semantic::RawLabel(0) == "person");
     assert(obstacle::semantic::RawLabel(1) == "chair");
@@ -149,6 +152,9 @@ int main()
     assert(std::fabs(obstacle::semantic::SectorLeftBoundaryRatio() - 0.35f) < 0.001f);
     assert(std::fabs(obstacle::semantic::SectorRightBoundaryRatio() - 0.65f) < 0.001f);
     assert(!obstacle::semantic::WallGuidanceEnabled());
+    assert(std::fabs(obstacle::semantic::UrgentDistanceM() - 0.60f) < 0.001f);
+    assert(std::fabs(obstacle::semantic::NearDistanceM() - 0.80f) < 0.001f);
+    assert(std::fabs(obstacle::semantic::WarningDistanceM() - 1.50f) < 0.001f);
 
     obstacle::SurfaceDecisionFusion fusion;
     AvoidanceDecision detection;
@@ -180,8 +186,8 @@ int main()
         item.label = "chair";
         item.semantic_class = "chair";
         item.sector = sector;
-        item.distance_m = 0.90f;
-        item.safe_distance_m = 0.75f;
+        item.distance_m = 0.70f;
+        item.safe_distance_m = 0.60f;
         item.distance_confidence = 0.80f;
         item.distance_source = "fused";
         item.risk_level = "near";
@@ -228,8 +234,8 @@ int main()
     obstacle::AvoidancePlanner warning_right_planner;
     warning_right_planner.Initialize({720, 1280});
     DetectionResult warning_right = planner_detection(250.0f, 710.0f, "right", 100);
-    warning_right.items[0].distance_m = 1.95f;
-    warning_right.items[0].safe_distance_m = 1.80f;
+    warning_right.items[0].distance_m = 1.30f;
+    warning_right.items[0].safe_distance_m = 1.15f;
     warning_right.items[0].risk_level = "warning";
     warning_right.items[0].ttc_s = -1.0f;
     warning_right_planner.Update(warning_right, 0, 100);
@@ -296,18 +302,18 @@ int main()
     obstacle::AvoidancePlanner staged_planner;
     staged_planner.Initialize({720, 1280});
     DetectionResult staged = planner_detection(240.0f, 480.0f, "center", 100);
-    staged.items[0].distance_m = 2.60f;
+    staged.items[0].distance_m = 1.80f;
     staged.items[0].safe_distance_m = 0.60f;
     staged.items[0].risk_level = "urgent";
     staged.items[0].ttc_s = 0.10f;
     assert(staged_planner.Update(staged, 0, 100).action == "clear");
 
     staged.timestamp_ms = 200;
-    staged.items[0].distance_m = 1.80f;
+    staged.items[0].distance_m = 1.20f;
     assert(staged_planner.Update(staged, 0, 200).action == "slow");
 
     staged.timestamp_ms = 300;
-    staged.items[0].distance_m = 1.00f;
+    staged.items[0].distance_m = 0.70f;
     assert(staged_planner.Update(staged, 0, 300).action == "stop");
 
     staged.timestamp_ms = 400;
@@ -317,6 +323,46 @@ int main()
     assert(probe_turn.action == "turn_left");
     assert(probe_turn.recommended_direction == "left");
     assert(probe_turn.hazard_position == "RIGHT");
+
+    // Exact field-test boundaries.  STOP is strictly below 0.80 m, SLOW is
+    // [0.80, 1.50), and CLEAR begins at 1.50 m.  A side obstacle uses the
+    // same 1.50 m upper bound for its opposite-turn instruction.
+    obstacle::AvoidancePlanner stop_boundary_planner;
+    stop_boundary_planner.Initialize({720, 1280});
+    DetectionResult stop_boundary = planner_detection(
+        240.0f, 480.0f, "center", 100);
+    stop_boundary.items[0].distance_m = 0.79f;
+    assert(stop_boundary_planner.Update(stop_boundary, 0, 100).action == "stop");
+
+    obstacle::AvoidancePlanner slow_boundary_planner;
+    slow_boundary_planner.Initialize({720, 1280});
+    DetectionResult slow_boundary = stop_boundary;
+    slow_boundary.items[0].distance_m = 0.80f;
+    assert(slow_boundary_planner.Update(slow_boundary, 0, 100).action == "slow");
+    slow_boundary.items[0].distance_m = 1.49f;
+    slow_boundary.timestamp_ms = 200;
+    assert(slow_boundary_planner.Update(slow_boundary, 0, 200).action == "slow");
+
+    obstacle::AvoidancePlanner clear_boundary_planner;
+    clear_boundary_planner.Initialize({720, 1280});
+    DetectionResult clear_boundary = stop_boundary;
+    clear_boundary.items[0].distance_m = 1.50f;
+    assert(clear_boundary_planner.Update(clear_boundary, 0, 100).action == "clear");
+
+    obstacle::AvoidancePlanner side_boundary_planner;
+    side_boundary_planner.Initialize({720, 1280});
+    DetectionResult side_boundary = planner_detection(
+        400.0f, 680.0f, "right", 100);
+    side_boundary.items[0].distance_m = 1.49f;
+    side_boundary_planner.Update(side_boundary, 0, 100);
+    side_boundary.timestamp_ms = 200;
+    assert(side_boundary_planner.Update(side_boundary, 0, 200).action == "turn_left");
+
+    obstacle::AvoidancePlanner side_clear_planner;
+    side_clear_planner.Initialize({720, 1280});
+    side_boundary.items[0].distance_m = 1.50f;
+    side_boundary.timestamp_ms = 100;
+    assert(side_clear_planner.Update(side_boundary, 0, 100).action == "clear");
 
     // An unknown road mask is not positive evidence that the selected escape
     // side is blocked.  Preserve the object's turn unless that side has a

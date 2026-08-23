@@ -90,6 +90,18 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn("stop_below=", planner)
         self.assertIn("slow_below=", planner)
         self.assertIn("ttc=diagnostic_only", planner)
+        self.assertIn('A1_RANGE_URGENT_M:-0.60', run)
+        self.assertIn('A1_RANGE_NEAR_M:-0.80', run)
+        self.assertIn('A1_RANGE_WARNING_M:-1.50', run)
+        semantic = (ROOT / "src/semantic_config.cpp").read_text(encoding="utf-8")
+        self.assertIn('env_float("A1_RANGE_URGENT_M", 0.60f)', semantic)
+        self.assertIn('env_float("A1_RANGE_NEAR_M", 0.80f)', semantic)
+        self.assertIn('env_float("A1_RANGE_WARNING_M", 1.50f)', semantic)
+        fusion = (ROOT / "src/surface_fusion.cpp").read_text(encoding="utf-8")
+        self.assertIn("depth_m < semantic::NearDistanceM()", fusion)
+        self.assertIn("depth_m < semantic::WarningDistanceM()", fusion)
+        self.assertNotIn("if (depth_m < 1.25f)", fusion)
+        self.assertNotIn("if (depth_m < 2.20f)", fusion)
 
     def test_cover_fault_is_dark_only_and_white_wall_safe(self) -> None:
         demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")

@@ -265,8 +265,8 @@ void DepthRangeFusion::Initialize(const std::array<int, 2>& image_shape)
 std::string DepthRangeFusion::LevelFromDepth(float depth_m)
 {
     if (depth_m <= 0.0f || !std::isfinite(depth_m)) return "unknown";
-    if (depth_m < 1.25f) return "near";
-    if (depth_m < 2.20f) return "mid";
+    if (depth_m < semantic::NearDistanceM()) return "near";
+    if (depth_m < semantic::WarningDistanceM()) return "mid";
     return "far";
 }
 
