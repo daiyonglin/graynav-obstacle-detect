@@ -89,9 +89,8 @@ std::string sector_from_box(const std::array<float, 4>& box, int width)
     return "center";
 }
 
-std::string risk_from_safe(float safe_distance, float ttc)
+std::string risk_from_safe(float safe_distance)
 {
-    if (ttc > 0.0f && ttc < semantic::StopTtcSeconds()) return "urgent";
     if (safe_distance < 0.0f) return "unknown";
     if (safe_distance < semantic::UrgentDistanceM()) return "urgent";
     if (safe_distance < semantic::NearDistanceM()) return "near";
@@ -493,8 +492,10 @@ void ObstacleTracker::UpdateRangeState(Track* track,
         track->item.ttc_s = -1.0f;
     }
     track->item.lateral_m = detection.lateral_m;
-    track->item.risk_level = risk_from_safe(track->item.safe_distance_m,
-                                             track->item.ttc_s);
+    // TTC is retained for optional diagnostics only.  Navigation risk and
+    // actions are distance-driven so a noisy velocity estimate cannot turn a
+    // visibly far obstacle into STOP.
+    track->item.risk_level = risk_from_safe(track->item.safe_distance_m);
 }
 
 void ObstacleTracker::StartTrack(const DetectionItem& detection,

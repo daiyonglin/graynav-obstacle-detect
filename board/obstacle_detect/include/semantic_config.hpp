@@ -52,7 +52,6 @@ float RiskWeight(int semantic_class_id);
 float UrgentDistanceM();
 float NearDistanceM();
 float WarningDistanceM();
-float StopTtcSeconds();
 float SideClearDistanceM();
 float TurnClearanceMarginM();
 

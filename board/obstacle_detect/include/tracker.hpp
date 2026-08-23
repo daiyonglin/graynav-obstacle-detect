@@ -86,7 +86,7 @@ private:
                      int frame_id, int64_t timestamp_ms, int view_id);
     /** 对 25 类证据做衰减累积和 1.2 倍切换滞回。 */
     void UpdateClassEvidence(Track* track, const DetectionItem& detection);
-    /** 以真实时间差更新距离/径向速度，并计算可靠 TTC。 */
+    /** 以真实时间差更新距离/径向速度，并计算仅供诊断的 TTC。 */
     void UpdateRangeState(Track* track, const DetectionItem& detection, int64_t timestamp_ms);
     /** 只老化当前 ROI 可见却未匹配的轨迹，并删除超时目标。 */
     void AgeUnmatchedTracks(const std::vector<int>& matched_tracks,

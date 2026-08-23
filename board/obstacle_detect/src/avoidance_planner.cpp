@@ -12,8 +12,8 @@ namespace {
 
 /*
  * 避障规划层只消费跟踪稳定且完成测距的目标。它不修改检测框，而是将
- * 地面横向位置划入左/中/右走廊，计算各走廊最近保守距离和最小 TTC，
- * 再输出唯一动作，供 OSD、串口和语音共同使用。
+ * 地面横向位置划入左/中/右走廊，按稳定显示距离输出唯一动作，供 OSD、
+ * 串口和语音共同使用。TTC 不参与动作，避免速度噪声触发远距离 STOP。
  */
 
 int action_severity(const std::string& action)
@@ -35,25 +35,32 @@ void copy_zone(ZoneStatus* zone, const DetectionItem& item)
     zone->distance_estimate_m = item.distance_m;
     zone->safe_distance_m = item.safe_distance_m >= 0.0f
         ? item.safe_distance_m : item.distance_m;
-    zone->distance_m = zone->safe_distance_m;
+    zone->distance_m = item.distance_m >= 0.0f
+        ? item.distance_m : zone->safe_distance_m;
     zone->risk_level = item.risk_level;
 }
 
-bool near_or_urgent(const AvoidancePlanner::Corridor& corridor)
+float action_distance(const DetectionItem& item)
+{
+    // The action must agree with the value presented to the user.  The
+    // conservative bound is a fallback only when no stable estimate exists.
+    if (item.distance_m >= 0.0f) return item.distance_m;
+    if (item.safe_distance_m >= 0.0f) return item.safe_distance_m;
+    return -1.0f;
+}
+
+bool near(const AvoidancePlanner::Corridor& corridor)
 {
     return corridor.zone.occupied &&
-           (corridor.zone.risk_level == "urgent" ||
-            corridor.zone.risk_level == "near" ||
-             corridor.clearance < semantic::NearDistanceM() ||
-             (corridor.min_ttc > 0.0f &&
-              corridor.min_ttc < semantic::StopTtcSeconds()));
+           corridor.clearance >= 0.0f &&
+           corridor.clearance < semantic::NearDistanceM();
 }
 
 bool warning(const AvoidancePlanner::Corridor& corridor)
 {
     return corridor.zone.occupied &&
-           (corridor.zone.risk_level == "warning" ||
-            corridor.clearance < semantic::WarningDistanceM());
+           corridor.clearance >= semantic::NearDistanceM() &&
+           corridor.clearance < semantic::WarningDistanceM();
 }
 
 }  // namespace
@@ -80,8 +87,7 @@ void AvoidancePlanner::Initialize(const std::array<int, 2>& image_shape)
     std::cout << "[NAV][THRESHOLDS] urgent=" << semantic::UrgentDistanceM()
               << "m near=" << semantic::NearDistanceM()
               << "m warning=" << semantic::WarningDistanceM()
-              << "m ttc_stop=" << semantic::StopTtcSeconds()
-              << "s side_clear=" << semantic::SideClearDistanceM()
+              << "m side_clear=" << semantic::SideClearDistanceM()
               << "m turn_margin=" << semantic::TurnClearanceMarginM()
               << "m sector=" << semantic::SectorLeftBoundaryRatio()
               << "/" << semantic::SectorRightBoundaryRatio()
@@ -113,19 +119,16 @@ bool AvoidancePlanner::IsActionHazard(const DetectionItem& item) const
 
 void AvoidancePlanner::AddToCorridor(Corridor* corridor, const DetectionItem& item) const
 {
-    // 每条走廊只保留最危险目标摘要，同时累计最小 clearance 与最小 TTC。
+    // 每条走廊只保留动作距离最近的目标摘要。该距离与串口 dist 同源；
+    // safe_distance_m 只在距离估计缺失时兜底。
     if (corridor == NULL) return;
-    const float distance = item.safe_distance_m >= 0.0f
-        ? item.safe_distance_m
-        : (item.distance_m >= 0.0f ? item.distance_m : 2.5f);
+    const float measured = action_distance(item);
+    const float distance = measured >= 0.0f ? measured : 2.5f;
     ++corridor->zone.object_count;
     if (!corridor->zone.occupied || distance < corridor->clearance) {
         copy_zone(&corridor->zone, item);
     }
     corridor->clearance = std::min(corridor->clearance, distance);
-    if (item.ttc_s > 0.0f && (corridor->min_ttc < 0.0f || item.ttc_s < corridor->min_ttc)) {
-        corridor->min_ttc = item.ttc_s;
-    }
 }
 
 std::string AvoidancePlanner::StabilizeAction(const std::string& desired, int64_t now_ms)
@@ -205,7 +208,8 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     float nearest = 1e9f;
     const DetectionItem* nearest_item = NULL;
     const DetectionItem* depth_candidate = NULL;
-    bool wide_urgent = false;
+    bool wide_near = false;
+    bool wide_warning = false;
     bool uncertain_hazard = false;
     // A side object may overlap the narrow centre footprint even though its
     // physical centre is clearly on one side.  Track the primary horizontal
@@ -213,7 +217,6 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     // rather than being mistaken for an unescapable two-corridor blockage.
     bool primary_near[3] = {false, false, false};
     bool primary_warning[3] = {false, false, false};
-    bool primary_center_ttc_urgent = false;
     for (size_t i = 0; i < result.items.size(); ++i) {
         const DetectionItem& item = result.items[i];
         if (!IsActionHazard(item)) continue;
@@ -222,8 +225,7 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
              item.depth_confidence > depth_candidate->depth_confidence)) {
             depth_candidate = &item;
         }
-        const float distance = item.safe_distance_m >= 0.0f
-            ? item.safe_distance_m : item.distance_m;
+        const float distance = action_distance(item);
         if (distance >= 0.0f && distance < nearest) {
             nearest = distance;
             nearest_track = item.track_id;
@@ -244,9 +246,11 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             AddToCorridor(&left, item);
             AddToCorridor(&center, item);
             AddToCorridor(&right, item);
-            if (item.quality != "coarse" &&
-                (item.risk_level == "urgent" || item.risk_level == "near")) {
-                wide_urgent = true;
+            if (item.quality != "coarse" && distance >= 0.0f) {
+                wide_near = wide_near || distance < semantic::NearDistanceM();
+                wide_warning = wide_warning ||
+                    (distance >= semantic::NearDistanceM() &&
+                     distance < semantic::WarningDistanceM());
             }
             continue;
         }
@@ -274,35 +278,25 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
                 primary_zone = 2;
             }
         }
-        const bool item_near = item.risk_level == "urgent" ||
-            item.risk_level == "near" ||
-            (distance >= 0.0f && distance < semantic::NearDistanceM()) ||
-            (item.ttc_s > 0.0f && item.ttc_s < semantic::StopTtcSeconds());
-        const bool item_warning = item_near || item.risk_level == "warning" ||
-            (distance >= 0.0f && distance < semantic::WarningDistanceM());
+        const bool item_near = distance >= 0.0f &&
+            distance < semantic::NearDistanceM();
+        const bool item_warning = distance >= semantic::NearDistanceM() &&
+            distance < semantic::WarningDistanceM();
         primary_near[primary_zone] = primary_near[primary_zone] || item_near;
         primary_warning[primary_zone] = primary_warning[primary_zone] || item_warning;
-        if (primary_zone == 1 && item.ttc_s > 0.0f &&
-            item.ttc_s < semantic::StopTtcSeconds()) {
-            primary_center_ttc_urgent = true;
-        }
         Corridor* corridors[3] = {&left, &center, &right};
         AddToCorridor(corridors[primary_zone], item);
     }
 
-    const bool left_near = near_or_urgent(left);
-    const bool center_near = near_or_urgent(center);
-    const bool right_near = near_or_urgent(right);
+    const bool left_near = near(left);
+    const bool center_near = near(center);
+    const bool right_near = near(right);
     const bool left_warning = warning(left);
     const bool center_warning = warning(center);
     const bool right_warning = warning(right);
     std::string desired = "clear";
     std::string reason = "clear";
 
-    const bool left_clear = left.verified && !left_near &&
-                            left.clearance > semantic::SideClearDistanceM();
-    const bool right_clear = right.verified && !right_near &&
-                             right.clearance > semantic::SideClearDistanceM();
     const int near_count = static_cast<int>(left_near) +
         static_cast<int>(center_near) + static_cast<int>(right_near);
     const int warning_count = static_cast<int>(left_warning) +
@@ -319,9 +313,17 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         !primary_warning[1] && !primary_warning[2];
     const bool right_primary_only_warning = primary_warning[2] &&
         !primary_warning[0] && !primary_warning[1];
-    if (wide_urgent || primary_center_ttc_urgent) {
+    /*
+     * Deliberately simple walking sequence:
+     *   centre FAR -> CLEAR, centre MID -> SLOW, centre NEAR -> STOP.
+     * After STOP the user probes sideways; once the obstacle's centre moves
+     * into LEFT/RIGHT, the opposite turn is released immediately by
+     * StabilizeAction.  No TTC, hidden safety bound or side-clearance search
+     * can override this sequence.
+     */
+    if (wide_near || primary_near[1] || center_near) {
         desired = "stop";
-        reason = wide_urgent ? "wide_near" : "center_primary_ttc_urgent";
+        reason = wide_near ? "wide_near_distance" : "center_near_distance";
     } else if (left_primary_only_near) {
         desired = "turn_right";
         reason = "left_primary_near_avoid_right";
@@ -342,35 +344,19 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
             desired = "slow";
             reason = "side_corridors_near_center_open";
         } else {
-            desired = "stop";
-            reason = "two_corridors_no_verified_escape";
+            desired = "slow";
+            reason = "two_corridors_probe_forward";
         }
-    } else if (center_near || left_near || right_near) {
-        // 单纯侧方近障不再等待双 ROI 将另一侧标记为 verified：右侧障碍直接
-        // 提示左转，左侧障碍直接提示右转。中央阻塞时仍要求候选走廊已确认安全。
+    } else if (left_near || right_near) {
         if (right_near && !center_near && !left_near) {
             desired = "turn_left";
             reason = "right_obstacle_direct_avoid";
         } else if (left_near && !center_near && !right_near) {
             desired = "turn_right";
             reason = "left_obstacle_direct_avoid";
-        } else if (center_near && left_clear && !right_clear) {
-            desired = "turn_left";
-            reason = "only_left_corridor_verified";
-        } else if (center_near && right_clear && !left_clear) {
-            desired = "turn_right";
-            reason = "only_right_corridor_verified";
-        } else if (center_near && left_clear && right_clear &&
-                   left.clearance > right.clearance + semantic::TurnClearanceMarginM()) {
-            desired = "turn_left";
-            reason = "left_corridor_safer";
-        } else if (center_near && left_clear && right_clear &&
-                   right.clearance > left.clearance + semantic::TurnClearanceMarginM()) {
-            desired = "turn_right";
-            reason = "right_corridor_safer";
         } else {
-            desired = center_near ? "stop" : "slow";
-            reason = center_near ? "center_near_no_clear_margin" : "side_near";
+            desired = "slow";
+            reason = "side_near_probe_forward";
         }
     } else if (left_primary_only_warning) {
         desired = "turn_right";
@@ -378,6 +364,9 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
     } else if (right_primary_only_warning) {
         desired = "turn_left";
         reason = "right_primary_warning_avoid_left";
+    } else if (wide_warning || primary_warning[1] || center_warning) {
+        desired = "slow";
+        reason = wide_warning ? "wide_warning_distance" : "center_warning_distance";
     } else if (warning_count >= 2) {
         if (!left_warning && !left.zone.occupied) {
             desired = "turn_left";
@@ -433,7 +422,7 @@ AvoidanceDecision AvoidancePlanner::Update(const DetectionResult& result,
         static_cast<int>(primary_active[1]) + static_cast<int>(primary_active[2]);
     const int active_count = static_cast<int>(active_left) +
         static_cast<int>(active_center) + static_cast<int>(active_right);
-    if (wide_urgent) {
+    if (wide_near || wide_warning) {
         decision.hazard_sector = "blocked";
     } else if (primary_active_count > 0) {
         decision.hazard_sector = primary_active_count >= 3 ? "blocked" :

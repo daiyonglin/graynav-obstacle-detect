@@ -37,7 +37,7 @@ struct DetectionItem {
     float risk_weight;         // 类别风险权重，参与候选排序和规划。
     std::string sector;        // left/center/right/交叠区/wide。
     float distance_m;          // 融合后的期望距离；负值表示无可靠米级结果。
-    float safe_distance_m;     // mean-sigma 的保守距离，避障决策优先使用它。
+    float safe_distance_m;     // mean-sigma 保守下界；仅在期望距离缺失时供规划兜底。
     float distance_sigma_m;    // 距离标准差，描述几何与尺寸先验不确定度。
     float lateral_m;           // 相机坐标系横向位置，左负右正。
     std::string distance_source; // ground/size/fused/nearfield/unknown。
@@ -48,7 +48,7 @@ struct DetectionItem {
     int age;                   // 轨迹生命周期帧数。
     int missed;                // 当前可见 ROI 内连续未匹配次数。
     float approach_mps;        // 朝向相机的径向速度，非接近时为 0。
-    float ttc_s;               // 碰撞时间；证据不足时为负值。
+    float ttc_s;               // 诊断用碰撞时间；证据不足时为负值，不参与动作。
     int range_measurements;    // 该轨迹累计的可靠测距次数。
     std::string depth_level;   // near/mid/far/unknown，仅用于稳健远近表达。
     float depth_confidence;    // 学习深度与几何证据融合后的 0~1 置信度。

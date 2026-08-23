@@ -288,6 +288,36 @@ int main()
         planner_detection(240.0f, 480.0f, "center", 100), 0, 100);
     assert(center_stop.action == "stop");
 
+    // Required walking sequence: the same centre obstacle progresses from
+    // FAR -> MID -> NEAR, then the user probes until it moves to the right.
+    // The action must be CLEAR -> SLOW -> STOP -> LEFT.  A deliberately tiny
+    // safety bound and TTC prove that neither hidden field can stop a far
+    // target anymore; the displayed distance is the action distance.
+    obstacle::AvoidancePlanner staged_planner;
+    staged_planner.Initialize({720, 1280});
+    DetectionResult staged = planner_detection(240.0f, 480.0f, "center", 100);
+    staged.items[0].distance_m = 2.60f;
+    staged.items[0].safe_distance_m = 0.60f;
+    staged.items[0].risk_level = "urgent";
+    staged.items[0].ttc_s = 0.10f;
+    assert(staged_planner.Update(staged, 0, 100).action == "clear");
+
+    staged.timestamp_ms = 200;
+    staged.items[0].distance_m = 1.80f;
+    assert(staged_planner.Update(staged, 0, 200).action == "slow");
+
+    staged.timestamp_ms = 300;
+    staged.items[0].distance_m = 1.00f;
+    assert(staged_planner.Update(staged, 0, 300).action == "stop");
+
+    staged.timestamp_ms = 400;
+    staged.items[0].box = {400.0f, 650.0f, 680.0f, 1240.0f};
+    staged.items[0].sector = "right";
+    const AvoidanceDecision probe_turn = staged_planner.Update(staged, 0, 400);
+    assert(probe_turn.action == "turn_left");
+    assert(probe_turn.recommended_direction == "left");
+    assert(probe_turn.hazard_position == "RIGHT");
+
     // An unknown road mask is not positive evidence that the selected escape
     // side is blocked.  Preserve the object's turn unless that side has a
     // persistent blocked/step hazard.

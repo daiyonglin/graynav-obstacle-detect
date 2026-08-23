@@ -74,6 +74,20 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn("distance_history_.size() > 3U", stabilizer)
         self.assertIn('"person_partial_width"', ranging)
 
+    def test_navigation_actions_use_display_distance_without_ttc(self) -> None:
+        planner = (ROOT / "src/avoidance_planner.cpp").read_text(encoding="utf-8")
+        tracker = (ROOT / "src/tracker.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "include/avoidance_planner.hpp").read_text(
+            encoding="utf-8"
+        )
+        run = (ROOT / "scripts/run.sh").read_text(encoding="utf-8")
+        self.assertIn("if (item.distance_m >= 0.0f) return item.distance_m", planner)
+        self.assertIn('"center_near_distance"', planner)
+        self.assertNotIn("StopTtcSeconds", planner)
+        self.assertNotIn("min_ttc", header)
+        self.assertNotIn("StopTtcSeconds", tracker)
+        self.assertNotIn("A1_TTC_STOP_S", run)
+
     def test_cover_fault_is_dark_only_and_white_wall_safe(self) -> None:
         demo = (ROOT / "demo_obstacle.cpp").read_text(encoding="utf-8")
         run = (ROOT / "scripts/run.sh").read_text(encoding="utf-8")

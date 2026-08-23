@@ -303,12 +303,6 @@ float WarningDistanceM()
     return std::max(value, NearDistanceM() + 0.20f);
 }
 
-float StopTtcSeconds()
-{
-    static const float value = env_float("A1_TTC_STOP_S", 1.40f);
-    return std::max(0.50f, value);
-}
-
 float SideClearDistanceM()
 {
     static const float value = env_float("A1_SIDE_CLEAR_M", 1.45f);

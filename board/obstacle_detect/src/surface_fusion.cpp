@@ -145,7 +145,7 @@ AvoidanceDecision SurfaceDecisionFusion::Fuse(const AvoidanceDecision& detection
         fused.approaching = fused.approaching || surface.approaching;
     }
 
-    // System health and an urgent detection/TTC retain absolute priority.
+    // System health and a distance-confirmed detector STOP retain priority.
     if (detection.action == "system_fault" || detection.action == "stop") {
         return fused;
     }

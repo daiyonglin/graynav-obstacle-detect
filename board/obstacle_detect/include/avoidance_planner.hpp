@@ -10,11 +10,10 @@ namespace obstacle {
 /**
  * @brief 将稳定目标投影到左、中、右通行走廊并生成保守的导盲动作。
  *
- * 规划器只消费 tracker 输出，不直接读取神经网络结果。它使用安全距离、TTC、
- * 目标横向位置和质量更新三条走廊。单纯左/右侧近障可直接提示向反方向转向，
- * 使窄视场下的侧方障碍能够及时触发动作；只有“中央走廊被阻挡、需要选择绕行
- * 侧”时，才要求双 ROI 的近期观测和候选走廊净空证据。StabilizeAction 负责
- * 风险升级立即生效、风险降低延迟确认和左右反转滞回。
+ * 规划器只消费 tracker 输出，不直接读取神经网络结果。动作由稳定距离和目标
+ * 横向位置决定：中央远/中/近目标依次给出 clear/slow/stop；停车后用户轻微
+ * 左右试探，使目标进入侧区，规划器随即给出反方向转向。TTC 仅可保留为诊断
+ * 信息，绝不参与动作。StabilizeAction 负责风险升级、停车释放和方向滞回。
  */
 class AvoidancePlanner {
 public:
@@ -24,13 +23,12 @@ public:
     AvoidanceDecision Update(const DetectionResult& result, int view_id, int64_t timestamp_ms);
 
 public:
-    /** 一条地面通行走廊的最近障碍、净空距离、最小 TTC 和双 ROI 观测完备性。 */
+    /** 一条地面通行走廊的最近障碍、动作距离和双 ROI 观测完备性。 */
     struct Corridor {
         ZoneStatus zone;
         float clearance;
-        float min_ttc;
         bool verified;
-        Corridor() : clearance(8.0f), min_ttc(-1.0f), verified(false) {}
+        Corridor() : clearance(8.0f), verified(false) {}
     };
 
 private:
