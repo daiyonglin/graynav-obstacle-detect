@@ -1,57 +1,128 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="920" viewBox="0 0 1800 920" role="img" aria-labelledby="title desc">
-  <title id="title">GrayNav embedded obstacle-avoidance system</title>
-  <desc id="desc">End-to-end system from mono capture through one-model inference, CPU postprocessing, stable guidance, Aurora, serial, and voice.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1080" viewBox="0 0 1900 1080" role="img" aria-labelledby="title desc">
+  <title id="title">GrayNav embedded assistive navigation system</title>
+  <desc id="desc">Research-style end-to-end system architecture from monochrome image capture to stable obstacle-avoidance guidance.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#34495e"/></marker>
-    <filter id="shadow" x="-15%" y="-15%" width="130%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#17202a" flood-opacity="0.13"/></filter>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M1 1 L11 6 L1 11 Z" fill="#26384a"/>
+    </marker>
+    <filter id="shadow" x="-12%" y="-15%" width="124%" height="135%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#102a43" flood-opacity="0.13"/>
+    </filter>
     <style>
-      .title{font:700 31px Arial,sans-serif;fill:#17202a}.subtitle{font:400 17px Arial,sans-serif;fill:#566573}
-      .section{font:700 17px Arial,sans-serif;fill:#34495e;letter-spacing:.6px}.head{font:700 18px Arial,sans-serif;fill:#17202a}
-      .body{font:400 14px Arial,sans-serif;fill:#2c3e50}.mono{font:600 13px 'Courier New',monospace;fill:#1f618d}
-      .panel{fill:#fff;stroke:#aeb6bf;stroke-width:1.4;stroke-dasharray:8 6;rx:14}.box{stroke-width:1.5;rx:10;filter:url(#shadow)}
-      .arrow{fill:none;stroke:#34495e;stroke-width:2.2;marker-end:url(#arrow)}.feedback{fill:none;stroke:#7f8c8d;stroke-width:1.8;stroke-dasharray:7 6;marker-end:url(#arrow)}
+      .title{font:800 52px Arial,Helvetica,sans-serif;fill:#102a43}
+      .subtitle{font:700 26px Arial,Helvetica,sans-serif;fill:#52667a}
+      .section{font:800 25px Arial,Helvetica,sans-serif;fill:#334e68;letter-spacing:.8px}
+      .head{font:800 29px Arial,Helvetica,sans-serif;fill:#102a43}
+      .body{font:700 22px Arial,Helvetica,sans-serif;fill:#334e68}
+      .small{font:700 20px Arial,Helvetica,sans-serif;fill:#627d98}
+      .mono{font:700 21px 'Courier New',monospace;fill:#0b5f8a}
+      .panel{fill:#fbfdff;stroke:#9fb3c8;stroke-width:2;stroke-dasharray:10 8;rx:18}
+      .box{stroke-width:2.2;rx:16;filter:url(#shadow)}
+      .arrow{fill:none;stroke:#26384a;stroke-width:4;marker-end:url(#arrow)}
+      .branch{fill:none;stroke:#26384a;stroke-width:4}
+      .tag{fill:#eef4f8;stroke:#bcccdc;stroke-width:1.7;rx:11}
     </style>
   </defs>
-  <rect width="1800" height="920" fill="#fff"/>
-  <text x="900" y="48" text-anchor="middle" class="title">GrayNav Embedded Navigation System</text>
-  <text x="900" y="78" text-anchor="middle" class="subtitle">single-channel capture · single NPU model · uncertainty-aware CPU fusion · synchronized guidance outputs</text>
 
-  <rect x="35" y="115" width="270" height="650" class="panel"/><text x="55" y="148" class="section">SENSING &amp; HEALTH</text>
-  <rect x="70" y="195" width="200" height="105" class="box" fill="#eaf2f8" stroke="#5dade2"/>
-  <text x="170" y="228" text-anchor="middle" class="head">SC132GS Y8</text><text x="170" y="256" text-anchor="middle" class="body">720 × 1280 @ 90 fps</text><text x="170" y="280" text-anchor="middle" class="mono">mono frame</text>
-  <rect x="70" y="360" width="200" height="145" class="box" fill="#eaf2f8" stroke="#5dade2"/>
-  <text x="170" y="393" text-anchor="middle" class="head">Frame health</text><text x="170" y="421" text-anchor="middle" class="body">black-cover detection</text><text x="170" y="447" text-anchor="middle" class="body">freeze / capture / resource</text><text x="170" y="475" text-anchor="middle" class="body">automatic recovery</text>
-  <rect x="70" y="565" width="200" height="115" class="box" fill="#eaf2f8" stroke="#5dade2"/>
-  <text x="170" y="598" text-anchor="middle" class="head">ROI scheduler</text><text x="170" y="626" text-anchor="middle" class="body">UPPER ↔ LOWER</text><text x="170" y="653" text-anchor="middle" class="mono">1 × 1 × 384 × 384</text>
-  <path d="M170 300V360" class="arrow"/><path d="M170 505V565" class="arrow"/>
+  <rect width="1900" height="1080" fill="#ffffff"/>
+  <text x="950" y="58" text-anchor="middle" class="title">GrayNav Embedded Assistive Navigation System</text>
+  <text x="950" y="96" text-anchor="middle" class="subtitle">Mono sensing · one-model inference · uncertainty-aware fusion · synchronized guidance</text>
 
-  <rect x="340" y="115" width="300" height="650" class="panel"/><text x="360" y="148" class="section">ONE-MODEL INFERENCE</text>
-  <rect x="385" y="230" width="210" height="200" class="box" fill="#e8f8f5" stroke="#45b39d"/>
-  <text x="490" y="265" text-anchor="middle" class="head">A1 INT8 NPU</text><text x="490" y="298" text-anchor="middle" class="body">Mono-YOLOv8n shared trunk</text><text x="490" y="326" text-anchor="middle" class="body">Indoor8 detection</text><text x="490" y="354" text-anchor="middle" class="body">surface + ordinal depth</text><text x="490" y="382" text-anchor="middle" class="body">stair-edge evidence</text><text x="490" y="410" text-anchor="middle" class="mono">1 model_id · 7 outputs</text>
-  <rect x="385" y="510" width="210" height="105" class="box" fill="#e8f8f5" stroke="#45b39d"/>
-  <text x="490" y="543" text-anchor="middle" class="head">Contract guard</text><text x="490" y="571" text-anchor="middle" class="body">shape · order · scale · dtype</text><text x="490" y="596" text-anchor="middle" class="body">fail closed</text>
-  <path d="M305 622H350V330H385" class="arrow"/><path d="M490 430V510" class="arrow"/>
+  <!-- Stage 1 -->
+  <rect x="40" y="145" width="280" height="650" class="panel"/>
+  <text x="65" y="182" class="section">1 · SENSING</text>
+  <rect x="75" y="225" width="210" height="135" class="box" fill="#e8f3fb" stroke="#4f9bc6"/>
+  <text x="180" y="268" text-anchor="middle" class="head">SC132GS</text>
+  <text x="180" y="308" text-anchor="middle" class="body">Y8 video stream</text>
+  <text x="180" y="338" text-anchor="middle" class="mono">720×1280 @ 90 fps</text>
+  <rect x="75" y="420" width="210" height="145" class="box" fill="#e8f3fb" stroke="#4f9bc6"/>
+  <text x="180" y="463" text-anchor="middle" class="head">Frame health</text>
+  <text x="180" y="503" text-anchor="middle" class="body">black-cover · freeze</text>
+  <text x="180" y="537" text-anchor="middle" class="body">capture · resource</text>
+  <rect x="75" y="625" width="210" height="115" class="box" fill="#e8f3fb" stroke="#4f9bc6"/>
+  <text x="180" y="668" text-anchor="middle" class="head">ROI scheduler</text>
+  <text x="180" y="708" text-anchor="middle" class="mono">LOWER · UPPER</text>
+  <path d="M180 360 V420" class="arrow"/>
+  <path d="M180 565 V625" class="arrow"/>
 
-  <rect x="675" y="115" width="570" height="650" class="panel"/><text x="695" y="148" class="section">CPU POSTPROCESS &amp; FUSION</text>
-  <rect x="710" y="190" width="220" height="155" class="box" fill="#f4ecf7" stroke="#a569bd"/>
-  <text x="820" y="223" text-anchor="middle" class="head">Object branch</text><text x="820" y="252" text-anchor="middle" class="body">sigmoid + DFL + decode</text><text x="820" y="278" text-anchor="middle" class="body">NMS + nested suppression</text><text x="820" y="304" text-anchor="middle" class="body">ROI-aware tracking</text><text x="820" y="330" text-anchor="middle" class="mono">distance evidence</text>
-  <rect x="985" y="190" width="220" height="155" class="box" fill="#fdf2e9" stroke="#e67e22"/>
-  <text x="1095" y="223" text-anchor="middle" class="head">Scene branch</text><text x="1095" y="252" text-anchor="middle" class="body">argmax + majority filter</text><text x="1095" y="278" text-anchor="middle" class="body">ordinal-depth expectation</text><text x="1095" y="304" text-anchor="middle" class="body">stair multi-evidence gate</text><text x="1095" y="330" text-anchor="middle" class="mono">surface result</text>
-  <rect x="710" y="405" width="495" height="135" class="box" fill="#fef9e7" stroke="#f4d03f"/>
-  <text x="958" y="438" text-anchor="middle" class="head">Three-zone risk fusion</text><text x="958" y="468" text-anchor="middle" class="body">object geometry + relative depth + surface occupancy</text><text x="958" y="496" text-anchor="middle" class="body">LEFT / CENTER / RIGHT · conservative conflict resolution</text><text x="958" y="522" text-anchor="middle" class="mono">AvoidanceDecision</text>
-  <rect x="710" y="600" width="495" height="105" class="box" fill="#fef9e7" stroke="#f4d03f"/>
-  <text x="958" y="633" text-anchor="middle" class="head">Temporal guidance stabilizer</text><text x="958" y="661" text-anchor="middle" class="body">range vote · action hysteresis · direction confirmation</text><text x="958" y="687" text-anchor="middle" class="mono">StableGuidance</text>
-  <path d="M640 330H710" class="arrow"/><path d="M640 330H660V268H985" class="arrow"/><path d="M820 345V405" class="arrow"/><path d="M1095 345V405" class="arrow"/><path d="M958 540V600" class="arrow"/>
+  <!-- Stage 2 -->
+  <rect x="365" y="145" width="285" height="650" class="panel"/>
+  <text x="390" y="182" class="section">2 · NPU INFERENCE</text>
+  <rect x="405" y="255" width="205" height="300" class="box" fill="#e7f7f2" stroke="#3a9d83"/>
+  <text x="508" y="302" text-anchor="middle" class="head">Unified INT8</text>
+  <text x="508" y="342" text-anchor="middle" class="head">Perception</text>
+  <text x="508" y="397" text-anchor="middle" class="body">Indoor8 objects</text>
+  <text x="508" y="435" text-anchor="middle" class="body">surface semantics</text>
+  <text x="508" y="473" text-anchor="middle" class="body">ordinal depth</text>
+  <text x="508" y="520" text-anchor="middle" class="mono">1 model_id · 7 outputs</text>
+  <rect x="405" y="625" width="205" height="115" class="box" fill="#e7f7f2" stroke="#3a9d83"/>
+  <text x="508" y="668" text-anchor="middle" class="head">Contract guard</text>
+  <text x="508" y="708" text-anchor="middle" class="body">shape · dtype · scale</text>
+  <path d="M285 682 H340 V405 H405" class="arrow"/>
+  <path d="M508 555 V625" class="arrow"/>
 
-  <rect x="1280" y="115" width="485" height="650" class="panel"/><text x="1300" y="148" class="section">SYNCHRONIZED OUTPUTS</text>
-  <rect x="1330" y="190" width="385" height="115" class="box" fill="#ebf5fb" stroke="#3498db"/>
-  <text x="1522" y="223" text-anchor="middle" class="head">Aurora UVC + OSD</text><text x="1522" y="251" text-anchor="middle" class="body">action · range · direction · ≤2 boxes</text><text x="1522" y="280" text-anchor="middle" class="body">gated stair-edge overlay</text>
-  <rect x="1330" y="365" width="385" height="115" class="box" fill="#ebf5fb" stroke="#3498db"/>
-  <text x="1522" y="398" text-anchor="middle" class="head">Navigation serial</text><text x="1522" y="426" text-anchor="middle" class="body">frame · action · direction · class · distance</text><text x="1522" y="455" text-anchor="middle" class="body">risk · three-zone summary</text>
-  <rect x="1330" y="540" width="385" height="115" class="box" fill="#ebf5fb" stroke="#3498db"/>
-  <text x="1522" y="573" text-anchor="middle" class="head">SYN6288 voice</text><text x="1522" y="601" text-anchor="middle" class="body">straight · slow · stop · left · right · fault</text><text x="1522" y="630" text-anchor="middle" class="body">asynchronous latest-action mailbox</text>
-  <path d="M1205 652H1270V248H1330" class="arrow"/><path d="M1205 652H1270V422H1330" class="arrow"/><path d="M1205 652H1330" class="arrow"/>
+  <!-- Stage 3 -->
+  <rect x="695" y="145" width="385" height="650" class="panel"/>
+  <text x="720" y="182" class="section">3 · CPU EVIDENCE FUSION</text>
+  <rect x="735" y="225" width="305" height="160" class="box" fill="#f2eafb" stroke="#8b62aa"/>
+  <text x="888" y="268" text-anchor="middle" class="head">Object decoding</text>
+  <text x="888" y="309" text-anchor="middle" class="body">sigmoid · DFL · decode · NMS</text>
+  <text x="888" y="346" text-anchor="middle" class="body">tracking · class stabilization</text>
+  <rect x="735" y="445" width="305" height="160" class="box" fill="#fcefe5" stroke="#d56f2a"/>
+  <text x="888" y="488" text-anchor="middle" class="head">Scene decoding</text>
+  <text x="888" y="529" text-anchor="middle" class="body">surface filtering · relative depth</text>
+  <text x="888" y="566" text-anchor="middle" class="body">gated structural-risk evidence</text>
+  <rect x="735" y="665" width="305" height="75" class="box" fill="#fff7df" stroke="#d9a514"/>
+  <text x="888" y="711" text-anchor="middle" class="head">Range fusion</text>
+  <path d="M1040 305 H1060 V702 H1040" class="arrow"/>
+  <path d="M888 605 V665" class="arrow"/>
+  <circle cx="675" cy="682" r="7" fill="#26384a"/>
+  <path d="M610 682 H675" class="branch"/>
+  <path d="M675 682 V305 H735" class="arrow"/>
+  <path d="M675 682 V525 H735" class="arrow"/>
 
-  <path d="M1522 655V820H170V680" class="feedback"/>
-  <text x="900" y="855" text-anchor="middle" class="body">Fault state bypasses navigation output and is broadcast consistently to OSD, serial, and voice.</text>
+  <!-- Stage 4 -->
+  <rect x="1125" y="145" width="335" height="650" class="panel"/>
+  <text x="1150" y="182" class="section">4 · NAVIGATION</text>
+  <rect x="1165" y="235" width="255" height="190" class="box" fill="#fff7df" stroke="#d9a514"/>
+  <text x="1293" y="278" text-anchor="middle" class="head">Three-zone planner</text>
+  <text x="1293" y="320" text-anchor="middle" class="body">LEFT · CENTER · RIGHT</text>
+  <text x="1293" y="358" text-anchor="middle" class="body">distance + occupancy</text>
+  <text x="1293" y="394" text-anchor="middle" class="mono">AvoidanceDecision</text>
+  <rect x="1165" y="500" width="255" height="175" class="box" fill="#fff7df" stroke="#d9a514"/>
+  <text x="1293" y="543" text-anchor="middle" class="head">Guidance stabilizer</text>
+  <text x="1293" y="584" text-anchor="middle" class="body">range voting · hysteresis</text>
+  <text x="1293" y="621" text-anchor="middle" class="body">direction confirmation</text>
+  <text x="1293" y="654" text-anchor="middle" class="mono">StableGuidance</text>
+  <path d="M1040 702 H1102 V330 H1165" class="arrow"/>
+  <path d="M1293 425 V500" class="arrow"/>
+
+  <!-- Stage 5 -->
+  <rect x="1505" y="145" width="350" height="650" class="panel"/>
+  <text x="1530" y="182" class="section">5 · GUIDANCE OUTPUTS</text>
+  <circle cx="1483" cy="405" r="7" fill="#26384a"/>
+  <path d="M1420 588 H1483" class="branch"/>
+  <path d="M1483 285 V695" class="branch"/>
+
+  <rect x="1545" y="220" width="270" height="130" class="box" fill="#e8f3fb" stroke="#4f9bc6"/>
+  <text x="1680" y="263" text-anchor="middle" class="head">Aurora OSD</text>
+  <text x="1680" y="304" text-anchor="middle" class="body">action · range · direction</text>
+  <rect x="1545" y="425" width="270" height="130" class="box" fill="#e8f3fb" stroke="#4f9bc6"/>
+  <text x="1680" y="468" text-anchor="middle" class="head">Navigation serial</text>
+  <text x="1680" y="509" text-anchor="middle" class="body">objects · distance · zones</text>
+  <rect x="1545" y="630" width="270" height="130" class="box" fill="#e8f3fb" stroke="#4f9bc6"/>
+  <text x="1680" y="673" text-anchor="middle" class="head">SYN6288 voice</text>
+  <text x="1680" y="714" text-anchor="middle" class="body">straight · slow · stop · turn</text>
+  <path d="M1483 285 H1545" class="arrow"/>
+  <path d="M1483 490 H1545" class="arrow"/>
+  <path d="M1483 695 H1545" class="arrow"/>
+
+  <!-- Global safety rail -->
+  <rect x="40" y="850" width="1815" height="140" class="box" fill="#f3f6f8" stroke="#7b8794"/>
+  <text x="90" y="902" class="head">Safety supervisor</text>
+  <text x="90" y="946" class="body">Camera, model, resource, and UART faults are isolated from the inference loop and mapped to one consistent SYSTEM_FAULT state.</text>
+  <rect x="1450" y="888" width="330" height="58" class="tag"/>
+  <text x="1615" y="925" text-anchor="middle" class="mono">CLEAR · SLOW · STOP · LEFT · RIGHT</text>
+
+  <text x="950" y="1040" text-anchor="middle" class="subtitle">All presentation channels consume the same temporally stabilized navigation decision</text>
 </svg>

@@ -1,15 +1,15 @@
 # GrayNav: True-Monocular Unified Perception for Indoor Assistive Navigation
 
 <p align="center">
-  <b>单通道目标检测 · 路面理解 · 台阶感知 · 相对深度 · A1 边缘部署</b>
+  <b>单通道目标检测 · 场景理解 · 相对深度 · 稳定避障 · A1 边缘部署</b>
 </p>
 
-GrayNav 是面向视障辅助导航的单目灰度综合感知系统。系统以 SC132GS Y8 图像为唯一视觉输入，在一个共享骨干网络中联合完成室内障碍物检测、地面/阻挡面/台阶语义分割、16 级相对深度估计与台阶边缘响应，并在 Flyingchip A1 上通过单个 INT8 模型实时运行。板端 CPU 将模型输出与几何测距、时序跟踪、三区通行性和故障保护融合，统一生成 `CLEAR / SLOW / STOP / LEFT / RIGHT / SYSTEM_FAULT` 指令，并同步驱动 Aurora 灰度 OSD、串口和 SYN6288 语音链路。
+GrayNav 是面向视障辅助导航的单目灰度综合感知系统。系统以 SC132GS Y8 图像为唯一视觉输入，在一个共享骨干网络中联合完成室内障碍物检测、可通行区域与阻挡面理解、16 级相对深度估计和辅助结构风险响应，并在 Flyingchip A1 上通过单个 INT8 模型实时运行。板端 CPU 将模型输出与几何测距、时序跟踪、三区通行性和故障保护融合，统一生成 `CLEAR / SLOW / STOP / LEFT / RIGHT / SYSTEM_FAULT` 指令，并同步驱动 Aurora 灰度 OSD、串口和 SYN6288 语音链路。
 
 ## Highlights
 
 - **True-mono end-to-end contract.** 训练、ONNX、量化校准和板端输入始终保持 `1×1×384×384`；RGB 预训练检测器通过 `W_gray = W_R + W_G + W_B` 等价折叠为单通道首层。
-- **One model, multiple safety cues.** 一个 YOLOv8n 共享骨干同时输出 8 类室内目标、4 类场景语义、16 级相对深度和台阶边缘，板端仅加载一个 `.m1model`、分配一个 `model_id`。
+- **One model, multiple safety cues.** 一个 YOLOv8n 共享骨干同时输出 8 类室内目标、4 类场景语义、16 级相对深度和辅助结构边缘，板端仅加载一个 `.m1model`、分配一个 `model_id`。
 - **Non-random transfer initialization.** 检测分支继承官方 COCO YOLOv8n 权重，场景与深度分支继承 GrayNav SurfaceDepth E3 权重；新增兼容层采用近似恒等初始化。
 - **A1-safe deployment graph.** NPU 图只保留静态 Conv/BN/ReLU/Add/Concat/Pool/Resize 等安全算子；DFL、NMS、ArgMax、深度期望、跟踪和决策在 CPU 执行。
 - **Uncertainty-aware navigation.** 几何距离、场景相对深度、目标轨迹和三区通行性采用保守融合，避免把未经物理标定的单目结果宣称为精密米制测量。
@@ -29,7 +29,7 @@ GrayNav 是面向视障辅助导航的单目灰度综合感知系统。系统以
 |---|---|
 | `0..3` | `ground_candidate / blocked_surface / step_or_drop / unknown_other` |
 | `4..19` | 0.3–8.0 m 对数间隔的 16 级相对深度 logits |
-| `20` | stair-edge response |
+| `20` | auxiliary structural-edge response |
 
 检测类别为 `person / chair / dining_table / backpack / handbag / suitcase / couch / bench`。普通未命名障碍仍可由 `blocked_surface + relative depth` 进入通用避障逻辑。
 
@@ -48,7 +48,7 @@ GrayNav 是面向视障辅助导航的单目灰度综合感知系统。系统以
   <img src="docs/assets/system_architecture.svg" width="100%" alt="GrayNav embedded system architecture" />
 </p>
 
-720×1280 Y8 视频以 `LOWER → LOWER → UPPER` 的 ROI 周期送入同一网络：下方视野强化地面、台阶与近场障碍，上方视野补充人体和家具检测。CPU 依次完成 raw-head 解码、DFL、NMS、目标跟踪、场景多数滤波、台阶多证据确认、距离融合、三区规划和非对称时序稳定。详见 [系统与算法](docs/SYSTEM.md) 和 [模型方法](docs/METHOD.md)。
+720×1280 Y8 视频以 `LOWER → LOWER → UPPER` 的 ROI 周期送入同一网络：下方视野强化可通行区域、阻挡面与近场障碍，上方视野补充人体和家具检测。CPU 依次完成 raw-head 解码、DFL、NMS、目标跟踪、场景滤波、相对深度解码、距离融合、三区规划和非对称时序稳定。辅助结构响应只作为道路风险的补充证据，不单独触发高风险动作。详见 [系统与算法](docs/SYSTEM.md) 和 [模型方法](docs/METHOD.md)。
 
 ## Quantitative Results
 
@@ -65,20 +65,17 @@ GrayNav 是面向视障辅助导航的单目灰度综合感知系统。系统以
 | Dining-table AP50 | 0.6112 |
 | Couch AP50 | 0.6701 |
 
-### Scene, stair and relative depth
+### Scene understanding and relative depth
 
 | Metric | Result |
 |---|---:|
 | Ground IoU | 0.5731 |
 | Blocked-surface IoU | 0.5735 |
-| Step F1 | **0.7055** |
-| Stair-edge F1 | 0.0805 |
-| No-stair step false-positive rate | 0.1244 |
 | Depth AbsRel | 0.3668 |
 | Depth δ1 | 0.4835 |
 | Near/far ordering accuracy | **0.8348** |
 
-独立 stair-edge 指标表明单边缘输出不适合单独触发停车，因此板端要求语义区域、水平边缘、深度跳变与时序一致性共同确认。量化转换的 7 个输出平均余弦相似度为 `0.9413–0.9946`，所有逐样本输出均不低于 `0.9160`。完整记录见 [结果与证据](docs/RESULTS.md) 和 [`results/a1_conversion.json`](results/a1_conversion.json)。
+结构风险分支保留为辅助道路证据，并由语义、深度和时序一致性共同门控；系统核心能力仍以目标检测、阻挡面理解、相对深度和稳定导航为主。量化转换的 7 个输出平均余弦相似度为 `0.9413–0.9946`，所有逐样本输出均不低于 `0.9160`。完整指标与能力边界见 [结果与证据](docs/RESULTS.md) 和 [`results/a1_conversion.json`](results/a1_conversion.json)。
 
 ## Repository Layout
 
@@ -181,7 +178,7 @@ powershell -ExecutionPolicy Bypass -File board/sync_to_sdk.ps1 `
 
 ## Navigation and Safety Boundary
 
-板端公开米制距离是融合估计值，用于阈值决策和调试，不是经标定测量仪器输出。最终策略采用 `<0.80 m → STOP`、`0.80–1.50 m → SLOW`、`≥1.50 m → CLEAR`；侧方障碍在 1.50 m 内优先给出反向绕行建议。台阶、异常和系统故障具有更高优先级。
+板端公开米制距离是融合估计值，用于阈值决策和调试，不是经标定测量仪器输出。最终策略采用 `<0.80 m → STOP`、`0.80–1.50 m → SLOW`、`≥1.50 m → CLEAR`；侧方障碍在 1.50 m 内优先给出反向绕行建议。持续结构风险、异常和系统故障采用更保守的决策优先级。
 
 GrayNav 是研究与工程验证系统，不构成医疗器械或独立出行安全保证。测试人员不应闭眼或在无人保护条件下依赖系统行走。
 
