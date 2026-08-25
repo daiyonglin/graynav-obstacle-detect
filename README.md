@@ -1,240 +1,195 @@
-# GrayNav 单目灰度综合避障系统
+# GrayNav: True-Monocular Unified Perception for Indoor Assistive Navigation
 
-GrayNav 是面向视障辅助导航场景的边缘端感知原型，运行平台为 Flyingchip A1 Vision Pi，输入来自 SC132GS 单通道灰度相机。本仓库管理板端应用、模型训练与转换脚本、灰度 OSD、串口/语音接口以及可复现的实验记录；完整 A1 SDK、公开数据集、训练输出和 Buildroot 产物不进入 Git。
+<p align="center">
+  <b>单通道目标检测 · 路面理解 · 台阶感知 · 相对深度 · A1 边缘部署</b>
+</p>
 
-> 安全边界：GrayNav 当前是研究与演示原型，不应作为无人陪同出行的唯一安全依据。学习深度只提供 `NEAR / MID / FAR / UNKNOWN` 相对证据，不对外播报米制距离。
+GrayNav 是面向视障辅助导航的单目灰度综合感知系统。系统以 SC132GS Y8 图像为唯一视觉输入，在一个共享骨干网络中联合完成室内障碍物检测、地面/阻挡面/台阶语义分割、16 级相对深度估计与台阶边缘响应，并在 Flyingchip A1 上通过单个 INT8 模型实时运行。板端 CPU 将模型输出与几何测距、时序跟踪、三区通行性和故障保护融合，统一生成 `CLEAR / SLOW / STOP / LEFT / RIGHT / SYSTEM_FAULT` 指令，并同步驱动 Aurora 灰度 OSD、串口和 SYN6288 语音链路。
 
-## 当前状态
+## Highlights
 
-| 模块 | 状态 | 说明 |
-|---|---|---|
-| 板上回退版本 | 已部署、受保护 | 真单通道 ROD25 YOLOv8n 检测、跟踪、几何测距、避障决策、Aurora OSD 和 SYN6288 语音 |
-| COCO80 + SurfaceDepth 双模型候选 | 已烧录、板测失败 | 人体检测可运行，但 SurfaceDepth 进入降级状态；道路/墙面/台阶没有有效结果，分时调度与现有 OSD 不再作为目标架构 |
-| SurfaceDepth E3 | 已训练并完成 A1 INT8 转换 | 训练与转换证据保留，作为统一模型道路/深度分支的设计基线；独立双模型部署停止推进 |
-| 室内单模型 | 已训练、已导出 | 使用 COCO 稀疏室内子集与既有 ADE20K、StairNetV3、NYUv2；室内 8 类检测、4 类场景、16 级相对深度和台阶边缘联合训练 |
-| 板端单模型后处理 | 已完成稳定化并通过交叉编译 | 一个 `model_id`、一次 NPU 推理；增加 top-1 解码、嵌套框抑制、ROI 感知跟踪、三级台阶确认和非对称稳定决策 |
-| 最终统一 `.m1model` | 已完成官方 A1 INT8 转换 | 4,150,950 bytes，SHA256 `33EEC832...5D66DA8`；7 个输出整体余弦相似度均大于 0.94，最低单样本为 0.9160 |
-| 统一稳定化候选镜像 | 已烧录并完成多轮实板测试 | rootfs 仅含一个统一模型；人体、椅子等检测及 Aurora/串口链路已实测，SYN6288 因语音电路尚未接入而仍待硬件听测 |
-| Aurora | 不修改客户端 | Layer 0 清空，Layer 3 仅用于受门控的台阶边缘，Layer 4 最多两个稳定框；左上角只显示动作、距离档位和方位 |
+- **True-mono end-to-end contract.** 训练、ONNX、量化校准和板端输入始终保持 `1×1×384×384`；RGB 预训练检测器通过 `W_gray = W_R + W_G + W_B` 等价折叠为单通道首层。
+- **One model, multiple safety cues.** 一个 YOLOv8n 共享骨干同时输出 8 类室内目标、4 类场景语义、16 级相对深度和台阶边缘，板端仅加载一个 `.m1model`、分配一个 `model_id`。
+- **Non-random transfer initialization.** 检测分支继承官方 COCO YOLOv8n 权重，场景与深度分支继承 GrayNav SurfaceDepth E3 权重；新增兼容层采用近似恒等初始化。
+- **A1-safe deployment graph.** NPU 图只保留静态 Conv/BN/ReLU/Add/Concat/Pool/Resize 等安全算子；DFL、NMS、ArgMax、深度期望、跟踪和决策在 CPU 执行。
+- **Uncertainty-aware navigation.** 几何距离、场景相对深度、目标轨迹和三区通行性采用保守融合，避免把未经物理标定的单目结果宣称为精密米制测量。
+- **Bounded presentation path.** 灰度 OSD 采用固定资源和图元预算；串口、OSD 与语音消费同一稳定决策，且推理、UART 或相机异常均有降级保护。
 
-2026-08-11 双模型候选已经烧录并实测。串口持续报告 `perception=DETECTION_DEGRADED_SURFACE_DEPTH`、`degraded=1` 和 `hazard=UNKNOWN`，说明板端实际运行的是 detector-only 降级链路，而不是完整道路感知。Aurora 同时出现密集黑点、文字重叠和难以理解的高频串口输出。该镜像被判定为失败实验，不得标记为可用候选。
+## Architecture
 
-下一阶段改为单一共享骨干模型。相机输入、训练、ONNX、量化校准和板端张量必须全部保持真单通道；不再通过 `[G,G,G]` 灰度复制运行检测器，也不再常驻两个 `model_id` 或采用 `D/D/D/SD` 双模型分时调度。
+### Unified perception network
 
-2026-08-14 首次统一模型板测确认模型和七输出推理链路正常，但原始后处理导致状态高频跳变、台阶过度触发和难以理解的 Layer 3 图形。本轮保留模型权重，改由 `StableGuidance` 统一驱动 OSD、串口和语音；台阶必须由语义、水平边缘和深度跳变联合时序确认，床沿或椅背的单一边缘只能进入疑似状态，不能直接触发 `STOP/STAIR`。实现与待测边界见 [板端稳定化证据](docs/GRAYNAV_UNIFIED_BOARD_STABILIZATION_2026-08-14.md)。
+<p align="center">
+  <img src="docs/assets/model_architecture.svg" width="100%" alt="GrayNav unified perception model architecture" />
+</p>
 
-2026-08-21 调整侧方避障：左侧稳定障碍优先右转，右侧稳定障碍优先左转；仅路面未知不再
-把转向直接升级为停止。语音改为只播报“直行、减速、停下、左转、右转、异常”六种动作，
-不再播报物体或场景描述。实现与复测步骤见
-[侧方转向与纯动作语音调优证据](docs/GRAYNAV_SIDE_TURN_ACTION_VOICE_TUNING_2026-08-21.md)。
+输入为 `images: 1×1×384×384`。共享 Mono-YOLOv8n Backbone 与 PAN/FPN 产生 P3/P4/P5 特征；检测头保留三个尺度的原始分类和 DFL 回归输出。P3 细节与 P4 语义通过轻量融合分支生成 `scene_logits: 1×21×48×48`：
 
-## 目标系统架构
-
-```mermaid
-flowchart LR
-    CAM["SC132GS Mono<br/>720 x 1280 Y8"] --> PRE["单通道 ROI<br/>1 x 1 x 384 x 384"]
-    PRE --> NET["GrayNav Unified Perception<br/>Mono-YOLOv8n 共享骨干与颈部"]
-
-    NET --> DET["室内 8 类 raw 检测头<br/>P3 / P4 / P5"]
-    NET --> PACK["packed scene_logits<br/>1 x 21 x 48 x 48"]
-
-    PACK --> SEG["0..3 场景分割"]
-    PACK --> DEP["4..19 相对深度"]
-    PACK --> EDGE["20 台阶边缘"]
-
-    DET --> DPOST["CPU: DFL / NMS / Tracker<br/>几何距离与 TTC"]
-    SEG --> SPOST["CPU: ArgMax / 多数滤波<br/>走廊比例与时序投票"]
-    DEP --> ZPOST["CPU: 分组概率 / 中位数<br/>NEAR / MID / FAR / UNKNOWN"]
-    EDGE --> SPOST
-
-    DPOST --> FUSE["保守多源避障融合"]
-    SPOST --> FUSE
-    ZPOST --> FUSE
-
-    FUSE --> DEC["原始 AvoidanceDecision<br/>clear / slow / stop / turn_left / turn_right"]
-    DEC --> STABLE["StableGuidance<br/>距离投票 / 方位确认 / 非对称进退"]
-    STABLE --> OSD["Aurora 两行组合 HUD + 最多两框"]
-    STABLE --> SERIAL["变化触发 + 2 s 心跳串口"]
-    STABLE --> VOICE["SYN6288 事件驱动语音"]
-```
-
-统一模型详细契约、训练门控和板端重构边界见 [单模型重构设计](docs/GRAYNAV_UNIFIED_PERCEPTION_REDESIGN_2026-08-11.md)。
-
-当前已烧录实现的逐层模型结构、完整后处理流程、测距推导、故障保护与核心参数见
-[当前统一模型与系统架构说明](docs/GRAYNAV_CURRENT_MODEL_SYSTEM_ARCHITECTURE_2026-08-16.md)。
-
-### 最终统一模型契约
-
-```text
-input
-  images        float32  1 x 1 x 384 x 384  range [0, 1]
-
-detection outputs
-  cls_p3 / reg_p3   1 x 8 x 48 x 48 / 1 x 64 x 48 x 48
-  cls_p4 / reg_p4   1 x 8 x 24 x 24 / 1 x 64 x 24 x 24
-  cls_p5 / reg_p5   1 x 8 x 12 x 12 / 1 x 64 x 12 x 12
-
-packed scene output
-  scene_logits      1 x 21 x 48 x 48
-  channels 0..3     ground / blocked / step_or_drop / unknown_other
-  channels 4..19    16 ordinal relative-depth levels
-  channel 20        stair edge
-
-indoor detection order
-  person / chair / dining_table / backpack / handbag / suitcase / couch / bench
-```
-
-七个输出张量来自同一次推理，并不代表七个模型。场景、深度与台阶边缘打包到一个
-`scene_logits`，用于规避失败镜像中 E3 双输出绑定不完整的问题。普通纸箱不建立缺少
-预训练来源的新类别，而由 `blocked_surface + depth` 形成 `GENERIC_OBSTACLE`。
-
-正式统一模型的官方 A1 转换输出与整体余弦相似度如下（输出顺序也是板端启动时的硬契约）：
-
-| order | 输出 | shape | cosine |
-|---:|---|---|---:|
-| 0 | `cls_p3` | `1×8×48×48` | 0.99459 |
-| 1 | `reg_p3` | `1×64×48×48` | 0.96371 |
-| 2 | `cls_p4` | `1×8×24×24` | 0.99113 |
-| 3 | `reg_p4` | `1×64×24×24` | 0.94126 |
-| 4 | `cls_p5` | `1×8×12×12` | 0.99063 |
-| 5 | `reg_p5` | `1×64×12×12` | 0.96837 |
-| 6 | `scene_logits` | `1×21×48×48` | 0.96974 |
-
-`reg_p4` 是量化一致性最弱的分支，实板演示时需要重点观察中等尺寸目标的框稳定性；但它仍通过了本次最低 `0.90` 的转换门槛。
-
-### SurfaceDepth E3 基线契约
-
-```text
-input
-  images        float32  1 x 1 x 256 x 256  range [0, 1]
-
-outputs
-  seg_logits    INT8     1 x 4 x 64 x 64
-  depth_logits  INT8     1 x 16 x 64 x 64
-
-surface classes
-  0 ground_candidate
-  1 blocked_surface
-  2 step_or_drop
-  3 unknown_other
-```
-
-模型始终使用真单通道输入，训练数据在加载阶段转换为灰度，板端不执行 Y8 到 BGR 的复制。E3 使用真实 `64 x 64` 细节融合分支；部署图只保留静态 Conv、ReLU、Add、Concat、Pool 和 Resize 等 A1 安全算子，Softmax、ArgMax、时序过滤和决策全部放在 CPU。
-
-## 模型证据摘要
-
-SurfaceDepth E3 选择 epoch 49 的 `best_seg.pt`。公开验证集上的主要结果如下：
-
-| 指标 | 结果 |
-|---|---:|
-| ground IoU | 0.6209 |
-| blocked IoU | 0.6441 |
-| step precision / recall / F1 | 0.7777 / 0.9318 / 0.8478 |
-| 危险真值误判为 ground | 3.37% |
-| NYUv2 AbsRel / delta1 | 0.2416 / 0.6480 |
-| 近远排序准确率 | 0.8778 |
-
-这些指标说明模型具备可用于板端实验的分割和相对深度能力，但 ADE20K 小台阶召回、楼梯外部误报和跨相机域泛化仍有限，因此板端必须保留 `UNKNOWN_OTHER`、时序投票、走廊约束以及检测/几何信息融合。
-
-正式 ONNX 与官方 A1 INT8 转换均已完成：
-
-| 产物/检查 | 结果 |
+| 通道 | 语义 |
 |---|---|
-| ONNX | 4,593,443 bytes，静态 opset 12，A1 本地算子预审通过 |
-| PyTorch / ONNX | 分割网格一致率 1.0000；深度等级一致率 0.9999976 |
-| INT8 `.m1model` | 1,459,634 bytes |
-| 官方余弦相似度 | `seg_logits=0.98599`，`depth_logits=0.99582` |
-| FP32 / INT8 远近等级 | 单元格一致率 95.61%（离线补充分析） |
+| `0..3` | `ground_candidate / blocked_surface / step_or_drop / unknown_other` |
+| `4..19` | 0.3–8.0 m 对数间隔的 16 级相对深度 logits |
+| `20` | stair-edge response |
 
-完整哈希、转换契约与部署限制见 [SurfaceDepth E3 部署证据](docs/GRAYNAV_SURFACE_DEPTH_E3_DEPLOYMENT_EVIDENCE.md)。训练和门控实验见 [E0-E3 实验说明](docs/GRAYNAV_SURFACE_DEPTH_OPTIMIZATION_EXPERIMENTS.md)，本地集成与上板顺序见 [后处理、构建和板测计划](docs/GRAYNAV_LOCAL_INTEGRATION_AND_BOARD_TEST_PLAN_2026-08-11.md)。
+检测类别为 `person / chair / dining_table / backpack / handbag / suitcase / couch / bench`。普通未命名障碍仍可由 `blocked_surface + relative depth` 进入通用避障逻辑。
 
-## 仓库结构
+完整输出契约：
+
+| Tensor | Shape |
+|---|---:|
+| `cls_p3 / reg_p3` | `1×8×48×48 / 1×64×48×48` |
+| `cls_p4 / reg_p4` | `1×8×24×24 / 1×64×24×24` |
+| `cls_p5 / reg_p5` | `1×8×12×12 / 1×64×12×12` |
+| `scene_logits` | `1×21×48×48` |
+
+### Embedded navigation system
+
+<p align="center">
+  <img src="docs/assets/system_architecture.svg" width="100%" alt="GrayNav embedded system architecture" />
+</p>
+
+720×1280 Y8 视频以 `LOWER → LOWER → UPPER` 的 ROI 周期送入同一网络：下方视野强化地面、台阶与近场障碍，上方视野补充人体和家具检测。CPU 依次完成 raw-head 解码、DFL、NMS、目标跟踪、场景多数滤波、台阶多证据确认、距离融合、三区规划和非对称时序稳定。详见 [系统与算法](docs/SYSTEM.md) 和 [模型方法](docs/METHOD.md)。
+
+## Quantitative Results
+
+统一模型的离线验证结果如下。检测数据由 VOC2007 Indoor8 子集与 COCO128 稀有类别重放组成；场景与深度使用 ADE20K、StairNetV3 和 NYU Depth V2 官方划分。
+
+### Detection and partial-person robustness
+
+| Metric | Result |
+|---|---:|
+| Person AP50 | **0.7712** |
+| Person recall | **0.9199** |
+| Partial-person recall | **0.9598** |
+| Chair AP50 | 0.5831 |
+| Dining-table AP50 | 0.6112 |
+| Couch AP50 | 0.6701 |
+
+### Scene, stair and relative depth
+
+| Metric | Result |
+|---|---:|
+| Ground IoU | 0.5731 |
+| Blocked-surface IoU | 0.5735 |
+| Step F1 | **0.7055** |
+| Stair-edge F1 | 0.0805 |
+| No-stair step false-positive rate | 0.1244 |
+| Depth AbsRel | 0.3668 |
+| Depth δ1 | 0.4835 |
+| Near/far ordering accuracy | **0.8348** |
+
+独立 stair-edge 指标表明单边缘输出不适合单独触发停车，因此板端要求语义区域、水平边缘、深度跳变与时序一致性共同确认。量化转换的 7 个输出平均余弦相似度为 `0.9413–0.9946`，所有逐样本输出均不低于 `0.9160`。完整记录见 [结果与证据](docs/RESULTS.md) 和 [`results/a1_conversion.json`](results/a1_conversion.json)。
+
+## Repository Layout
 
 ```text
-board/
-  obstacle_detect/
-    demo_obstacle.cpp       A1 相机、NPU、调度与系统入口
-    include/                公共数据结构和模块接口
-    src/                    检测、分割/深度后处理、融合、OSD、语音
-    tests/                  可在主机运行的后处理与决策测试
-    app_assets/             受控模型与 OSD 资源
-    scripts/                镜像候选归档等辅助脚本
-  buildroot/                SDK Buildroot 集成文件
-
-model_optimization/
-  segmentation/             单通道 Fast-SCNN / SurfaceDepth 模型
-  unified/                  室内单模型网络与固定 7 输出契约
-  scripts/                  数据准备、训练、评估、导出和审计
-  configs/                  A1 转换预处理配置
-  tests/                    数据映射、模型和实验门控测试
-
-docs/                       设计、实验、部署证据和交接文档
+graynav-obstacle-detect/
+├── training/                  # 数据准备、训练、评估、可视化、ONNX 与量化数据构建
+│   ├── models/                # SurfaceDepth 与统一感知网络核心实现
+│   ├── scripts/               # 可复现命令行工具
+│   └── tests/                 # 模型、数据映射、损失和导出契约测试
+├── board/                     # A1 C++ 推理、测距、跟踪、规划、OSD、串口和语音
+│   ├── obstacle_detect/       # 可直接同步到官方 SDK 的应用
+│   ├── rootfs_overlay/        # 启动脚本
+│   └── sdk_overlay/           # Buildroot package 配置
+├── weights/                   # 预训练初始化、最终 checkpoint 与 ONNX
+├── results/                   # 转换审计和发布证据
+└── docs/                      # 方法、系统、复现和结果说明
 ```
 
-## 本地开发与构建
+## Reproduction
 
-Git 仓库是代码管理副本；实际 A1 SDK 编译源位于：
+### 1. Local environment
 
-```text
-E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk
-```
-
-板端代码每次完成一个可测试目标后，必须把 `board/obstacle_detect` 的对应改动同步到 SDK：
-
-```text
-smart_software/src/app_demo/obstacle_detect/ssne_ai_demo
-```
-
-随后在 `A1_Builder` 中执行完整构建：
+推荐 Windows 11、Python 3.10、CUDA GPU。默认工作区位于 E 盘，数据、环境、缓存和运行输出不会写入仓库：
 
 ```powershell
-docker exec A1_Builder sh -lc `
-  'cd /home/smartsens_flying_chip_a1_sdk/A1_SDK_SC132GS/smartsens_sdk && ./scripts/a1_sc132gs_build.sh'
+powershell -ExecutionPolicy Bypass -File training/setup_windows.ps1 `
+  -WorkRoot E:\GrayNavWorkspace `
+  -BasePython E:\Anaconda3\python.exe
 ```
 
-候选镜像输出：
+### 2. Prepare public data
+
+检测分支使用体积较小的 VOC2007 trainval，并可加入 COCO128 稀有类重放；无需下载完整 COCO：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File training/prepare_detection_data.ps1 `
+  -WorkRoot E:\GrayNavWorkspace
+```
+
+将 `ADEChallengeData2016.zip`、`RGB-D stair dataset.zip`、`nyu_depth_v2_labeled.mat` 和 `splits.mat` 放入 `E:\GrayNavWorkspace\data\raw`，然后执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File training/prepare_scene_data.ps1 `
+  -WorkRoot E:\GrayNavWorkspace
+```
+
+### 3. Train
+
+RTX 4060 8 GB 可使用 `batch=16`、梯度累积 2 步得到有效 batch 32：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File training/train_local.ps1 `
+  -WorkRoot E:\GrayNavWorkspace `
+  -BatchSize 16 `
+  -AccumulationSteps 2
+```
+
+训练固定 `seed=42`、AdamW、初始学习率 `3e-4`、weight decay `0.01`、AMP、5 epoch 场景分支预热和 35 epoch 联合优化。命令行显示 tqdm，TensorBoard 日志写入 `E:\GrayNavWorkspace\runs\unified_indoor8_v1\tensorboard`。
+
+### 4. Evaluate and export
+
+```powershell
+E:\GrayNavWorkspace\env\Scripts\python.exe training/scripts/evaluate_unified.py --help
+E:\GrayNavWorkspace\env\Scripts\python.exe training/scripts/visualize_unified.py --help
+E:\GrayNavWorkspace\env\Scripts\python.exe training/scripts/export_unified.py --help
+E:\GrayNavWorkspace\env\Scripts\python.exe training/scripts/audit_unified_onnx.py --help
+E:\GrayNavWorkspace\env\Scripts\python.exe training/scripts/build_a1_calibration.py --help
+```
+
+详细数据契约、命令参数和转换边界见 [复现指南](docs/REPRODUCIBILITY.md)。
+
+## A1 Deployment
+
+将板端源码同步到官方 SC132GS SDK：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File board/sync_to_sdk.ps1 `
+  -SdkRoot E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk
+```
+
+在 `A1_Builder` 容器中执行 SDK 的完整 Buildroot 构建。CMake 安装白名单只允许统一模型和固定 OSD 资源进入 rootfs；发布门控要求最终 `zImage < 15 MiB`，模型 SHA256 必须为：
 
 ```text
-E:\jichuang\docker\docker_test\data\A1_SDK_SC132GS\smartsens_sdk\output\images\zImage.smartsens-m1-evb
+33eec832710706b1153f468f219c08389a52ba3d21cbdffcde32ca5e25d66da8
 ```
 
-构建成功不代表板测通过。烧录前还要核对 CMakeCache、统一模型的名称/哈希、`zImage < 15 MiB`，并为新候选单独建立归档。
+板端模块说明、环境变量与构建验证见 [`board/README.md`](board/README.md)。
 
-2026-08-16 的实板日志复核、目标绑定测距、遮挡异常保护和台阶边缘门控修复见
-[测距、异常保护与台阶提示调优证据](docs/GRAYNAV_RANGE_FAULT_STAIR_TUNING_2026-08-16.md)。
+## Model Zoo
 
-## 运行与演示原则
+| Artifact | Purpose | SHA256 |
+|---|---|---|
+| `weights/yolov8n.pt` | official COCO detector initialization | `f59b3d83...fc83b36` |
+| `weights/graynav_surface_depth_e3_epoch49.pt` | scene/depth transfer initialization | `31a305b4...5cdc2a` |
+| `weights/graynav_unified_best_safety_epoch29.pt` | selected FP32 checkpoint | `f28e5732...2645f23` |
+| `weights/graynav_unified_indoor8_scene21.onnx` | static deployment graph | `2902d0ae...37ae54` |
+| `board/.../graynav_unified_indoor8_scene21.m1model` | A1 INT8 runtime model | `33eec832...d66da8` |
 
-- NPU 每个调度帧只运行一个统一模型，不进行模型切换；上方 ROI 使用检测输出，下方 ROI 同时使用检测、道路与深度输出。
-- `step_or_drop` 只有在语义、水平边缘和深度跳变满足联合时序门控后才成为确认台阶；疑似台阶只触发慢行。
-- 深度 NEAR/MID/FAR 分组最高与次高概率差小于 `0.20` 时输出 `UNKNOWN`，决策至少为 `slow`。
-- `unknown_other` 不能作为可通行地面；检测与道路理解均稳定无风险时才允许 `clear`。
-- 任一输出契约或推理失败时进入统一感知降级，显示一个静态 `AI_FAIL` 状态，不得用失效深度驱动 `NEAR` 或反复刷屏。
-- Aurora Layer 0 始终为空，Layer 3 最多显示三个经多证据门控的台阶边缘图元，Layer 4 最多显示两个互不嵌套的稳定目标框；Layer 1/2 只显示动作、距离档位和方位，不显示容易误导演示的物体名称。
-- 正常串口格式为 `[F006390] SLOW dir=right cls=chair dist=1.64m risk=WARNING zones=L:clear,C:chair@1.64,R:clear`；状态变化时输出，稳定状态按心跳限流，张量、置信度和测距来源只在显式诊断模式输出。
+完整字节数和哈希见 [`weights/README.md`](weights/README.md) 与 [`results/release_manifest.json`](results/release_manifest.json)。
 
-## 回退保护
+## Navigation and Safety Boundary
 
-当前板上可靠回退镜像必须保持只读：
+板端公开米制距离是融合估计值，用于阈值决策和调试，不是经标定测量仪器输出。最终策略采用 `<0.80 m → STOP`、`0.80–1.50 m → SLOW`、`≥1.50 m → CLEAR`；侧方障碍在 1.50 m 内优先给出反向绕行建议。台阶、异常和系统故障具有更高优先级。
 
-```text
-bytes  = 8,214,488
-SHA256 = A7976710ECB456CB312D18F0195DCAE496ED652EFC582AB698EBC3EB7B055530
-```
+GrayNav 是研究与工程验证系统，不构成医疗器械或独立出行安全保证。测试人员不应闭眼或在无人保护条件下依赖系统行走。
 
-至少保存在：
+## Documentation
 
-```text
-E:\jichuang\files\zImage.smartsens-m1-evb
-E:\jichuang\firmware_archive\GrayNav_B3_1ch_DCE_25class_A7976710\zImage.smartsens-m1-evb
-```
-
-新构建禁止覆盖以上文件。只有完成统一模型加载、30 分钟稳定性、降级回退和功能场景测试后，才可通过 `board/obstacle_detect/scripts/archive_candidate.ps1` 归档为新候选。
-
-## 提交规则
-
-- 一个 commit 只解决一个主要目标，显式暂存文件，禁止在混合工作区使用无范围的 `git add -A`。
-- 不提交 SDK 全树、公开数据集、云端训练目录、临时压缩包或 Buildroot 输出。
-- 模型二进制只有在契约、来源、大小和 SHA256 完整记录后才允许作为受控板端资产提交。
-- C++ 改动先运行主机单元测试，再同步 SDK；完成一个实质性板端阶段后才执行完整 Docker 构建。
-- README 和状态文档必须明确区分：`已训练`、`已转换`、`已构建`、`已烧录`、`已验收`。
+- [模型方法](docs/METHOD.md)
+- [系统与后处理](docs/SYSTEM.md)
+- [复现指南](docs/REPRODUCIBILITY.md)
+- [结果与可靠性证据](docs/RESULTS.md)
+- [训练代码说明](training/README.md)
+- [A1 板端说明](board/README.md)

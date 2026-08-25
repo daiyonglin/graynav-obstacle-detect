@@ -27,9 +27,8 @@ export A1_VOICE_REOPEN_EACH_TX="${A1_VOICE_REOPEN_EACH_TX:-0}"
 export A1_VOICE_BYTE_GAP_US="${A1_VOICE_BYTE_GAP_US:-2000}"
 export A1_VOICE_POST_TX_DELAY_MS="${A1_VOICE_POST_TX_DELAY_MS:-30}"
 export A1_VOICE_PASSIVE_RX="${A1_VOICE_PASSIVE_RX:-1}"
-# Keep transaction diagnostics enabled for this board-validation image. It
-# prints one TX/DONE pair per spoken word without detector-level debug output.
-export A1_VOICE_DIAG="${A1_VOICE_DIAG:-1}"
+# Production defaults suppress transaction chatter; UART failures remain visible.
+export A1_VOICE_DIAG="${A1_VOICE_DIAG:-0}"
 export A1_VOICE_PASSIVE_RX_MS="${A1_VOICE_PASSIVE_RX_MS:-80}"
 export A1_VOICE_ACK_TIMEOUT_MS="${A1_VOICE_ACK_TIMEOUT_MS:-200}"
 export A1_VOICE_PLAY_TIMEOUT_MS="${A1_VOICE_PLAY_TIMEOUT_MS:-3000}"

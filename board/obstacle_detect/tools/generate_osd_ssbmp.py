@@ -112,24 +112,6 @@ def write_multiline_ssbmp(
         handle.write(data)
 
 
-def generate_info_assets(root: Path) -> int:
-    labels = [
-        "PERSON", "CHAIR", "TABLE", "BAG", "COUCH", "BENCH",
-        "STAIR", "STEP_CHECK", "BLOCKED", "PATH", "UNKNOWN", "AI_FAIL",
-    ]
-    ranges = ["NEAR", "MID", "FAR", "UNKNOWN"]
-    directions = ["LEFT", "FRONT", "RIGHT"]
-    count = 0
-    for label in labels:
-        first_line = "STEP CHECK" if label == "STEP_CHECK" else label.replace("_", " ")
-        for range_name in ranges:
-            for direction in directions:
-                path = root / f"INFO_{label}_{range_name}_{direction}.ssbmp"
-                write_multiline_ssbmp(path, [first_line, f"{range_name} {direction}"])
-                count += 1
-    return count
-
-
 def generate_navigation_assets(root: Path) -> int:
     """Generate guidance plus a minimal wall-only scene variant."""
     ranges = ["NEAR", "MID", "FAR", "UNKNOWN"]
@@ -161,21 +143,12 @@ def generate_navigation_assets(root: Path) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--info-only",
-        action="store_true",
-        help="Only generate the new two-line INFO_ assets; preserve legacy files.",
-    )
-    parser.add_argument(
         "--nav-only",
         action="store_true",
-        help="Only generate object-name-free NAV_<range>_<position> assets.",
+        help="Generate only object-name-free NAV_<range>_<position> assets.",
     )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / "app_assets" / "osd"
-    if args.info_only:
-        count = generate_info_assets(root)
-        print(f"generated_info_assets={count}")
-        return
     if args.nav_only:
         count = generate_navigation_assets(root)
         print(f"generated_navigation_assets={count}")
@@ -183,19 +156,6 @@ def main() -> None:
     for word in ["STOP", "SLOW", "CLEAR", "LEFT", "RIGHT"]:
         write_ssbmp(root / f"{word}.ssbmp", word, scale=10, pad_x=8, pad_y=6)
 
-    for word in [
-        "PERSON", "CHAIR", "TABLE", "BAG", "COUCH", "BENCH",
-        "STAIR", "BLOCKED", "PATH", "UNKNOWN", "AI_FAIL", "ITEM",
-    ]:
-        write_ssbmp(root / f"{word}.ssbmp", word, scale=7, pad_x=6, pad_y=5)
-
-    dirs = ["L", "C", "R", "WIDE", "LC", "CR"]
-    risks = ["NEAR", "WARN", "FAR", "UNK"]
-    for d in dirs:
-        for r in risks:
-            write_ssbmp(root / f"{d}_{r}.ssbmp", f"{d} {r}", scale=7, pad_x=6, pad_y=5)
-    count = generate_info_assets(root)
-    print(f"generated_info_assets={count}")
     nav_count = generate_navigation_assets(root)
     print(f"generated_navigation_assets={nav_count}")
 

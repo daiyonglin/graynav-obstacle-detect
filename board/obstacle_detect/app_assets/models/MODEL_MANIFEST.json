@@ -1,0 +1,17 @@
+{
+  "model": "graynav_unified_indoor8_scene21",
+  "file": "graynav_unified_indoor8_scene21.m1model",
+  "bytes": 4150950,
+  "sha256": "33eec832710706b1153f468f219c08389a52ba3d21cbdffcde32ca5e25d66da8",
+  "input": {"name": "images", "shape": [1, 1, 384, 384], "dtype": "uint8_y8"},
+  "outputs": [
+    {"name": "cls_p3", "shape": [1, 8, 48, 48]},
+    {"name": "reg_p3", "shape": [1, 64, 48, 48]},
+    {"name": "cls_p4", "shape": [1, 8, 24, 24]},
+    {"name": "reg_p4", "shape": [1, 64, 24, 24]},
+    {"name": "cls_p5", "shape": [1, 8, 12, 12]},
+    {"name": "reg_p5", "shape": [1, 64, 12, 12]},
+    {"name": "scene_logits", "shape": [1, 21, 48, 48]}
+  ],
+  "runtime_models": 1
+}

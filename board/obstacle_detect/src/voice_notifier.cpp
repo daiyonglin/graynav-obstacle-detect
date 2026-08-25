@@ -264,7 +264,7 @@ bool VoiceNotifier::InitializeFromEnv()
     use_prompt_prefix_ = getenv_bool("A1_VOICE_USE_PREFIX", false);
     reopen_each_tx_ = getenv_bool("A1_VOICE_REOPEN_EACH_TX", false);
     passive_rx_ = getenv_bool("A1_VOICE_PASSIVE_RX", true);
-    diagnostic_ = getenv_bool("A1_VOICE_DIAG", true);
+    diagnostic_ = getenv_bool("A1_VOICE_DIAG", false);
     ack_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_ACK_TIMEOUT_MS", 200));
     idle_timeout_ms_ = std::max(20, getenv_int("A1_VOICE_IDLE_TIMEOUT_MS", 180));
     recover_wait_ms_ = std::max(80, getenv_int("A1_VOICE_RECOVER_WAIT_MS", 1000));

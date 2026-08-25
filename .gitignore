@@ -9,8 +9,8 @@ venv/
 env/
 
 # Training and evaluation outputs
-model_optimization/artifacts/
-model_optimization/analysis/
+training/artifacts/
+training/analysis/
 runs/
 wandb/
 tensorboard/
@@ -35,10 +35,11 @@ data/
 *.a1model
 *.m1model
 
-# Keep the current board deployment model tracked explicitly.
-!board/obstacle_detect/app_assets/models/graynav_rod25_gray1_dce_b3_head6.m1model
-!board/obstacle_detect/app_assets/models/yolov8n80_graycopy_head6.m1model
-!board/obstacle_detect/app_assets/models/graynav_surface_depth_e3_gray1.m1model
+# Keep only the final reproducibility and board deployment weights tracked.
+!weights/graynav_unified_best_safety_epoch29.pt
+!weights/graynav_surface_depth_e3_epoch49.pt
+!weights/yolov8n.pt
+!weights/graynav_unified_indoor8_scene21.onnx
 !board/obstacle_detect/app_assets/models/graynav_unified_indoor8_scene21.m1model
 
 # SDK/build outputs

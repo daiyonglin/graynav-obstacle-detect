@@ -187,11 +187,11 @@ class DemoContractTest(unittest.TestCase):
         self.assertIn('A1_VOICE_FAULT_REPEAT_MS:-0', run)
         self.assertIn('A1_VOICE_ACTION_PROMPT_MS:-1000', run)
         self.assertIn('A1_VOICE_STOP_FOLLOWUP_HOLD_MS:-0', run)
-        self.assertIn('A1_VOICE_DIAG:-1', run)
+        self.assertIn('A1_VOICE_DIAG:-0', run)
         self.assertIn('getenv_int("A1_VOICE_INTERVAL_FRAMES", 1)', voice)
         self.assertIn('getenv_bool("A1_VOICE_REQUIRE_ACK", false)', voice)
         self.assertIn('getenv_bool("A1_VOICE_QUERY_IDLE", false)', voice)
-        self.assertIn('getenv_bool("A1_VOICE_DIAG", true)', voice)
+        self.assertIn('getenv_bool("A1_VOICE_DIAG", false)', voice)
         self.assertIn('A1_VOICE_INTERVAL_FRAMES:-1', run)
 
     def test_normal_nav_packet_is_emitted_each_inference_frame(self) -> None:

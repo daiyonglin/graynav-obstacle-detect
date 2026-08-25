@@ -1,4 +1,0 @@
-# A1 conversion input-preprocess contract for GrayNav SurfaceDepth.
-[calibrate.inputs.images]
-mean = [0]
-std = [1]

@@ -1,0 +1,33 @@
+{
+  "release": "graynav_unified_indoor8_scene21",
+  "input": {"name": "images", "shape": [1, 1, 384, 384], "format": "Y8"},
+  "runtime_models": 1,
+  "artifacts": {
+    "checkpoint": {
+      "file": "weights/graynav_unified_best_safety_epoch29.pt",
+      "bytes": 19117704,
+      "sha256": "f28e5732ce4ed2432523d2ad508a21699c2494672f44295f2de8a1d572645f23"
+    },
+    "onnx": {
+      "file": "weights/graynav_unified_indoor8_scene21.onnx",
+      "bytes": 12328061,
+      "sha256": "2902d0aede72dd21ecd3d543142ff7c125ad5e00b19b5974d090cfce9837ae54"
+    },
+    "m1model": {
+      "file": "board/obstacle_detect/app_assets/models/graynav_unified_indoor8_scene21.m1model",
+      "bytes": 4150950,
+      "sha256": "33eec832710706b1153f468f219c08389a52ba3d21cbdffcde32ca5e25d66da8"
+    },
+    "firmware": {
+      "file": "zImage.smartsens-m1-evb",
+      "bytes": 8134208,
+      "sha256": "de1c5b2fc4a311b4be9b1a402d572e15313e76323c6cb9577b132eb591b7afea"
+    }
+  },
+  "decision_thresholds_m": {"stop_below": 0.8, "slow_below": 1.5},
+  "sector_boundaries": [0.35, 0.65],
+  "quantization": {
+    "minimum_output_cosine": 0.9160173535346985,
+    "passed": true
+  }
+}

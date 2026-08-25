@@ -14,10 +14,18 @@ $startTarget = Join-Path $SdkRoot "smart_software\board\m1pro\rootfs_overlay\usr
 if (-not (Test-Path -LiteralPath $SdkRoot)) { throw "SDK root not found: $SdkRoot" }
 if (-not (Test-Path -LiteralPath $appTarget)) { throw "SDK app target not found: $appTarget" }
 
-# Copy the managed application files without deleting SDK-only notes, archived
-# experiments or local hardware diagnostics. The Buildroot install whitelist,
-# not filesystem mirroring, is responsible for keeping old models out of rootfs.
-robocopy $appSource $appTarget /E /XD .git __pycache__ /XF *.pyc | Out-Host
+$resolvedSdk = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $SdkRoot).Path)
+$resolvedTarget = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $appTarget).Path)
+if (-not $resolvedTarget.StartsWith(
+        $resolvedSdk + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw "SDK app target escaped SDK root: $resolvedTarget"
+}
+
+# This directory is fully owned by the repository. Mirroring removes stale
+# models, archived experiments and obsolete documentation before Buildroot
+# packages the application, while leaving every other SDK directory intact.
+robocopy $appSource $resolvedTarget /MIR /XD .git __pycache__ /XF *.pyc | Out-Host
 if ($LASTEXITCODE -gt 7) { throw "robocopy app sync failed: $LASTEXITCODE" }
 
 Copy-Item -LiteralPath $packageSource -Destination $packageTarget -Force
